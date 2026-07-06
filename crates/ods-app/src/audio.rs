@@ -2,8 +2,10 @@
 //! lines of DSP, generated at startup. Degrades to silence when no audio
 //! device exists (CI, cloud sessions).
 
+use std::sync::Arc;
+
 use rodio::buffer::SamplesBuffer;
-use rodio::{OutputStream, OutputStreamHandle};
+use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
 
 const RATE: u32 = 22_050;
 
@@ -14,12 +16,56 @@ pub enum Sound {
     Death,
     Dread,
     Click,
+    Victory,
+    Defeat,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MusicTrack {
+    /// The geoscape drone: the world holding its breath.
+    Vigil,
+    /// The battle pulse: sparse, low, patient.
+    Warfront,
+}
+
+/// An endlessly cycling sample loop.
+struct LoopSource {
+    data: Arc<Vec<f32>>,
+    pos: usize,
+}
+
+impl Iterator for LoopSource {
+    type Item = f32;
+    fn next(&mut self) -> Option<f32> {
+        let s = self.data[self.pos];
+        self.pos = (self.pos + 1) % self.data.len();
+        Some(s)
+    }
+}
+
+impl Source for LoopSource {
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+    fn channels(&self) -> u16 {
+        1
+    }
+    fn sample_rate(&self) -> u32 {
+        RATE
+    }
+    fn total_duration(&self) -> Option<std::time::Duration> {
+        None
+    }
 }
 
 pub struct Audio {
     _stream: OutputStream,
     handle: OutputStreamHandle,
     banks: Vec<(Sound, Vec<f32>)>,
+    vigil: Arc<Vec<f32>>,
+    warfront: Arc<Vec<f32>>,
+    music_sink: Option<Sink>,
+    playing: Option<MusicTrack>,
 }
 
 impl Audio {
@@ -31,8 +77,40 @@ impl Audio {
             (Sound::Death, synth_death()),
             (Sound::Dread, synth_dread()),
             (Sound::Click, synth_click()),
+            (Sound::Victory, synth_sting(true)),
+            (Sound::Defeat, synth_sting(false)),
         ];
-        Some(Self { _stream: stream, handle, banks })
+        Some(Self {
+            _stream: stream,
+            handle,
+            banks,
+            vigil: Arc::new(synth_vigil()),
+            warfront: Arc::new(synth_warfront()),
+            music_sink: None,
+            playing: None,
+        })
+    }
+
+    /// Switch the underscore of the world. None silences it.
+    pub fn music(&mut self, track: Option<MusicTrack>) {
+        if self.playing == track {
+            return;
+        }
+        if let Some(sink) = self.music_sink.take() {
+            sink.stop();
+        }
+        self.playing = track;
+        if let Some(track) = track {
+            let data = match track {
+                MusicTrack::Vigil => self.vigil.clone(),
+                MusicTrack::Warfront => self.warfront.clone(),
+            };
+            if let Ok(sink) = Sink::try_new(&self.handle) {
+                sink.set_volume(0.5);
+                sink.append(LoopSource { data, pos: 0 });
+                self.music_sink = Some(sink);
+            }
+        }
     }
 
     pub fn play(&self, sound: Sound) {
@@ -97,6 +175,54 @@ fn synth_dread() -> Vec<f32> {
             let t = i as f32 / RATE as f32;
             let warble = 90.0 + (t * 7.0 * std::f32::consts::TAU).sin() * 25.0;
             (t * warble * std::f32::consts::TAU).sin() * env(i) * 0.3
+        })
+        .collect()
+}
+
+fn synth_sting(victory: bool) -> Vec<f32> {
+    let len = (RATE as f32 * 1.4) as usize;
+    let env = envelope(len, 0.05, 1.6);
+    let steps: [f32; 3] = if victory { [220.0, 277.2, 329.6] } else { [220.0, 207.7, 164.8] };
+    (0..len)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            let f = steps[((t * 2.5) as usize).min(2)];
+            ((t * f * std::f32::consts::TAU).sin() + (t * f * 0.5 * std::f32::consts::TAU).sin() * 0.4)
+                * env(i)
+                * 0.3
+        })
+        .collect()
+}
+
+/// Eight seconds of low detuned drone: the geoscape holding its breath.
+fn synth_vigil() -> Vec<f32> {
+    let len = RATE as usize * 8;
+    (0..len)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            let swell = 0.55 + 0.45 * (t / 8.0 * std::f32::consts::TAU).sin();
+            let a = (t * 55.0 * std::f32::consts::TAU).sin();
+            let b = (t * 55.7 * std::f32::consts::TAU).sin();
+            let c = (t * 82.4 * std::f32::consts::TAU).sin() * 0.5;
+            (a + b + c) * 0.09 * swell
+        })
+        .collect()
+}
+
+/// Six seconds of sparse pulse for the battlefield.
+fn synth_warfront() -> Vec<f32> {
+    let len = RATE as usize * 6;
+    (0..len)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            let beat = t % 1.5;
+            let pulse = if beat < 0.18 {
+                (beat / 0.18 * std::f32::consts::PI).sin() * (t * 70.0 * std::f32::consts::TAU).sin()
+            } else {
+                0.0
+            };
+            let bed = (t * 41.2 * std::f32::consts::TAU).sin() * 0.05;
+            pulse * 0.22 + bed
         })
         .collect()
 }

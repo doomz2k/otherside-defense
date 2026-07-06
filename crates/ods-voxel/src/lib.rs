@@ -10,5 +10,5 @@ mod mesh;
 mod world;
 
 pub use chunk::{CHUNK_SIZE, Chunk, Voxel};
-pub use mesh::{MeshData, mesh_chunk};
+pub use mesh::{MeshData, mesh_chunk, mesh_chunk_capped};
 pub use world::{RayHit, VoxelWorld};

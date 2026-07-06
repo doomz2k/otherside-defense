@@ -252,6 +252,43 @@ impl Battle {
         self.xp[id.0 as usize]
     }
 
+    fn blocked_for(&self, id: UnitId) -> HashSet<IVec3> {
+        self.units
+            .iter()
+            .filter(|u| u.is_active() && u.id != id)
+            .map(|u| u.tile)
+            .collect()
+    }
+
+    /// UI helper: the path a Move order would take, and its full TU cost.
+    pub fn preview_path(&self, id: UnitId, to: IVec3) -> Option<(Vec<IVec3>, i32)> {
+        let unit = self.unit(id);
+        let path = self.tiles.path(unit.tile, to, &self.blocked_for(id))?;
+        let mult = unit.move_cost_mult();
+        let mut cost = 0;
+        let mut here = unit.tile;
+        for &next in &path {
+            cost += crate::tiles::step_cost(here, next) * mult;
+            here = next;
+        }
+        Some((path, cost))
+    }
+
+    /// UI helper: everywhere this unit could stop this turn (tile, cost).
+    pub fn reachable(&self, id: UnitId) -> Vec<(IVec3, i32)> {
+        let unit = self.unit(id);
+        let budget = if unit.reserve_snap {
+            unit.tu - unit.fire_cost(FireMode::Snap).unwrap_or(0)
+        } else {
+            unit.tu
+        };
+        if budget <= 0 {
+            return Vec::new();
+        }
+        self.tiles
+            .reachable(unit.tile, budget, unit.move_cost_mult(), &self.blocked_for(id))
+    }
+
     /// Register the destructible objective (voxel-space AABB, `[min, max)`).
     pub fn set_objective(&mut self, min: IVec3, max: IVec3) {
         let initial_voxels = self.count_objective_voxels(min, max);
@@ -672,12 +709,7 @@ impl Battle {
     fn do_move(&mut self, id: UnitId, to: IVec3) -> Result<Vec<Event>, ActionError> {
         self.check_actor(id)?;
         let from = self.unit(id).tile;
-        let blocked: HashSet<IVec3> = self
-            .units
-            .iter()
-            .filter(|u| u.is_active() && u.id != id)
-            .map(|u| u.tile)
-            .collect();
+        let blocked = self.blocked_for(id);
         let path = self.tiles.path(from, to, &blocked).ok_or(ActionError::NoPath)?;
 
         // A reserving unit keeps a snap shot's worth of TUs banked.

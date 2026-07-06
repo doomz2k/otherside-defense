@@ -6,8 +6,10 @@ use ods_render::{OrbitCamera, OverlayVertex, Renderer};
 use ods_sim::battle::{Action, Battle, Event};
 use ods_sim::units::{FireMode, Side, UnitId};
 use ods_sim::{TILE_VOXELS, ai, scenario, voxel_to_tile};
-use ods_voxel::mesh_chunk;
+use ods_voxel::{mesh_chunk_capped};
 use winit::keyboard::KeyCode;
+
+use std::collections::HashMap;
 
 use crate::audio::{Audio, Sound};
 use crate::figures;
@@ -40,6 +42,16 @@ pub struct BattleScreen {
     fx: Vec<Fx>,
     shake: f32,
     fx_clock: f32,
+    /// Visual (lerped) feet positions per unit index — the glide.
+    visual: HashMap<u32, Vec3>,
+    /// Tile under the cursor, plus a cached move preview to it.
+    hover: Option<IVec3>,
+    hover_path: Option<(Vec<IVec3>, i32)>,
+    reachable: Vec<(IVec3, i32)>,
+    /// Big announcement text and its remaining seconds.
+    banner: Option<(String, f32)>,
+    /// Cutaway: hide everything above z=16 to see ground-floor interiors.
+    floor_cap: bool,
     pub cursor: (f32, f32),
     pub right_drag: bool,
     pub last_cursor: (f32, f32),
@@ -60,6 +72,12 @@ impl BattleScreen {
             fx: Vec::new(),
             shake: 0.0,
             fx_clock: 0.0,
+            visual: HashMap::new(),
+            hover: None,
+            hover_path: None,
+            reachable: Vec::new(),
+            banner: Some(("THE SQUAD DEPLOYS".to_string(), 1.6)),
+            floor_cap: false,
             cursor: (0.0, 0.0),
             right_drag: false,
             last_cursor: (0.0, 0.0),
@@ -189,6 +207,10 @@ impl BattleScreen {
                 self.refresh_scene(renderer);
             }
             KeyCode::Space | KeyCode::Enter => self.end_turn(renderer, audio),
+            KeyCode::KeyF => {
+                self.floor_cap = !self.floor_cap;
+                self.remesh_all(renderer);
+            }
             KeyCode::KeyW => self.camera.pan(0.0, 12.0),
             KeyCode::KeyS => self.camera.pan(0.0, -12.0),
             KeyCode::KeyA => self.camera.pan(-12.0, 0.0),
@@ -270,7 +292,69 @@ impl BattleScreen {
                     ui.colored_label(egui::Color32::ORANGE, "CHARGE ARMED — click a tile");
                 }
             });
+            // The intelligence line: what the cursor is worth.
+            ui.horizontal_wrapped(|ui| {
+                match (self.selected, self.hover) {
+                    (Some(id), Some(tile)) => {
+                        if let Some(enemy) = self.battle.unit_at(tile).filter(|&e| {
+                            self.battle.unit(e).side == Side::Demons
+                        }) {
+                            let u = self.battle.unit(id);
+                            let seen = self.battle.can_see(id, enemy);
+                            let mut line = format!("Target: {}", self.battle.unit(enemy).name);
+                            for (label, mode) in
+                                [("snap", FireMode::Snap), ("aimed", FireMode::Aimed), ("auto", FireMode::Auto)]
+                            {
+                                if let (Some(chance), Some(cost)) =
+                                    (u.hit_chance(mode), u.fire_cost(mode))
+                                {
+                                    line.push_str(&format!("  {label} {chance}% ({cost}TU)"));
+                                }
+                            }
+                            if !seen {
+                                line.push_str("  [NO LINE OF SIGHT]");
+                            }
+                            ui.colored_label(egui::Color32::LIGHT_RED, line);
+                        } else if let Some((_, cost)) = &self.hover_path {
+                            let u = self.battle.unit(id);
+                            let ok = *cost <= u.tu;
+                            ui.colored_label(
+                                if ok { egui::Color32::LIGHT_GREEN } else { egui::Color32::GRAY },
+                                format!("Move: {cost} TU of {}", u.tu),
+                            );
+                        }
+                    }
+                    _ => {
+                        ui.weak("hover a tile for move costs; hover a demon for hit odds");
+                    }
+                }
+                ui.separator();
+                ui.weak("[F] floor cutaway  [O] door  [V] smoke  [B] bind  [K] kneel");
+            });
         });
+
+        // The war-room table map.
+        egui::Window::new("Field map")
+            .anchor(egui::Align2::RIGHT_TOP, [-8.0, 64.0])
+            .collapsible(true)
+            .resizable(false)
+            .show(ctx, |ui| {
+                self.minimap(ui);
+            });
+
+        if let Some((text, ttl)) = &self.banner {
+            let alpha = (ttl.min(0.6) / 0.6 * 255.0) as u8;
+            egui::Area::new(egui::Id::new("banner"))
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 120.0])
+                .show(ctx, |ui| {
+                    ui.label(
+                        egui::RichText::new(text)
+                            .size(30.0)
+                            .strong()
+                            .color(egui::Color32::from_rgba_unmultiplied(255, 235, 200, alpha)),
+                    );
+                });
+        }
 
         egui::TopBottomPanel::bottom("battle-log")
             .default_height(110.0)
@@ -366,6 +450,21 @@ impl BattleScreen {
             }
         };
         match event {
+            Event::TurnStarted { side, .. } => {
+                let text = match side {
+                    Side::Order => "THE ORDER MOVES",
+                    Side::Demons => "THE OTHERSIDE STIRS",
+                };
+                self.banner = Some((text.to_string(), 1.1));
+            }
+            Event::BattleOver { winner } => {
+                let (text, sound) = match winner {
+                    Side::Order => ("THE FIELD IS OURS", Sound::Victory),
+                    Side::Demons => ("THE LINE BREAKS", Sound::Defeat),
+                };
+                self.banner = Some((text.to_string(), 3.0));
+                play(sound);
+            }
             Event::Fired { unit, target, .. } => {
                 let side = self.battle.unit(*unit).side;
                 let color = if side == Side::Order {
@@ -437,8 +536,62 @@ impl BattleScreen {
         }
     }
 
+    /// Per-frame upkeep: hover intelligence, gliding figures, banner, fx.
+    pub fn update_frame(&mut self, dt: f32, renderer: &mut Renderer, width: f32, height: f32) {
+        // Hover: what tile is under the cursor, and what would a move cost?
+        let (origin, dir) = self.camera.screen_ray(self.cursor.0, self.cursor.1, width, height);
+        let hover = self.battle.world.raycast(origin, dir, 4000.0).map(|hit| {
+            let open = hit.position + hit.normal.as_vec3() * 0.01;
+            voxel_to_tile(open.floor().as_ivec3())
+        });
+        if hover != self.hover {
+            self.hover = hover;
+            self.hover_path = match (self.selected, hover) {
+                (Some(id), Some(tile))
+                    if self.battle.unit(id).is_active()
+                        && self.battle.unit_at(tile).is_none() =>
+                {
+                    self.battle.preview_path(id, tile)
+                }
+                _ => None,
+            };
+            self.refresh_scene(renderer);
+        }
+
+        // The glide: visual positions chase the sim tiles.
+        let mut moved = false;
+        for u in &self.battle.units {
+            let target = (u.tile * TILE_VOXELS).as_vec3()
+                + Vec3::new(8.0, 8.0, ods_sim::scenario::GROUND_TOP as f32);
+            let entry = self.visual.entry(u.id.0).or_insert(target);
+            let delta = target - *entry;
+            if delta.length_squared() > 0.05 {
+                *entry += delta * (dt * 9.0).min(1.0);
+                moved = true;
+            } else if *entry != target {
+                *entry = target;
+                moved = true;
+            }
+        }
+        if moved {
+            let visible = self.battle.visible_tiles(Side::Order);
+            let (fig_verts, fig_indices) =
+                figures::build_figures(&self.battle, &visible, &self.visual);
+            renderer.set_figures(&fig_verts, &fig_indices);
+        }
+
+        if let Some((_, ttl)) = &mut self.banner {
+            *ttl -= dt;
+            if *ttl <= 0.0 {
+                self.banner = None;
+            }
+        }
+
+        self.update_fx(dt, renderer);
+    }
+
     /// Advance effect ages and camera shake; rebuild the fx mesh.
-    pub fn update_fx(&mut self, dt: f32, renderer: &mut Renderer) {
+    fn update_fx(&mut self, dt: f32, renderer: &mut Renderer) {
         self.fx_clock += dt;
         self.shake *= (-6.0 * dt).exp();
         if self.shake < 0.05 {
@@ -458,12 +611,16 @@ impl BattleScreen {
             color[3] *= fade;
             match fx.kind {
                 FxKind::Tracer => {
+                    // A bolt in flight: a short bright segment racing along
+                    // the line of fire.
+                    let head = fx.from.lerp(fx.to, t);
+                    let tail = fx.from.lerp(fx.to, (t - 0.3).max(0.0));
                     let dir = fx.to - fx.from;
                     let perp = dir.cross(Vec3::Z).normalize_or(Vec3::X) * 0.5;
                     push_quad(
                         &mut verts,
                         &mut indices,
-                        [fx.from - perp, fx.from + perp, fx.to + perp, fx.to - perp],
+                        [tail - perp, tail + perp, head + perp, head - perp],
                         color,
                     );
                 }
@@ -493,6 +650,80 @@ impl BattleScreen {
         cam.view_proj(aspect)
     }
 
+    fn minimap(&mut self, ui: &mut egui::Ui) {
+        let (min, max) = self.battle.tiles.bounds();
+        let size = max - min;
+        let px = 6.0f32;
+        let (rect, _resp) = ui.allocate_exact_size(
+            egui::vec2(size.x as f32 * px, size.y as f32 * px),
+            egui::Sense::hover(),
+        );
+        let paint = ui.painter_at(rect);
+        let visible = self.battle.visible_tiles(Side::Order);
+        for y in min.y..max.y {
+            for x in min.x..max.x {
+                let tile = IVec3::new(x, y, 0);
+                let mut color = if self.battle.tiles.is_walkable(tile) {
+                    egui::Color32::from_gray(60)
+                } else {
+                    egui::Color32::from_gray(25)
+                };
+                if self.battle.tiles.is_walkable(IVec3::new(x, y, 1)) {
+                    color = egui::Color32::from_gray(90); // upper floor
+                }
+                if !visible.contains(&tile) {
+                    color = color.linear_multiply(0.4);
+                }
+                for (ct, kind, _) in &self.battle.clouds {
+                    if ct.x == x && ct.y == y {
+                        color = match kind {
+                            ods_sim::battle::CloudKind::Fire => egui::Color32::from_rgb(220, 110, 30),
+                            ods_sim::battle::CloudKind::Smoke => egui::Color32::from_gray(140),
+                        };
+                    }
+                }
+                let p = egui::pos2(
+                    rect.min.x + (x - min.x) as f32 * px,
+                    // North up: higher y draws higher.
+                    rect.max.y - (y - min.y + 1) as f32 * px,
+                );
+                paint.rect_filled(egui::Rect::from_min_size(p, egui::vec2(px, px)), 0.0, color);
+            }
+        }
+        if let Some(obj) = &self.battle.objective {
+            let t0 = ods_sim::voxel_to_tile(obj.min);
+            let p = egui::pos2(
+                rect.min.x + (t0.x - min.x) as f32 * px,
+                rect.max.y - (t0.y - min.y + 1) as f32 * px,
+            );
+            paint.rect_filled(
+                egui::Rect::from_min_size(p, egui::vec2(px * 1.5, px * 2.0)),
+                0.0,
+                egui::Color32::GOLD,
+            );
+        }
+        for u in &self.battle.units {
+            if !u.alive {
+                continue;
+            }
+            if u.side == Side::Demons && !visible.contains(&u.tile) {
+                continue;
+            }
+            let color = if u.civilian {
+                egui::Color32::YELLOW
+            } else if u.side == Side::Order {
+                if u.possessed > 0 { egui::Color32::from_rgb(180, 60, 220) } else { egui::Color32::from_rgb(80, 140, 255) }
+            } else {
+                egui::Color32::from_rgb(230, 60, 40)
+            };
+            let p = egui::pos2(
+                rect.min.x + (u.tile.x - min.x) as f32 * px + px / 2.0,
+                rect.max.y - (u.tile.y - min.y) as f32 * px - px / 2.0,
+            );
+            paint.circle_filled(p, px * 0.45, color);
+        }
+    }
+
     fn select_next_soldier(&mut self) {
         let soldiers: Vec<UnitId> = self.battle.living(Side::Order).map(|u| u.id).collect();
         if soldiers.is_empty() {
@@ -510,18 +741,39 @@ impl BattleScreen {
         };
     }
 
+    fn cap(&self) -> Option<i32> {
+        self.floor_cap.then_some(16)
+    }
+
     fn refresh_chunks(&mut self, renderer: &mut Renderer) {
+        let cap = self.cap();
         for coord in self.battle.world.take_dirty_chunks() {
-            let mesh = mesh_chunk(&self.battle.world, coord);
+            let mesh = mesh_chunk_capped(&self.battle.world, coord, cap);
             renderer.upsert_chunk(coord, &mesh);
         }
+    }
+
+    /// Rebuild every chunk (floor-slice toggles change the whole view).
+    fn remesh_all(&mut self, renderer: &mut Renderer) {
+        let cap = self.cap();
+        for coord in self.battle.world.chunk_coords() {
+            let mesh = mesh_chunk_capped(&self.battle.world, coord, cap);
+            renderer.upsert_chunk(coord, &mesh);
+        }
+        self.battle.world.take_dirty_chunks();
     }
 
     fn refresh_scene(&mut self, renderer: &mut Renderer) {
         let visible = self.battle.visible_tiles(Side::Order);
 
+        self.reachable = match self.selected {
+            Some(id) if self.battle.unit(id).is_active() => self.battle.reachable(id),
+            _ => Vec::new(),
+        };
+
         // Body-part voxel figures for every visible unit.
-        let (fig_verts, fig_indices) = figures::build_figures(&self.battle, &visible);
+        let (fig_verts, fig_indices) =
+            figures::build_figures(&self.battle, &visible, &self.visual);
         renderer.set_figures(&fig_verts, &fig_indices);
 
         let mut verts: Vec<OverlayVertex> = Vec::new();
@@ -535,6 +787,15 @@ impl BattleScreen {
                         push_tile_quad(&mut verts, &mut indices, tile, [0.0, 0.0, 0.02, 0.55]);
                     }
                 }
+            }
+        }
+        // Where the selected soldier could stand this turn.
+        for (tile, _) in &self.reachable {
+            push_tile_quad(&mut verts, &mut indices, *tile, [0.25, 0.8, 0.4, 0.10]);
+        }
+        if let Some((path, _)) = &self.hover_path {
+            for tile in path {
+                push_tile_quad(&mut verts, &mut indices, *tile, [0.3, 0.9, 1.0, 0.30]);
             }
         }
         for (tile, kind, _) in &self.battle.clouds {

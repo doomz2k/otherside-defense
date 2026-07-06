@@ -189,6 +189,61 @@ impl TileMap {
     }
 }
 
+impl TileMap {
+    /// Every tile reachable within `budget` TU (Dijkstra), with its cost.
+    /// `mult` scales step costs (crippled legs). Excludes the start tile.
+    pub fn reachable(
+        &self,
+        from: IVec3,
+        budget: i32,
+        mult: i32,
+        blocked: &HashSet<IVec3>,
+    ) -> Vec<(IVec3, i32)> {
+        let mut best: HashMap<IVec3, i32> = HashMap::new();
+        let mut heap: BinaryHeap<Reverse<(i32, i32, i32, i32)>> = BinaryHeap::new();
+        best.insert(from, 0);
+        heap.push(Reverse((0, from.x, from.y, from.z)));
+        while let Some(Reverse((cost, x, y, z))) = heap.pop() {
+            let cur = IVec3::new(x, y, z);
+            if best.get(&cur).is_some_and(|&b| cost > b) {
+                continue;
+            }
+            for dz in -1i32..=1 {
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        let next = cur + IVec3::new(dx, dy, dz);
+                        if !self.is_walkable(next) || blocked.contains(&next) {
+                            continue;
+                        }
+                        if dz != 0 && !(self.is_ramp(cur) || self.is_ramp(next)) {
+                            continue;
+                        }
+                        if dx != 0 && dy != 0 && dz == 0 {
+                            let a = cur + IVec3::new(dx, 0, 0);
+                            let b = cur + IVec3::new(0, dy, 0);
+                            if !self.is_walkable(a) || !self.is_walkable(b) {
+                                continue;
+                            }
+                        }
+                        let c = cost + step_cost(cur, next) * mult;
+                        if c <= budget && best.get(&next).is_none_or(|&old| c < old) {
+                            best.insert(next, c);
+                            heap.push(Reverse((c, next.x, next.y, next.z)));
+                        }
+                    }
+                }
+            }
+        }
+        best.remove(&from);
+        let mut out: Vec<(IVec3, i32)> = best.into_iter().collect();
+        out.sort_unstable_by_key(|(t, _)| (t.x, t.y, t.z));
+        out
+    }
+}
+
 /// Extra TU for hauling yourself up or down a level.
 pub const CLIMB_COST: i32 = 4;
 

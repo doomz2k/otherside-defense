@@ -168,10 +168,12 @@ pub fn blueprint(species: Species) -> &'static [PartBox] {
     }
 }
 
-/// Build the mesh for every visible unit on the field.
+/// Build the mesh for every visible unit on the field. `visual` overrides
+/// feet positions for gliding movement (missing entries snap to the tile).
 pub fn build_figures(
     battle: &Battle,
     visible: &std::collections::HashSet<IVec3>,
+    visual: &std::collections::HashMap<u32, Vec3>,
 ) -> (Vec<LitVertex>, Vec<u32>) {
     use ods_sim::units::Side;
 
@@ -184,14 +186,21 @@ pub fn build_figures(
         if u.side == Side::Demons && !visible.contains(&u.tile) {
             continue; // hidden in the fog
         }
-        push_unit(&mut vertices, &mut indices, u);
+        let feet = visual.get(&u.id.0).copied();
+        push_unit(&mut vertices, &mut indices, u, feet);
     }
     (vertices, indices)
 }
 
-fn push_unit(vertices: &mut Vec<LitVertex>, indices: &mut Vec<u32>, unit: &Unit) {
-    let feet = (unit.tile * TILE_VOXELS).as_vec3()
-        + Vec3::new(8.0, 8.0, GROUND_TOP as f32);
+fn push_unit(
+    vertices: &mut Vec<LitVertex>,
+    indices: &mut Vec<u32>,
+    unit: &Unit,
+    feet_override: Option<Vec3>,
+) {
+    let feet = feet_override.unwrap_or_else(|| {
+        (unit.tile * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, GROUND_TOP as f32)
+    });
 
     // Pose: kneeling compresses; the subdued lie in a heap.
     let z_scale = if !unit.conscious {

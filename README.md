@@ -38,12 +38,15 @@ and pathing.
 
 | Input | Action |
 |---|---|
+| Hover | move cost preview, reachable tiles, hit odds vs demons |
 | Left click soldier / ground / demon | select / move / fire |
 | `1` / `2` / `3` | snap / aimed / auto fire mode |
 | `G` then click | throw a hellfire charge (arcs over walls) |
 | `B` | bind: stun an adjacent demon with the rod (captures!) |
 | `K` | kneel (+15% accuracy until you move) |
 | `H` | field-dress the selected soldier (staunch bleeding) |
+| `V` / `O` | pop smoke ahead / open an adjacent door |
+| `F` | floor cutaway (see inside ground-floor interiors) |
 | Tab | next soldier |
 | Space or Enter | end turn (demons play) |
 | Right-drag / scroll / WASD | orbit / zoom / pan camera |

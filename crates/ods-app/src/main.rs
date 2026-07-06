@@ -286,8 +286,12 @@ impl Core {
 
         match self.screen {
             Screen::Battle => {
+                if let Some(a) = self.audio.as_mut() {
+                    a.music(Some(audio::MusicTrack::Warfront));
+                }
                 if let Some(b) = self.battle.as_mut() {
-                    b.update_fx(dt, &mut self.renderer);
+                    let (w, h) = self.renderer.size();
+                    b.update_frame(dt, &mut self.renderer, w, h);
                     let vp = b.camera_vp(self.renderer.aspect());
                     // Night fights are lit low and flat.
                     let sun = if b.battle.vision_tiles < 14 {
@@ -299,6 +303,9 @@ impl Core {
                 }
             }
             Screen::Geoscape => {
+                if let Some(a) = self.audio.as_mut() {
+                    a.music(Some(audio::MusicTrack::Vigil));
+                }
                 // The world turns on its own until the player grabs it.
                 if !self.geo_drag {
                     self.geo_camera.yaw += dt * 0.08;
@@ -324,7 +331,11 @@ impl Core {
                 let vp = self.geo_camera.view_proj(self.renderer.aspect());
                 self.renderer.set_camera(vp, sun);
             }
-            Screen::Menu => {}
+            Screen::Menu => {
+                if let Some(a) = self.audio.as_mut() {
+                    a.music(Some(audio::MusicTrack::Vigil));
+                }
+            }
         }
 
         if let Err(e) = self.renderer.render(Some(UiFrame {

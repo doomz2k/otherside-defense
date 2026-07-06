@@ -71,6 +71,12 @@ impl MeshData {
 /// contains its solid voxel, so meshing two adjacent chunks never emits the
 /// same face twice.
 pub fn mesh_chunk(world: &VoxelWorld, chunk: IVec3) -> MeshData {
+    mesh_chunk_capped(world, chunk, None)
+}
+
+/// Like [`mesh_chunk`], but treats every voxel at world-z >= `cap` as empty —
+/// the renderer's floor-cutaway view.
+pub fn mesh_chunk_capped(world: &VoxelWorld, chunk: IVec3, cap: Option<i32>) -> MeshData {
     let origin = chunk * CHUNK_SIZE;
     let n = CHUNK_SIZE as usize;
     let mut mesh = MeshData::default();
@@ -95,8 +101,15 @@ pub fn mesh_chunk(world: &VoxelWorld, chunk: IVec3) -> MeshData {
                     let mut pb = pa;
                     pb[d] = slice;
 
-                    let a = world.voxel(origin + pa);
-                    let b = world.voxel(origin + pb);
+                    let sample = |p: IVec3| {
+                        let v = world.voxel(p);
+                        match cap {
+                            Some(cap) if p.z >= cap => crate::chunk::Voxel::EMPTY,
+                            _ => v,
+                        }
+                    };
+                    let a = sample(origin + pa);
+                    let b = sample(origin + pb);
                     mask[(j * CHUNK_SIZE + i) as usize] = match (a.is_solid(), b.is_solid()) {
                         // Front face (+d) of voxel `a` — only if `a` is ours.
                         (true, false) if slice > 0 => Some((a.0, true)),
