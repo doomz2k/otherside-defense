@@ -147,6 +147,32 @@ impl Chapterhouse {
         5 * self.count_active(Facility::Library)
     }
 
+    /// Grid coordinates of every built (or building) facility cell — the
+    /// floor plan a Reckoning is fought in.
+    pub fn occupied_cells(&self) -> Vec<(usize, usize)> {
+        let mut cells = Vec::new();
+        for (y, row) in self.grid.iter().enumerate() {
+            for (x, slot) in row.iter().enumerate() {
+                if slot.is_some() {
+                    cells.push((x, y));
+                }
+            }
+        }
+        cells
+    }
+
+    /// Where demons breach: the gatehouse cell.
+    pub fn gate(&self) -> (usize, usize) {
+        for (y, row) in self.grid.iter().enumerate() {
+            for (x, slot) in row.iter().enumerate() {
+                if slot.as_ref().is_some_and(|s| s.facility == Facility::Gatehouse) {
+                    return (x, y);
+                }
+            }
+        }
+        (2, 2) // unreachable in practice: every chapterhouse is founded with one
+    }
+
     pub fn maintenance(&self) -> i64 {
         self.grid
             .iter()

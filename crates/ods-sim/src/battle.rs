@@ -83,6 +83,17 @@ fn cheb(a: IVec3, b: IVec3) -> i32 {
     d.x.max(d.y).max(d.z)
 }
 
+/// What a unit did in this battle — the raw material of learn-by-doing
+/// stat growth (applied by the campaign layer, not here).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Experience {
+    pub shots_hit: u32,
+    pub reaction_shots: u32,
+    pub kills: u32,
+    /// Times the unit broke (panic or berserk) and lived through it.
+    pub dread_survived: u32,
+}
+
 pub struct Battle {
     pub world: VoxelWorld,
     pub tiles: TileMap,
@@ -90,6 +101,7 @@ pub struct Battle {
     pub side_to_move: Side,
     pub turn: u32,
     pub winner: Option<Side>,
+    xp: Vec<Experience>,
     rng: SimRng,
 }
 
@@ -102,6 +114,7 @@ impl Battle {
         seed: u64,
     ) -> Self {
         let tiles = TileMap::derive(&world, tile_min, tile_size);
+        let xp = vec![Experience::default(); units.len()];
         Self {
             world,
             tiles,
@@ -109,8 +122,13 @@ impl Battle {
             side_to_move: Side::Order,
             turn: 1,
             winner: None,
+            xp,
             rng: SimRng::from_seed(seed),
         }
+    }
+
+    pub fn experience(&self, id: UnitId) -> Experience {
+        self.xp[id.0 as usize]
     }
 
     pub fn unit(&self, id: UnitId) -> &Unit {
@@ -346,11 +364,15 @@ impl Battle {
             }
             let hit = (self.rng.roll(100) as i32) < chance;
             events.push(Event::Fired { unit: shooter, target, mode, reaction, hit });
+            if reaction {
+                self.xp[shooter.0 as usize].reaction_shots += 1;
+            }
 
             if hit {
+                self.xp[shooter.0 as usize].shots_hit += 1;
                 // 0–200% of weapon power, the original's famous swingy roll.
                 let damage = power * self.rng.roll(201) as i32 / 100;
-                self.apply_damage(target, damage, events);
+                self.apply_damage(target, damage, Some(shooter), events);
             } else {
                 self.stray_shot(shooter, target, breach, events);
             }
@@ -377,13 +399,13 @@ impl Battle {
             u.grenades -= 1;
         }
         let mut events = vec![Event::Threw { unit: id, at }];
-        self.explode(at, GRENADE_POWER, &mut events);
+        self.explode(at, GRENADE_POWER, Some(id), &mut events);
         Ok(events)
     }
 
     /// Detonate at a tile: carve the terrain, then damage every unit in the
     /// blast. Units behind cover (no line from the blast center) take half.
-    fn explode(&mut self, at: IVec3, power: i32, events: &mut Vec<Event>) {
+    fn explode(&mut self, at: IVec3, power: i32, source: Option<UnitId>, events: &mut Vec<Event>) {
         let center = (at * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, 8.0);
         let destroyed = self.world.carve_sphere(center, GRENADE_CARVE_RADIUS);
         let r = GRENADE_CARVE_RADIUS.ceil() as i32 + 1;
@@ -409,7 +431,7 @@ impl Battle {
             if !self.los_clear(center, Self::chest(self.unit(victim).tile)) {
                 damage /= 2;
             }
-            self.apply_damage(victim, damage, events);
+            self.apply_damage(victim, damage, source, events);
         }
     }
 
@@ -479,7 +501,13 @@ impl Battle {
         }
     }
 
-    fn apply_damage(&mut self, target: UnitId, damage: i32, events: &mut Vec<Event>) {
+    fn apply_damage(
+        &mut self,
+        target: UnitId,
+        damage: i32,
+        source: Option<UnitId>,
+        events: &mut Vec<Event>,
+    ) {
         {
             let t = self.unit_mut(target);
             t.health -= damage;
@@ -492,6 +520,9 @@ impl Battle {
         });
 
         if self.unit(target).health <= 0 {
+            if let Some(killer) = source {
+                self.xp[killer.0 as usize].kills += 1;
+            }
             self.kill_unit(target, events);
         } else if damage >= 5 {
             // Serious hits can open fatal wounds that bleed each turn.
@@ -566,6 +597,7 @@ impl Battle {
                 let chance = ((50 - morale) * 2).clamp(0, 90) as u32;
                 if self.rng.roll(100) < chance {
                     self.unit_mut(id).morale = (morale + 20).min(100);
+                    self.xp[id.0 as usize].dread_survived += 1;
                     if self.rng.roll(100) < 25 {
                         events.push(Event::Berserked { unit: id });
                         self.go_berserk(id, &mut events);
@@ -823,7 +855,7 @@ mod tests {
         let before = b.unit(UnitId(1)).morale;
         // Execute soldier A via direct damage.
         let mut events = Vec::new();
-        b.apply_damage(UnitId(0), 999, &mut events);
+        b.apply_damage(UnitId(0), 999, None, &mut events);
         assert!(events.iter().any(|e| matches!(e, Event::Died { .. })));
         assert!(
             b.unit(UnitId(1)).morale < before,

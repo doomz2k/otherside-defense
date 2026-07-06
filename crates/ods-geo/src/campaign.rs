@@ -40,11 +40,26 @@ pub struct Soldier {
     /// Days until fit for duty. 0 = ready.
     pub recovery_days: u32,
     pub missions: u32,
+    pub kills: u32,
 }
 
 impl Soldier {
     pub fn is_fit(&self) -> bool {
         self.recovery_days == 0
+    }
+}
+
+/// Learn-by-doing, deterministic: stats grow from what a soldier actually
+/// did, with hard caps. There are no classes — biography is the build.
+fn apply_growth(stats: &mut SoldierStats, xp: ods_sim::battle::Experience) {
+    stats.accuracy = (stats.accuracy + (xp.shots_hit as i32 / 2).min(3)).min(95);
+    stats.reactions = (stats.reactions + (xp.reaction_shots as i32 / 2).min(2)).min(90);
+    stats.bravery = (stats.bravery + 4 * xp.dread_survived as i32).min(90);
+    if xp.shots_hit > 0 {
+        stats.tu = (stats.tu + 1).min(65);
+    }
+    if xp.kills >= 2 {
+        stats.health = (stats.health + 1).min(40);
     }
 }
 
@@ -54,6 +69,8 @@ pub enum CampaignOutcome {
     FundingWithdrawn,
     /// Debt beyond the limit.
     Bankrupt,
+    /// A Reckoning overran the chapterhouse.
+    ChapterhouseFallen,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +83,8 @@ pub enum GeoEvent {
     NestFounded { id: u32, region: Region },
     RegionInfiltrated { region: Region },
     MonthlyReport { month: u32, score: i64, income: i64, expenses: i64, funds: i64 },
+    /// Demons assaulted the chapterhouse and were driven out.
+    ReckoningRepelled { demons_slain: u32, dead: usize },
     CampaignOver { outcome: CampaignOutcome },
 }
 
@@ -81,6 +100,10 @@ pub enum GeoError {
     QuartersFull,
     ResearchBusy,
     AlreadyResearched,
+    /// Not enough salvaged brimstone/hellsteel.
+    NoMaterials,
+    /// A required project is not yet complete.
+    PrerequisiteMissing,
 }
 
 const RECRUIT_NAMES: [&str; 16] = [
@@ -100,9 +123,15 @@ pub struct Campaign {
     pub rifts: Vec<Rift>,
     pub nests: Vec<Nest>,
     pub research: ResearchState,
+    /// Salvage stockpiles from banished incursions.
+    pub brimstone: u32,
+    pub hellsteel: u32,
     pub month_score: i64,
     pub bad_months: u32,
     pub over: Option<CampaignOutcome>,
+    /// Rises with every banishment; at 5+, hell schedules a Reckoning.
+    reckoning_heat: u32,
+    reckoning_day: Option<u32>,
     month_plan: Vec<PlannedRift>,
     region_score: HashMap<Region, i64>,
     rng: SimRng,
@@ -124,9 +153,13 @@ impl Campaign {
             rifts: Vec::new(),
             nests: Vec::new(),
             research: ResearchState::default(),
+            brimstone: 0,
+            hellsteel: 0,
             month_score: 0,
             bad_months: 0,
             over: None,
+            reckoning_heat: 0,
+            reckoning_day: None,
             month_plan: director::plan_month(&mut rng, 1),
             region_score: HashMap::new(),
             rng,
@@ -161,6 +194,7 @@ impl Campaign {
             },
             recovery_days: 0,
             missions: 0,
+            kills: 0,
         }
     }
 
@@ -222,8 +256,42 @@ impl Campaign {
         if self.research.active.is_some() {
             return Err(GeoError::ResearchBusy);
         }
+        if let Some(prereq) = project.prerequisite()
+            && !self.research.is_complete(prereq)
+        {
+            return Err(GeoError::PrerequisiteMissing);
+        }
+        let (brim, steel) = project.materials();
+        if self.brimstone < brim || self.hellsteel < steel {
+            return Err(GeoError::NoMaterials);
+        }
+        self.brimstone -= brim;
+        self.hellsteel -= steel;
         self.research.active = Some((project, project.cost()));
         Ok(())
+    }
+
+    /// Sell salvage to national reliquaries (brimstone 15k, hellsteel 5k each).
+    pub fn sell_brimstone(&mut self, amount: u32) -> Result<i64, GeoError> {
+        self.guard_over()?;
+        if amount > self.brimstone {
+            return Err(GeoError::NoMaterials);
+        }
+        self.brimstone -= amount;
+        let gain = amount as i64 * 15;
+        self.funds += gain;
+        Ok(gain)
+    }
+
+    pub fn sell_hellsteel(&mut self, amount: u32) -> Result<i64, GeoError> {
+        self.guard_over()?;
+        if amount > self.hellsteel {
+            return Err(GeoError::NoMaterials);
+        }
+        self.hellsteel -= amount;
+        let gain = amount as i64 * 5;
+        self.funds += gain;
+        Ok(gain)
     }
 
     /// Send the squad through a detected rift. The battle really happens.
@@ -237,16 +305,30 @@ impl Campaign {
         if !rift.detected {
             return Err(GeoError::NotDetected);
         }
-        let (kind, region) = (rift.kind, rift.region);
-        let report = self.fight(kind.garrison())?;
+        let (kind, region, garrison) = (rift.kind, rift.region, rift.effective_garrison());
+        let report = self.fight(garrison, false)?;
         if report.victory {
             self.rifts.retain(|r| r.id != rift_id);
             self.score(region, kind.banish_score());
+            self.collect_salvage(kind, report.demons_slain);
+            self.reckoning_heat += 1;
         } else {
             // The squad withdraws; the incursion continues, emboldened.
             self.score(region, -5);
         }
         Ok(report)
+    }
+
+    /// What the field teams drag back from a banished incursion.
+    fn collect_salvage(&mut self, kind: RiftKind, demons_slain: u32) {
+        self.hellsteel += demons_slain;
+        self.brimstone += match kind {
+            RiftKind::Scouting => 1,
+            RiftKind::Harvest => 4,
+            RiftKind::Terror => 2,
+            RiftKind::Infiltration => 2,
+            RiftKind::NestBuilding => 3,
+        };
     }
 
     /// Storm an established nest.
@@ -258,17 +340,20 @@ impl Campaign {
             .find(|n| n.id == nest_id)
             .ok_or(GeoError::UnknownNest)?;
         let region = nest.region;
-        let report = self.fight(NEST_GARRISON)?;
+        let report = self.fight(NEST_GARRISON, false)?;
         if report.victory {
             self.nests.retain(|n| n.id != nest_id);
             self.score(region, NEST_RAZE_SCORE);
+            self.brimstone += 6;
+            self.hellsteel += report.demons_slain;
+            self.reckoning_heat += 1;
         } else {
             self.score(region, -5);
         }
         Ok(report)
     }
 
-    fn fight(&mut self, garrison: u32) -> Result<BattleReport, GeoError> {
+    fn fight(&mut self, garrison: u32, defense: bool) -> Result<BattleReport, GeoError> {
         let squad_idx: Vec<usize> = self
             .soldiers
             .iter()
@@ -282,16 +367,30 @@ impl Campaign {
         }
         let squad: Vec<&Soldier> = squad_idx.iter().map(|&i| &self.soldiers[i]).collect();
         let battle_seed = (self.rng.roll(1 << 30) as u64) << 30 | self.rng.roll(1 << 30) as u64;
-        let report = missions::auto_resolve(battle_seed, &squad, garrison, &self.research);
+        let report = if defense {
+            missions::auto_resolve_defense(
+                battle_seed,
+                &squad,
+                garrison,
+                &self.research,
+                &self.base.occupied_cells(),
+                self.base.gate(),
+            )
+        } else {
+            missions::auto_resolve(battle_seed, &squad, garrison, &self.research)
+        };
 
-        // Fold the outcome back into the roster. Dead soldiers are gone;
-        // the wounded convalesce roughly a day per missing hit point.
+        // Fold the outcome back into the roster. Dead soldiers are gone; the
+        // wounded convalesce roughly a day per missing hit point; survivors
+        // grow by what they did out there.
         let infirmary = self.base.count_active(Facility::Infirmary) > 0;
-        for &(squad_pos, health) in &report.survivors {
+        for &(squad_pos, health, xp) in &report.survivors {
             let s = &mut self.soldiers[squad_idx[squad_pos]];
             let missing = (s.stats.health - health).max(0) as u32;
             s.recovery_days += if infirmary { missing / 2 } else { missing };
             s.missions += 1;
+            s.kills += xp.kills;
+            apply_growth(&mut s.stats, xp);
         }
         let mut dead_roster: Vec<usize> = report.dead.iter().map(|&p| squad_idx[p]).collect();
         dead_roster.sort_unstable_by(|a, b| b.cmp(a));
@@ -304,6 +403,28 @@ impl Campaign {
     fn score(&mut self, region: Region, delta: i64) {
         self.month_score += delta;
         *self.region_score.entry(region).or_insert(0) += delta;
+    }
+
+    /// Hell answers success. Fought in the chapterhouse's own floor plan;
+    /// with no fit defenders, the chapterhouse simply falls.
+    fn resolve_reckoning(&mut self, events: &mut Vec<GeoEvent>) {
+        let garrison = (5 + self.month / 2).min(8);
+        match self.fight(garrison, true) {
+            Ok(report) if report.victory => {
+                self.score(self.base.region, 30);
+                events.push(GeoEvent::ReckoningRepelled {
+                    demons_slain: report.demons_slain,
+                    dead: report.dead.len(),
+                });
+            }
+            Ok(_) | Err(GeoError::NoSquadFit) => {
+                self.over = Some(CampaignOutcome::ChapterhouseFallen);
+                events.push(GeoEvent::CampaignOver {
+                    outcome: CampaignOutcome::ChapterhouseFallen,
+                });
+            }
+            Err(_) => {}
+        }
     }
 
     // ------------------------------------------------------------------
@@ -349,6 +470,7 @@ impl Campaign {
                 kind: plan.kind,
                 region: plan.region,
                 days_left: plan.kind.lifetime(),
+                days_open: 0,
                 detected: false,
             });
             self.next_id += 1;
@@ -380,9 +502,19 @@ impl Campaign {
             }
         }
 
-        // Rift missions run their course.
+        // A scheduled Reckoning arrives.
+        if self.reckoning_day == Some(self.day) {
+            self.reckoning_day = None;
+            self.resolve_reckoning(&mut events);
+            if self.over.is_some() {
+                return events;
+            }
+        }
+
+        // Rift missions run their course (and dig in as they age).
         let mut expired = Vec::new();
         for r in &mut self.rifts {
+            r.days_open += 1;
             r.days_left -= 1;
             if r.days_left == 0 {
                 expired.push((r.id, r.kind, r.region));
@@ -474,6 +606,11 @@ impl Campaign {
         self.month_score = 0;
         self.region_score.clear();
         self.month_plan = director::plan_month(&mut self.rng, self.month);
+        // Enough banishments and hell comes looking for the source.
+        if self.reckoning_heat >= 5 {
+            self.reckoning_heat = 0;
+            self.reckoning_day = Some(1 + self.rng.roll(28));
+        }
         events
     }
 }
@@ -485,7 +622,14 @@ mod tests {
     fn detected_rift(c: &mut Campaign, kind: RiftKind, region: Region) -> u32 {
         let id = c.next_id;
         c.next_id += 1;
-        c.rifts.push(Rift { id, kind, region, days_left: kind.lifetime(), detected: true });
+        c.rifts.push(Rift {
+            id,
+            kind,
+            region,
+            days_left: kind.lifetime(),
+            days_open: 0,
+            detected: true,
+        });
         id
     }
 
@@ -569,6 +713,7 @@ mod tests {
             kind: RiftKind::Harvest,
             region: Region::Europe,
             days_left: 30,
+            days_open: 0,
             detected: false,
         });
         let mut detected = false;
@@ -635,6 +780,7 @@ mod tests {
             kind: RiftKind::Infiltration,
             region: Region::Asia,
             days_left: 1,
+            days_open: 0,
             detected: false,
         });
         let events = c.advance_day();
@@ -697,6 +843,116 @@ mod tests {
         assert_eq!(c.over, Some(CampaignOutcome::FundingWithdrawn));
         assert_eq!(c.hire_soldier().err(), Some(GeoError::CampaignOver));
         assert!(c.advance_day().is_empty());
+    }
+
+    #[test]
+    fn fresh_rifts_are_soft_and_stabilized_ones_dig_in() {
+        let r = Rift {
+            id: 0,
+            kind: RiftKind::Terror,
+            region: Region::Asia,
+            days_left: 4,
+            days_open: 0,
+            detected: true,
+        };
+        assert!(!r.is_stabilized());
+        assert_eq!(r.effective_garrison(), RiftKind::Terror.garrison() - 1);
+        let dug_in = Rift { days_open: 2, ..r };
+        assert!(dug_in.is_stabilized());
+        assert_eq!(dug_in.effective_garrison(), RiftKind::Terror.garrison() + 2);
+    }
+
+    #[test]
+    fn victories_bring_salvage_growth_and_heat() {
+        let mut c = Campaign::new(20);
+        let id = detected_rift(&mut c, RiftKind::Harvest, Region::Europe);
+        let stats_before: Vec<SoldierStats> = c.soldiers.iter().map(|s| s.stats).collect();
+
+        let report = c.assault_rift(id).unwrap();
+        if report.victory {
+            assert!(c.hellsteel >= report.demons_slain, "corpses become hellsteel");
+            assert!(c.brimstone >= 4, "harvest rifts carry brimstone");
+            assert_eq!(c.reckoning_heat, 1);
+            // Someone should have learned something (hits happened: demons died).
+            if report.demons_slain > 0 {
+                let grown = c
+                    .soldiers
+                    .iter()
+                    .any(|s| stats_before.iter().all(|b| *b != s.stats));
+                assert!(grown, "victorious squads grow");
+            }
+        }
+        // Caps hold regardless of outcome.
+        for s in &c.soldiers {
+            assert!(s.stats.accuracy <= 95 && s.stats.reactions <= 90);
+        }
+    }
+
+    #[test]
+    fn selling_salvage_pays() {
+        let mut c = Campaign::new(21);
+        c.brimstone = 4;
+        c.hellsteel = 10;
+        let before = c.funds;
+        assert_eq!(c.sell_brimstone(2).unwrap(), 30);
+        assert_eq!(c.sell_hellsteel(10).unwrap(), 50);
+        assert_eq!(c.funds, before + 80);
+        assert_eq!(c.sell_brimstone(99), Err(GeoError::NoMaterials));
+    }
+
+    #[test]
+    fn hellfire_lance_demands_prereq_and_materials() {
+        let mut c = Campaign::new(22);
+        assert_eq!(
+            c.start_research(Project::HellfireLance),
+            Err(GeoError::PrerequisiteMissing)
+        );
+        c.research.completed.insert(Project::BlessedArms);
+        assert_eq!(
+            c.start_research(Project::HellfireLance),
+            Err(GeoError::NoMaterials)
+        );
+        c.brimstone = 10;
+        c.hellsteel = 15;
+        c.start_research(Project::HellfireLance).unwrap();
+        assert_eq!((c.brimstone, c.hellsteel), (0, 0), "materials are consumed");
+    }
+
+    #[test]
+    fn reckonings_hit_home_and_can_end_everything() {
+        // With a full squad the Reckoning resolves one way or the other.
+        let mut c = Campaign::new(23);
+        c.month_plan.clear();
+        c.reckoning_day = Some(c.day);
+        let events = c.advance_day();
+        let fought = events.iter().any(|e| {
+            matches!(
+                e,
+                GeoEvent::ReckoningRepelled { .. }
+                    | GeoEvent::CampaignOver { outcome: CampaignOutcome::ChapterhouseFallen }
+            )
+        });
+        assert!(fought, "the scheduled Reckoning must resolve: {events:?}");
+
+        // With no fit defenders, the chapterhouse falls, full stop.
+        let mut c = Campaign::new(24);
+        c.month_plan.clear();
+        c.soldiers.clear();
+        c.reckoning_day = Some(c.day);
+        let events = c.advance_day();
+        assert_eq!(c.over, Some(CampaignOutcome::ChapterhouseFallen), "{events:?}");
+    }
+
+    #[test]
+    fn heat_schedules_a_reckoning_at_month_end() {
+        let mut c = Campaign::new(25);
+        c.month_plan.clear();
+        c.rifts.clear();
+        c.reckoning_heat = 5;
+        c.day = DAYS_PER_MONTH;
+        c.advance_day();
+        assert!(c.reckoning_day.is_some(), "5 heat means hell answers next month");
+        assert_eq!(c.reckoning_heat, 0);
     }
 
     #[test]

@@ -11,11 +11,18 @@ pub enum Project {
     HellsteelPlate,
     /// Reading the veil's tremors: +15% rift detection everywhere.
     RiftAugury,
+    /// Hell's own fire, bound in a lance: +16 weapon power (supersedes
+    /// Blessed Arms). Requires salvaged materials to even begin.
+    HellfireLance,
 }
 
 impl Project {
-    pub const ALL: [Project; 3] =
-        [Project::BlessedArms, Project::HellsteelPlate, Project::RiftAugury];
+    pub const ALL: [Project; 4] = [
+        Project::BlessedArms,
+        Project::HellsteelPlate,
+        Project::RiftAugury,
+        Project::HellfireLance,
+    ];
 
     /// Total occultist-days required.
     pub fn cost(self) -> u32 {
@@ -23,6 +30,23 @@ impl Project {
             Project::BlessedArms => 120,
             Project::HellsteelPlate => 160,
             Project::RiftAugury => 100,
+            Project::HellfireLance => 200,
+        }
+    }
+
+    /// Salvage consumed when the project begins: (brimstone, hellsteel).
+    pub fn materials(self) -> (u32, u32) {
+        match self {
+            Project::HellfireLance => (10, 15),
+            _ => (0, 0),
+        }
+    }
+
+    /// Must be complete before this project can start.
+    pub fn prerequisite(self) -> Option<Project> {
+        match self {
+            Project::HellfireLance => Some(Project::BlessedArms),
+            _ => None,
         }
     }
 
@@ -31,6 +55,7 @@ impl Project {
             Project::BlessedArms => "Blessed Arms",
             Project::HellsteelPlate => "Hellsteel Plate",
             Project::RiftAugury => "Rift Augury",
+            Project::HellfireLance => "Hellfire Lance",
         }
     }
 }

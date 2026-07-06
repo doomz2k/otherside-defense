@@ -80,7 +80,26 @@ pub struct Rift {
     pub kind: RiftKind,
     pub region: Region,
     pub days_left: u32,
+    /// Days since the rift opened. It stabilizes after two days.
+    pub days_open: u32,
     pub detected: bool,
+}
+
+impl Rift {
+    /// A fresh rift is chaotic and lightly held; a stabilized one has dug in.
+    pub fn is_stabilized(&self) -> bool {
+        self.days_open >= 2
+    }
+
+    /// Garrison actually defending the site right now — the reason to strike
+    /// fast instead of waiting for a convenient day.
+    pub fn effective_garrison(&self) -> u32 {
+        if self.is_stabilized() {
+            self.kind.garrison() + 2
+        } else {
+            self.kind.garrison().saturating_sub(1).max(2)
+        }
+    }
 }
 
 /// A completed NestBuilding mission: bleeds score daily until razed.

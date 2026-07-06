@@ -62,3 +62,13 @@ deaths are permanent, the wounded convalesce, and survivors log missions.
 Chapterhouse facilities build on a 6×6 grid; occultists grind through the
 Forbidden Codex (blessed arms, hellsteel plate, rift augury). Two badly-losing
 months or deep debt ends the campaign — the classic slow defeat is fully in.
+
+Beyond v1: rifts are **soft for their first two days** and dig in afterwards,
+so striking fast matters; victories salvage **brimstone and hellsteel** (sell
+it, or spend it to unlock the Hellfire Lance); soldiers **grow by doing** —
+accuracy from hits, reactions from overwatch, bravery from surviving dread —
+with kills and missions on their permanent record. And every banishment heats
+hell's attention: at 5 heat a **Reckoning** is scheduled, a base-defense
+battle fought on a map generated from your actual chapterhouse floor plan.
+Lose it (or have no fit defenders) and the campaign ends with the
+chapterhouse in ruins.

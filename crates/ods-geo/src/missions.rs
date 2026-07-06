@@ -3,7 +3,8 @@
 //! gets blown open in the tactical sim, that's how the strategic result came
 //! to be.
 
-use ods_sim::units::{Side, Unit};
+use ods_sim::battle::{Battle, Experience};
+use ods_sim::units::{Side, Unit, UnitId};
 use ods_sim::{ai, scenario};
 
 use crate::campaign::Soldier;
@@ -15,26 +16,44 @@ pub struct BattleReport {
     pub turns: u32,
     /// Indexes into the squad passed in, for the fallen.
     pub dead: Vec<usize>,
-    /// (squad index, health remaining) for survivors.
-    pub survivors: Vec<(usize, i32)>,
+    /// (squad index, health remaining, experience) for survivors.
+    pub survivors: Vec<(usize, i32, Experience)>,
     pub demons_slain: u32,
 }
 
 const MAX_AUTO_TURNS: u32 = 40;
 
+/// Resolve a rift-site assault on the standard field map.
 pub fn auto_resolve(
     seed: u64,
     squad: &[&Soldier],
     demon_count: u32,
     research: &ResearchState,
 ) -> BattleReport {
-    let units: Vec<Unit> = squad
-        .iter()
-        .enumerate()
-        .map(|(i, s)| make_unit(i as u32, s, research))
-        .collect();
+    let units = make_units(squad, research);
     let squad_len = units.len();
-    let mut battle = scenario::incursion(seed, units, demon_count);
+    resolve(scenario::incursion(seed, units, demon_count), squad_len)
+}
+
+/// Resolve a Reckoning: demons breaching the chapterhouse itself. The map is
+/// generated from the actual facility layout.
+pub fn auto_resolve_defense(
+    seed: u64,
+    squad: &[&Soldier],
+    demon_count: u32,
+    research: &ResearchState,
+    cells: &[(usize, usize)],
+    gate: (usize, usize),
+) -> BattleReport {
+    let units = make_units(squad, research);
+    let squad_len = units.len();
+    resolve(
+        scenario::base_defense(seed, units, demon_count, cells, gate),
+        squad_len,
+    )
+}
+
+fn resolve(mut battle: Battle, squad_len: usize) -> BattleReport {
     let demons_start = battle.living(Side::Demons).count() as u32;
 
     let mut turns = 0;
@@ -51,7 +70,7 @@ pub fn auto_resolve(
     for i in 0..squad_len {
         let u = &battle.units[i];
         if u.alive {
-            survivors.push((i, u.health));
+            survivors.push((i, u.health, battle.experience(UnitId(i as u32))));
         } else {
             dead.push(i);
         }
@@ -67,6 +86,14 @@ pub fn auto_resolve(
     }
 }
 
+fn make_units(squad: &[&Soldier], research: &ResearchState) -> Vec<Unit> {
+    squad
+        .iter()
+        .enumerate()
+        .map(|(i, s)| make_unit(i as u32, s, research))
+        .collect()
+}
+
 fn make_unit(id: u32, s: &Soldier, research: &ResearchState) -> Unit {
     // Placeholder tile; `scenario::incursion` assigns the real deployment.
     let mut u = Unit::soldier(id, &s.name, glam::IVec3::ZERO);
@@ -80,7 +107,9 @@ fn make_unit(id: u32, s: &Soldier, research: &ResearchState) -> Unit {
         u.health_max += 8;
     }
     u.health = u.health_max;
-    if research.is_complete(Project::BlessedArms) {
+    if research.is_complete(Project::HellfireLance) {
+        u.weapon.power += 16;
+    } else if research.is_complete(Project::BlessedArms) {
         u.weapon.power += 8;
     }
     u

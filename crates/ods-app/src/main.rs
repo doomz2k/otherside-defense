@@ -49,8 +49,12 @@ fn campaign_chronicle(months: u32) -> anyhow::Result<()> {
     use ods_geo::{Campaign, GeoEvent, Project};
 
     let mut c = Campaign::new(1999);
-    let mut research_queue =
-        vec![Project::RiftAugury, Project::BlessedArms, Project::HellsteelPlate];
+    let mut research_queue = vec![
+        Project::RiftAugury,
+        Project::BlessedArms,
+        Project::HellsteelPlate,
+        Project::HellfireLance,
+    ];
 
     println!("== The Order convenes. {} soldiers sworn in. ==", c.soldiers.len());
     for _day in 0..months * 30 {
@@ -150,9 +154,14 @@ fn narrate(c: &ods_geo::Campaign, event: &ods_geo::GeoEvent) {
         E::RegionInfiltrated { region } => {
             println!("{stamp} !!! cultists seize power in {}", region.name());
         }
+        E::ReckoningRepelled { demons_slain, dead } => println!(
+            "{stamp} !!! RECKONING: demons breached the chapterhouse — repelled \
+             ({demons_slain} slain, {dead} defenders lost)"
+        ),
         E::MonthlyReport { month, score, income, expenses, funds } => println!(
             "{stamp} === month {month} report: score {score}, income {income}k, \
-             expenses {expenses}k, treasury {funds}k ==="
+             expenses {expenses}k, treasury {funds}k | salvage: {} brimstone {} hellsteel ===",
+            c.brimstone, c.hellsteel
         ),
         E::CampaignOver { outcome } => println!("{stamp} ### THE ORDER FALLS: {outcome:?} ###"),
     }
