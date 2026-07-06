@@ -160,8 +160,20 @@ fn make_unit(id: u32, s: &Soldier, kit: (u32, u32), research: &ResearchState) ->
         u.health_max += 8;
     }
     u.health = u.health_max;
-    if research.is_complete(Project::HellfireLance) {
-        u.weapon.power += 16;
+    if s.has_lance && research.is_complete(Project::HellfireLance) {
+        // A forged lance replaces the rifle outright.
+        u.weapon = ods_sim::units::Weapon {
+            name: "hellfire lance",
+            power: 46,
+            snap_cost_pct: 30,
+            aimed_cost_pct: 55,
+            snap_acc: 60,
+            aimed_acc: 120,
+            auto: None,
+            breach_radius: 2.6,
+            melee: false,
+            arcing: false,
+        };
     } else if research.is_complete(Project::BlessedArms) {
         u.weapon.power += 8;
     }

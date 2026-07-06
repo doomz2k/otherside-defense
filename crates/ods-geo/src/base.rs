@@ -192,6 +192,13 @@ impl Chapterhouse {
         (2, 2) // unreachable in practice: every chapterhouse is founded with one
     }
 
+    /// Tear a facility out of the grid (Reckoning damage).
+    pub fn demolish(&mut self, x: usize, y: usize) {
+        if x < GRID && y < GRID {
+            self.grid[y][x] = None;
+        }
+    }
+
     pub fn maintenance(&self) -> i64 {
         self.grid
             .iter()

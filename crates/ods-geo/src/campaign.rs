@@ -79,6 +79,15 @@ pub struct Prisoners {
     pub overseers: u32,
 }
 
+/// A funding nation's demand: banish rifts in their region this month.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CouncilRequest {
+    pub region: Region,
+    pub needed: u32,
+    pub done: u32,
+    pub reward: i64,
+}
+
 /// An entry on the memorial wall.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Fallen {
@@ -110,11 +119,20 @@ pub struct Soldier {
     /// Loadout: hellfire charges and dressings carried (drawn from stock).
     pub grenades_loadout: u32,
     pub dressings_loadout: u32,
+    /// Carries a forged Hellfire Lance (from the armoury's lance stock).
+    #[serde(default)]
+    pub has_lance: bool,
+    /// Chapterhouse the soldier is stationed at (index into bases).
+    #[serde(default)]
+    pub home: usize,
+    /// Rift id this soldier is warding (unavailable for squads).
+    #[serde(default)]
+    pub warding: Option<u32>,
 }
 
 impl Soldier {
     pub fn is_fit(&self) -> bool {
-        self.recovery_days == 0
+        self.recovery_days == 0 && self.warding.is_none()
     }
 
     /// Rank grows from deeds; higher ranks steady the squad's nerves.
@@ -179,6 +197,13 @@ pub enum GeoEvent {
     /// Demons assaulted the chapterhouse and were driven out.
     ReckoningRepelled { demons_slain: u32, dead: usize },
     ManufactureComplete { item: ManufactureItem },
+    /// A warding soldier is hurt skirmishing at the rift's edge.
+    WardSkirmish { name: String },
+    /// A facility is wrecked in the fighting of a Reckoning.
+    FacilityWrecked { facility: Facility },
+    RequestIssued { region: Region, needed: u32, reward: i64 },
+    RequestFulfilled { reward: i64 },
+    RequestFailed { region: Region },
     CampaignOver { outcome: CampaignOutcome },
 }
 
@@ -204,6 +229,10 @@ pub enum GeoError {
     WorkshopBusy,
     /// Production requires at least one active Workshop.
     NoWorkshop,
+    /// No forged lances left (or none to return).
+    NoLances,
+    /// That soldier can't take this assignment.
+    BadAssignment,
 }
 
 /// A ground mission the campaign can stage.
@@ -277,6 +306,18 @@ pub struct Campaign {
     /// Breach won: the way to the arch-demon's sanctum stands open.
     #[serde(default)]
     pub sanctum_open: bool,
+    /// Forged Hellfire Lances in the armoury.
+    #[serde(default)]
+    pub lance_stock: u32,
+    /// The council's current demand, if any.
+    #[serde(default)]
+    pub request: Option<CouncilRequest>,
+    /// One save, no second chances.
+    #[serde(default)]
+    pub ironman: bool,
+    /// Facilities wrecked in the most recent Reckoning (for the UI/log).
+    #[serde(default, skip)]
+    pub wrecked: Vec<Facility>,
     /// Rises with every banishment; at 5+, hell schedules a Reckoning.
     reckoning_heat: u32,
     reckoning_day: Option<u32>,
@@ -315,6 +356,10 @@ impl Campaign {
             prisoners: Prisoners::default(),
             memorial: Vec::new(),
             sanctum_open: false,
+            lance_stock: 0,
+            request: None,
+            ironman: false,
+            wrecked: Vec::new(),
             month_score: 0,
             bad_months: 0,
             over: None,
@@ -405,6 +450,9 @@ impl Campaign {
             kills: 0,
             grenades_loadout: 2,
             dressings_loadout: 2,
+            has_lance: false,
+            home: 0,
+            warding: None,
         }
     }
 
@@ -516,6 +564,11 @@ impl Campaign {
         if self.workshop_capacity() == 0 {
             return Err(GeoError::NoWorkshop);
         }
+        if item == ManufactureItem::ForgeLance
+            && !self.research.is_complete(Project::HellfireLance)
+        {
+            return Err(GeoError::PrerequisiteMissing);
+        }
         let (brim, steel) = item.materials();
         if self.brimstone < brim || self.hellsteel < steel {
             return Err(GeoError::NoMaterials);
@@ -578,6 +631,59 @@ impl Campaign {
         Ok(gain)
     }
 
+    /// Post a fit soldier to ward a detected rift: while warded, the rift
+    /// cannot stabilize — but the picket line is a dangerous place.
+    pub fn assign_ward(&mut self, soldier: usize, rift_id: u32) -> Result<(), GeoError> {
+        self.guard_over()?;
+        if !self.rifts.iter().any(|r| r.id == rift_id && r.detected) {
+            return Err(GeoError::UnknownRift);
+        }
+        let s = self.soldiers.get_mut(soldier).ok_or(GeoError::BadAssignment)?;
+        if s.recovery_days > 0 || s.warding.is_some() {
+            return Err(GeoError::BadAssignment);
+        }
+        s.warding = Some(rift_id);
+        Ok(())
+    }
+
+    /// Issue or take back a forged lance.
+    pub fn assign_lance(&mut self, soldier: usize, take: bool) -> Result<(), GeoError> {
+        self.guard_over()?;
+        let s = self.soldiers.get_mut(soldier).ok_or(GeoError::BadAssignment)?;
+        if take {
+            if s.has_lance {
+                return Err(GeoError::BadAssignment);
+            }
+            if self.lance_stock == 0 {
+                return Err(GeoError::NoLances);
+            }
+            self.lance_stock -= 1;
+            s.has_lance = true;
+        } else {
+            if !s.has_lance {
+                return Err(GeoError::NoLances);
+            }
+            s.has_lance = false;
+            self.lance_stock += 1;
+        }
+        Ok(())
+    }
+
+    /// Restation a soldier at another chapterhouse (days in transit).
+    pub fn transfer_soldier(&mut self, soldier: usize, base: usize) -> Result<(), GeoError> {
+        self.guard_over()?;
+        if base >= self.bases.len() {
+            return Err(GeoError::UnknownBase);
+        }
+        let s = self.soldiers.get_mut(soldier).ok_or(GeoError::BadAssignment)?;
+        if s.warding.is_some() || s.home == base {
+            return Err(GeoError::BadAssignment);
+        }
+        s.home = base;
+        s.recovery_days += 4; // the road takes its toll
+        Ok(())
+    }
+
     /// Send the squad through a detected rift, AI-resolved. The battle
     /// really happens; `begin_mission`/`conclude_mission` is the same path
     /// the interactive Battlescape uses.
@@ -622,7 +728,9 @@ impl Campaign {
                 if !rift.detected {
                     return Err(GeoError::NotDetected);
                 }
-                (rift.effective_garrison() + bonus, self.month, false)
+                let distant =
+                    if self.bases.iter().any(|b| b.region == rift.region) { 0 } else { 1 };
+                (rift.effective_garrison() + bonus + distant, self.month, false)
             }
             MissionKind::Nest(id) => {
                 self.nests
@@ -750,6 +858,10 @@ impl Campaign {
                         self.score(region, kind.banish_score());
                         self.collect_salvage(kind, report.demons_slain);
                         self.reckoning_heat += 1;
+                        if let Some(req) = &mut self.request
+                            && req.region == region {
+                                req.done += 1;
+                            }
                     } else {
                         // The squad withdraws; the incursion continues.
                         self.score(region, -5);
@@ -773,6 +885,15 @@ impl Campaign {
             MissionKind::Reckoning => {
                 if report.victory {
                     self.score(self.bases[0].region, 30);
+                    // The halls are held — but the fighting wrecked things.
+                    let cells = self.bases[0].occupied_cells();
+                    for (x, y) in cells {
+                        if let Some((facility, _)) = self.bases[0].facility_at(x, y)
+                            && facility != Facility::Gatehouse && self.rng.roll(100) < 15 {
+                                self.bases[0].demolish(x, y);
+                                self.wrecked.push(facility);
+                            }
+                    }
                 } else {
                     self.over = Some(CampaignOutcome::ChapterhouseFallen);
                 }
@@ -902,6 +1023,7 @@ impl Campaign {
                     ManufactureItem::HellfireCharges => self.grenade_stock += 4,
                     ManufactureItem::FieldDressings => self.dressing_stock += 4,
                     ManufactureItem::TradeArms => self.funds += 45,
+                    ManufactureItem::ForgeLance => self.lance_stock += 1,
                 }
                 events.push(GeoEvent::ManufactureComplete { item: done });
             }
@@ -977,10 +1099,30 @@ impl Campaign {
             }
         }
 
-        // Rift missions run their course (and dig in as they age).
+        // Ward pickets skirmish at the rifts' edges: risk, for time.
+        let warded: Vec<u32> = self.soldiers.iter().filter_map(|s| s.warding).collect();
+        for i in 0..self.soldiers.len() {
+            if let Some(rift_id) = self.soldiers[i].warding {
+                if !self.rifts.iter().any(|r| r.id == rift_id) {
+                    self.soldiers[i].warding = None; // the rift is gone
+                    continue;
+                }
+                if self.rng.roll(100) < 15 {
+                    let s = &mut self.soldiers[i];
+                    s.recovery_days += 4 + self.rng.roll(6);
+                    s.warding = None;
+                    events.push(GeoEvent::WardSkirmish { name: s.name.clone() });
+                }
+            }
+        }
+
+        // Rift missions run their course (and dig in as they age) — unless
+        // a ward picket holds them chaotic.
         let mut expired = Vec::new();
         for r in &mut self.rifts {
-            r.days_open += 1;
+            if !warded.contains(&r.id) {
+                r.days_open += 1;
+            }
             r.days_left -= 1;
             if r.days_left == 0 {
                 expired.push((r.id, r.kind, r.region, r.lat, r.lon));
@@ -1044,6 +1186,18 @@ impl Campaign {
             + self.bases.iter().map(|b| b.maintenance()).sum::<i64>();
         self.funds += income - expenses;
 
+        // Settle the council's demand before the books close.
+        if let Some(req) = self.request.take() {
+            if req.done >= req.needed {
+                self.funds += req.reward;
+                events.push(GeoEvent::RequestFulfilled { reward: req.reward });
+                self.score(req.region, 20);
+            } else {
+                events.push(GeoEvent::RequestFailed { region: req.region });
+                self.score(req.region, -10);
+            }
+        }
+
         events.push(GeoEvent::MonthlyReport {
             month: self.month,
             score: self.month_score,
@@ -1079,6 +1233,12 @@ impl Campaign {
             self.reckoning_heat = 0;
             self.reckoning_day = Some(1 + self.rng.roll(28));
         }
+        // A nation puts its money where its fear is.
+        let region = Region::ALL[self.rng.roll(Region::ALL.len() as u32) as usize];
+        let needed = 1 + self.rng.roll(2);
+        let reward = 150 + self.rng.roll(3) as i64 * 75;
+        self.request = Some(CouncilRequest { region, needed, done: 0, reward });
+        events.push(GeoEvent::RequestIssued { region, needed, reward });
         events
     }
 }
@@ -1654,6 +1814,121 @@ mod tests {
             assert_eq!(fallen.cause, "rift assault");
         } else {
             assert!(c.memorial.is_empty());
+        }
+    }
+
+    #[test]
+    fn ward_pickets_hold_rifts_chaotic() {
+        let mut c = Campaign::new(60);
+        c.month_plan.clear();
+        let id = detected_rift(&mut c, RiftKind::Terror, Region::Europe);
+        // Stretch the rift's life so stabilization is the only question.
+        c.rifts[0].days_left = 20;
+        c.assign_ward(0, id).unwrap();
+        assert!(!c.soldiers[0].is_fit(), "a warding soldier is spoken for");
+        for _ in 0..5 {
+            c.advance_day();
+            if c.soldiers[0].warding.is_none() {
+                break; // skirmish pulled them off the line
+            }
+        }
+        if c.soldiers[0].warding.is_some() {
+            assert!(
+                !c.rifts[0].is_stabilized(),
+                "a warded rift stays chaotic: days_open={}",
+                c.rifts[0].days_open
+            );
+        }
+    }
+
+    #[test]
+    fn lances_are_forged_issued_and_returned() {
+        let mut c = Campaign::new(61);
+        assert_eq!(c.assign_lance(0, true), Err(GeoError::NoLances));
+        assert_eq!(
+            c.start_manufacture(ManufactureItem::ForgeLance),
+            Err(GeoError::NoWorkshop)
+        );
+        c.research.completed.insert(Project::HellfireLance);
+        c.lance_stock = 1;
+        c.assign_lance(0, true).unwrap();
+        assert!(c.soldiers[0].has_lance);
+        assert_eq!(c.lance_stock, 0);
+        assert_eq!(c.assign_lance(1, true), Err(GeoError::NoLances));
+        c.assign_lance(0, false).unwrap();
+        assert_eq!(c.lance_stock, 1);
+    }
+
+    #[test]
+    fn transfers_cost_road_days_and_distance_costs_garrison() {
+        let mut c = Campaign::new(62);
+        c.funds = CHAPTERHOUSE_COST + 500;
+        c.found_chapterhouse(Region::Asia).unwrap();
+        c.transfer_soldier(0, 1).unwrap();
+        assert_eq!(c.soldiers[0].home, 1);
+        assert!(c.soldiers[0].recovery_days > 0, "the road takes its toll");
+
+        // A rift where no chapterhouse stands gets an extra defender.
+        let far = detected_rift(&mut c, RiftKind::Scouting, Region::Oceania);
+        let near = detected_rift(&mut c, RiftKind::Scouting, Region::Europe);
+        let (b_far, t_far) = c.begin_mission(MissionKind::Rift(far)).unwrap();
+        let far_demons = b_far.units.len() - token_len(&t_far);
+        let (b_near, t_near) = c.begin_mission(MissionKind::Rift(near)).unwrap();
+        let near_demons = b_near.units.len() - token_len(&t_near);
+        assert_eq!(far_demons, near_demons + 1, "distance costs a garrison slot");
+    }
+
+    #[test]
+    fn reckonings_scar_the_chapterhouse() {
+        // Repelled Reckonings may wreck facilities; run several seeds and
+        // demand at least one scar shows up somewhere.
+        let mut any_wrecked = false;
+        for seed in 70..90 {
+            let mut c = Campaign::new(seed);
+            c.month_plan.clear();
+            c.reckoning_day = Some(c.day);
+            let events = c.advance_day();
+            let repelled = events
+                .iter()
+                .any(|e| matches!(e, GeoEvent::ReckoningRepelled { .. }));
+            if repelled && !c.wrecked.is_empty() {
+                any_wrecked = true;
+                break;
+            }
+        }
+        assert!(any_wrecked, "20 Reckonings without a single wrecked room is implausible");
+    }
+
+    #[test]
+    fn the_council_demands_and_pays() {
+        let mut c = Campaign::new(63);
+        // Roll the month over to issue a request.
+        c.month_plan.clear();
+        c.rifts.clear();
+        c.day = DAYS_PER_MONTH;
+        let events = c.advance_day();
+        let issued = events.iter().find_map(|e| match e {
+            GeoEvent::RequestIssued { region, needed, reward } => Some((*region, *needed, *reward)),
+            _ => None,
+        });
+        let (region, needed, reward) = issued.expect("a nation always wants something");
+        assert_eq!(c.request.unwrap().region, region);
+
+        // Serve the demand by banishing rifts there (cheat them in).
+        let funds_before = c.funds;
+        for _ in 0..needed {
+            let id = detected_rift(&mut c, RiftKind::Scouting, region);
+            // Assault until victory (retry across the month if repelled).
+            let _ = c.assault_rift(id);
+        }
+        if c.request.is_none_or(|r| r.done >= r.needed) {
+            c.month_plan.clear();
+            c.rifts.clear();
+            c.day = DAYS_PER_MONTH;
+            let events = c.advance_day();
+            if events.iter().any(|e| matches!(e, GeoEvent::RequestFulfilled { .. })) {
+                assert!(c.funds > funds_before, "fulfilled demands pay ({reward}k)");
+            }
         }
     }
 

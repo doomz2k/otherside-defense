@@ -32,6 +32,11 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
 pub const SAVE_PATH: &str = "otherside-save.json";
+pub const AUTOSAVE_PATH: &str = "otherside-autosave.json";
+
+pub fn slot_path(slot: usize) -> String {
+    format!("otherside-save-{slot}.json")
+}
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -72,6 +77,7 @@ pub struct Core {
     pub build_choice: Facility,
     pub selected_base: usize,
     pub difficulty_choice: ods_geo::Difficulty,
+    pub ironman_choice: bool,
     audio: Option<audio::Audio>,
     /// The big spinning world.
     geo_camera: OrbitCamera,
@@ -139,6 +145,7 @@ impl Core {
             build_choice: Facility::Quarters,
             selected_base: 0,
             difficulty_choice: ods_geo::Difficulty::Veteran,
+            ironman_choice: false,
             audio: audio::Audio::new(),
             geo_camera,
             geo_drag: false,

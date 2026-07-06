@@ -24,41 +24,50 @@ impl Core {
                 ui.add_space(20.0);
 
                 ui.horizontal(|ui| {
-                    ui.add_space(ui.available_width() / 2.0 - 130.0);
+                    ui.add_space(ui.available_width() / 2.0 - 160.0);
                     for d in Difficulty::ALL {
                         ui.selectable_value(&mut self.difficulty_choice, d, d.name());
                     }
+                    ui.checkbox(&mut self.ironman_choice, "Ironman");
                 });
                 ui.add_space(12.0);
 
                 if ui.button(egui::RichText::new("New campaign").size(18.0)).clicked() {
-                    self.campaign =
-                        Some(Campaign::new_with(seed_from_clock(), self.difficulty_choice));
+                    let mut c = Campaign::new_with(seed_from_clock(), self.difficulty_choice);
+                    c.ironman = self.ironman_choice;
+                    self.campaign = Some(c);
                     self.log = vec!["The Order convenes.".to_string()];
                     self.enter_geoscape();
                 }
                 ui.add_space(8.0);
-                let has_save = std::path::Path::new(SAVE_PATH).exists();
-                if ui
-                    .add_enabled(
-                        has_save,
-                        egui::Button::new(egui::RichText::new("Load campaign").size(18.0)),
-                    )
-                    .clicked()
-                {
-                    match std::fs::read_to_string(SAVE_PATH)
-                        .map_err(|e| e.to_string())
-                        .and_then(|s| Campaign::load_from_str(&s).map_err(|e| e.to_string()))
+                let mut candidates: Vec<(String, String)> =
+                    vec![(SAVE_PATH.to_string(), "quicksave".to_string())];
+                for slot in 1..=3usize {
+                    candidates.push((crate::slot_path(slot), format!("slot {slot}")));
+                }
+                candidates.push((crate::AUTOSAVE_PATH.to_string(), "autosave".to_string()));
+                for (path, label) in candidates {
+                    if !std::path::Path::new(&path).exists() {
+                        continue;
+                    }
+                    if ui
+                        .button(egui::RichText::new(format!("Load {label}")).size(16.0))
+                        .clicked()
                     {
-                        Ok(c) => {
-                            self.log = vec![format!(
-                                "Campaign restored: month {}, day {}, {}k in the treasury.",
-                                c.month, c.day, c.funds
-                            )];
-                            self.campaign = Some(c);
-                            self.enter_geoscape();
+                        match std::fs::read_to_string(&path)
+                            .map_err(|e| e.to_string())
+                            .and_then(|s| Campaign::load_from_str(&s).map_err(|e| e.to_string()))
+                        {
+                            Ok(c) => {
+                                self.log = vec![format!(
+                                    "Campaign restored ({label}): month {}, day {}, {}k banked.",
+                                    c.month, c.day, c.funds
+                                )];
+                                self.campaign = Some(c);
+                                self.enter_geoscape();
+                            }
+                            Err(e) => self.status = Some(format!("load failed: {e}")),
                         }
-                        Err(e) => self.status = Some(format!("load failed: {e}")),
                     }
                 }
                 ui.add_space(8.0);
@@ -102,11 +111,13 @@ impl Core {
                 ));
                 ui.separator();
                 let alive = c.over.is_none();
+                let mut advanced = false;
                 if ui.add_enabled(alive, egui::Button::new("▶ Day")).clicked() {
                     let events = c.advance_day();
                     for e in &events {
                         self.log.push(narrate(c, e));
                     }
+                    advanced = true;
                 }
                 if ui.add_enabled(alive, egui::Button::new("⏩ Week")).clicked() {
                     for _ in 0..7 {
@@ -118,12 +129,29 @@ impl Core {
                             self.log.push(narrate(c, e));
                         }
                     }
+                    advanced = true;
+                }
+                if advanced {
+                    // The world remembers, whether or not you asked it to.
+                    let _ = std::fs::write(crate::AUTOSAVE_PATH, c.save_to_string());
                 }
                 ui.separator();
-                if ui.button("💾 Save").clicked() {
-                    match std::fs::write(SAVE_PATH, c.save_to_string()) {
-                        Ok(()) => self.log.push(format!("Campaign saved to {SAVE_PATH}.")),
-                        Err(e) => self.log.push(format!("save failed: {e}")),
+                if c.ironman {
+                    ui.label("IRONMAN — the autosave is the only record");
+                } else {
+                    if ui.button("💾 Quick").clicked() {
+                        match std::fs::write(SAVE_PATH, c.save_to_string()) {
+                            Ok(()) => self.log.push("Saved.".to_string()),
+                            Err(e) => self.log.push(format!("save failed: {e}")),
+                        }
+                    }
+                    for slot in 1..=3usize {
+                        if ui.button(format!("S{slot}")).clicked() {
+                            match std::fs::write(crate::slot_path(slot), c.save_to_string()) {
+                                Ok(()) => self.log.push(format!("Saved to slot {slot}.")),
+                                Err(e) => self.log.push(format!("save failed: {e}")),
+                            }
+                        }
                     }
                 }
                 if ui.button("Menu").clicked() {
@@ -164,6 +192,27 @@ impl Core {
                             match c.assault_rift(id) {
                                 Ok(r) => self.log.push(report_line("assault", r)),
                                 Err(e) => self.log.push(format!("cannot assault: {e:?}")),
+                            }
+                        }
+                        if ui
+                            .button("🛡 Ward")
+                            .on_hover_text("post a fit soldier: the rift cannot dig in, but the picket line is dangerous")
+                            .clicked()
+                        {
+                            let volunteer =
+                                c.soldiers.iter().position(|s| s.is_fit());
+                            match volunteer {
+                                Some(i) => {
+                                    let outcome = c.assign_ward(i, id);
+                                    match outcome {
+                                        Ok(()) => self.log.push(format!(
+                                            "{} takes the picket line.",
+                                            c.soldiers[i].name
+                                        )),
+                                        Err(e) => self.log.push(format!("cannot ward: {e:?}")),
+                                    }
+                                }
+                                None => self.log.push("nobody fit to stand the line".to_string()),
                             }
                         }
                     });
@@ -217,6 +266,19 @@ impl Core {
                     }
                 }
 
+                if let Some(req) = &c.request {
+                    ui.add_space(6.0);
+                    ui.heading("Council demand");
+                    ui.label(format!(
+                        "Banish {} rift(s) in {} this month ({}/{}) — {}k",
+                        req.needed,
+                        req.region.name(),
+                        req.done,
+                        req.needed,
+                        req.reward
+                    ));
+                }
+
                 ui.add_space(6.0);
                 ui.heading("Market");
                 ui.horizontal(|ui| {
@@ -238,12 +300,15 @@ impl Core {
                 egui::CollapsingHeader::new("Roster & loadouts")
                     .default_open(true)
                     .show(ui, |ui| {
+                        let lance_ok = c.research.is_complete(Project::HellfireLance);
+                        let mut lance_toggle: Option<(usize, bool)> = None;
+                        let mut transfer: Option<usize> = None;
                         egui::Grid::new("roster").striped(true).show(ui, |ui| {
-                            for h in ["Name", "Rank", "TU", "HP", "Acc", "K", "🧨", "✚", "Status"] {
+                            for h in ["Name", "Rank", "TU", "HP", "Acc", "K", "🧨", "✚", "Lance", "Status"] {
                                 ui.strong(h);
                             }
                             ui.end_row();
-                            for s in &mut c.soldiers {
+                            for (si, s) in c.soldiers.iter_mut().enumerate() {
                                 ui.label(&s.name);
                                 ui.label(s.rank());
                                 ui.label(s.stats.tu.to_string());
@@ -268,8 +333,20 @@ impl Core {
                                         s.dressings_loadout += 1;
                                     }
                                 });
-                                if s.is_fit() {
-                                    ui.label("fit");
+                                if lance_ok {
+                                    let label = if s.has_lance { "🔥" } else { "–" };
+                                    if ui.small_button(label).clicked() {
+                                        lance_toggle = Some((si, !s.has_lance));
+                                    }
+                                } else {
+                                    ui.label("–");
+                                }
+                                if s.warding.is_some() {
+                                    ui.colored_label(egui::Color32::YELLOW, "warding");
+                                } else if s.is_fit() {
+                                    if ui.small_button(format!("fit @{}", s.home)).clicked() {
+                                        transfer = Some(si);
+                                    }
                                 } else {
                                     ui.colored_label(
                                         egui::Color32::LIGHT_RED,
@@ -279,7 +356,29 @@ impl Core {
                                 ui.end_row();
                             }
                         });
-                        ui.label("Heavy packs (>5 items) cost 4 TU in the field.");
+                        if let Some((si, take)) = lance_toggle
+                            && let Err(e) = c.assign_lance(si, take)
+                        {
+                            self.log.push(format!("cannot assign lance: {e:?}"));
+                        }
+                        if let Some(si) = transfer {
+                            let next = (c.soldiers[si].home + 1) % c.bases.len();
+                            if next != c.soldiers[si].home {
+                                match c.transfer_soldier(si, next) {
+                                    Ok(()) => self.log.push(format!(
+                                        "{} takes the road to {}.",
+                                        c.soldiers[si].name,
+                                        c.bases[next].region.name()
+                                    )),
+                                    Err(e) => self.log.push(format!("cannot transfer: {e:?}")),
+                                }
+                            }
+                        }
+                        ui.label(format!(
+                            "Heavy packs (>5 items) cost 4 TU. Lances in armoury: {}.",
+                            c.lance_stock
+                        ));
+                        ui.label("Click a fit soldier's @base tag to rotate their station.");
                     });
 
                 if !c.memorial.is_empty() {

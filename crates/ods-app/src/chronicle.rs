@@ -45,6 +45,22 @@ pub fn narrate(c: &Campaign, event: &GeoEvent) -> String {
         E::ManufactureComplete { item } => {
             format!("{stamp} the workshop delivers: {}", item.name())
         }
+        E::WardSkirmish { name } => {
+            format!("{stamp} {name} is carried back bloodied from the picket line")
+        }
+        E::FacilityWrecked { facility } => {
+            format!("{stamp} the fighting wrecked the {}", facility.name())
+        }
+        E::RequestIssued { region, needed, reward } => format!(
+            "{stamp} the council demands: banish {needed} rift(s) in {} ({reward}k)",
+            region.name()
+        ),
+        E::RequestFulfilled { reward } => {
+            format!("{stamp} the council pays its debt: +{reward}k")
+        }
+        E::RequestFailed { region } => {
+            format!("{stamp} {} despairs of us — the demand went unmet", region.name())
+        }
         E::CampaignOver { outcome } => match outcome {
             ods_geo::CampaignOutcome::Victory => {
                 format!("{stamp} ### THE NAME IS BROKEN — THE ORDER PREVAILS ###")

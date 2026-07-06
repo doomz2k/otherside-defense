@@ -126,13 +126,16 @@ pub enum ManufactureItem {
     /// Blessed arms for national reliquaries: sold on completion for 45k
     /// (costs 5 hellsteel). The tamed factory economy.
     TradeArms,
+    /// Forge one Hellfire Lance for the armoury (needs the research).
+    ForgeLance,
 }
 
 impl ManufactureItem {
-    pub const ALL: [ManufactureItem; 3] = [
+    pub const ALL: [ManufactureItem; 4] = [
         ManufactureItem::HellfireCharges,
         ManufactureItem::FieldDressings,
         ManufactureItem::TradeArms,
+        ManufactureItem::ForgeLance,
     ];
 
     /// Artificer-days of work.
@@ -141,6 +144,7 @@ impl ManufactureItem {
             ManufactureItem::HellfireCharges => 40,
             ManufactureItem::FieldDressings => 30,
             ManufactureItem::TradeArms => 60,
+            ManufactureItem::ForgeLance => 50,
         }
     }
 
@@ -150,6 +154,7 @@ impl ManufactureItem {
             ManufactureItem::HellfireCharges => (2, 0),
             ManufactureItem::FieldDressings => (0, 0),
             ManufactureItem::TradeArms => (0, 5),
+            ManufactureItem::ForgeLance => (2, 4),
         }
     }
 
@@ -158,6 +163,7 @@ impl ManufactureItem {
             ManufactureItem::HellfireCharges => "Hellfire charges",
             ManufactureItem::FieldDressings => "Field dressings",
             ManufactureItem::TradeArms => "Trade arms",
+            ManufactureItem::ForgeLance => "Forge a hellfire lance",
         }
     }
 }
