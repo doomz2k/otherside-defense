@@ -229,6 +229,20 @@ pub struct Soldier {
     /// The fixation a broken stretch left behind.
     #[serde(default)]
     pub phobia: Option<Phobia>,
+    /// Issued weapon, by data-table key ("rifle" is the standing default).
+    #[serde(default = "default_weapon_key")]
+    pub weapon_key: String,
+    /// Sidearm blade / warded circlet, drawn from the armoury stocks.
+    #[serde(default)]
+    pub has_blade: bool,
+    #[serde(default)]
+    pub has_circlet: bool,
+    /// Fitted armor tier.
+    #[serde(default)]
+    pub armor: ArmorTier,
+    /// A named relic, carried until death loses it in the field.
+    #[serde(default)]
+    pub relic: Option<Relic>,
     /// The quirk this one was born with.
     #[serde(default)]
     pub quirk: Option<Quirk>,
@@ -335,6 +349,8 @@ pub enum GeoEvent {
     BloodMoonSets,
     /// A soldier wakes screaming — and sometimes the dream is a map.
     NightTerror { name: String },
+    /// Something old and holy in the rubble: a named relic comes home.
+    RelicFound { name: String },
     /// The dream WAS a map: an undetected rift, revealed in sleep.
     DreamOfTheRift { region: Region },
     CampaignOver { outcome: CampaignOutcome },
@@ -434,6 +450,65 @@ fn default_sanity() -> i32 {
     100
 }
 
+fn default_weapon_key() -> String {
+    "rifle".to_string()
+}
+
+/// What a soldier wears under the tabard.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ArmorTier {
+    /// Padded vestments: the founding issue.
+    #[default]
+    Vestments,
+    /// Hellsteel plate: +3/+2/+1 armor, +8 health, -2 TU.
+    Plate,
+    /// The abyssal aegis: +6/+5/+3 armor, +12 health, -6 TU.
+    Aegis,
+}
+
+impl ArmorTier {
+    pub fn name(self) -> &'static str {
+        match self {
+            ArmorTier::Vestments => "Vestments",
+            ArmorTier::Plate => "Plate",
+            ArmorTier::Aegis => "Aegis",
+        }
+    }
+}
+
+/// A named battlefield relic and what it does for its bearer.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Relic {
+    pub name: String,
+    pub affix: Affix,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Affix {
+    /// +10 reactions.
+    Vigil,
+    /// +8 accuracy.
+    SteadyHand,
+    /// +5 TU.
+    Vigor,
+    /// +2 armor, all facings.
+    Bulwark,
+    /// +8 bravery.
+    Grisly,
+}
+
+impl Affix {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Affix::Vigil => "+10 reactions",
+            Affix::SteadyHand => "+8 accuracy",
+            Affix::Vigor => "+5 TU",
+            Affix::Bulwark => "+2 armor",
+            Affix::Grisly => "+8 bravery",
+        }
+    }
+}
+
 fn default_brim_price() -> i64 {
     15
 }
@@ -521,6 +596,21 @@ pub struct Campaign {
     pub limb_stock: u32,
     #[serde(default)]
     pub graft_stock: u32,
+    /// The wider armoury: forged weapons by data key, blades, circlets,
+    /// and armor suits waiting for wearers.
+    #[serde(default)]
+    pub weapon_stock: HashMap<String, u32>,
+    #[serde(default)]
+    pub blade_stock: u32,
+    #[serde(default)]
+    pub circlet_stock: u32,
+    #[serde(default)]
+    pub plate_stock: u32,
+    #[serde(default)]
+    pub aegis_stock: u32,
+    /// Unassigned relics recovered from the field.
+    #[serde(default)]
+    pub relic_pool: Vec<Relic>,
     /// Slain breeds mounted in the halls: bravery for the garrison, score
     /// for the spectacle.
     #[serde(default)]
@@ -537,6 +627,10 @@ pub struct Campaign {
     /// Squads in the air (or camped at distant rifts).
     #[serde(default)]
     pub sorties: Vec<Sortie>,
+    /// Events minted outside advance_day (mission conclusions), flushed on
+    /// the next day tick so the log still hears about them.
+    #[serde(default, skip)]
+    pending_events: Vec<GeoEvent>,
     /// Rises with every banishment; at 5+, hell schedules a Reckoning.
     reckoning_heat: u32,
     reckoning_day: Option<u32>,
@@ -589,11 +683,18 @@ impl Campaign {
             burial_honors: 0,
             limb_stock: 0,
             graft_stock: 0,
+            weapon_stock: HashMap::new(),
+            blade_stock: 0,
+            circlet_stock: 0,
+            plate_stock: 0,
+            aegis_stock: 0,
+            relic_pool: Vec::new(),
             trophies: 0,
             codex_slain: std::collections::HashSet::new(),
             blood_moon: None,
             omen_day: 0,
             sorties: Vec::new(),
+            pending_events: Vec::new(),
             month_score: 0,
             bad_months: 0,
             over: None,
@@ -692,6 +793,11 @@ impl Campaign {
             lost_parts: Vec::new(),
             sanity: 100,
             phobia: None,
+            weapon_key: default_weapon_key(),
+            has_blade: false,
+            has_circlet: false,
+            armor: ArmorTier::Vestments,
+            relic: None,
             quirk: match self.rng.roll(10) {
                 0 => Some(Quirk::Marksman),
                 1 => Some(Quirk::Jumpy),
@@ -833,6 +939,26 @@ impl Campaign {
         if item == ManufactureItem::MountTrophy && self.codex_slain.is_empty() {
             return Err(GeoError::NoMaterials);
         }
+        if matches!(item, ManufactureItem::ForgeCenser | ManufactureItem::ForgeMortar)
+            && !self.research.is_complete(Project::BlessedArms)
+        {
+            return Err(GeoError::PrerequisiteMissing);
+        }
+        if item == ManufactureItem::ForgeCirclet
+            && !self.research.is_complete(Project::Interrogation)
+        {
+            return Err(GeoError::PrerequisiteMissing);
+        }
+        if matches!(item, ManufactureItem::ForgePlate | ManufactureItem::ForgeAegis)
+            && !self.research.is_complete(Project::HellsteelPlate)
+        {
+            return Err(GeoError::PrerequisiteMissing);
+        }
+        if item == ManufactureItem::ForgeAegis
+            && !self.codex_slain.contains(&ods_sim::units::Species::Behemoth)
+        {
+            return Err(GeoError::NoMaterials);
+        }
         let (brim, steel) = item.materials();
         if self.brimstone < brim || self.hellsteel < steel {
             return Err(GeoError::NoMaterials);
@@ -935,6 +1061,110 @@ impl Campaign {
             }
             s.has_lance = false;
             self.lance_stock += 1;
+        }
+        Ok(())
+    }
+
+    /// Cycle a soldier's issued weapon through what the armoury holds:
+    /// rifle (always available) then each forged type in stock. Returns the
+    /// new key.
+    pub fn cycle_weapon(&mut self, soldier: usize) -> Result<String, GeoError> {
+        self.guard_over()?;
+        const ORDER: [&str; 5] = ["rifle", "arbalest", "censer", "ram_hammer", "salt_mortar"];
+        let s = self.soldiers.get(soldier).ok_or(GeoError::BadAssignment)?;
+        let current = ORDER
+            .iter()
+            .position(|&k| k == s.weapon_key)
+            .unwrap_or(0);
+        // Return the current forged weapon to stock (rifles are standing issue).
+        let old_key = ORDER[current].to_string();
+        for step in 1..=ORDER.len() {
+            let next = ORDER[(current + step) % ORDER.len()];
+            let available =
+                next == "rifle" || self.weapon_stock.get(next).copied().unwrap_or(0) > 0;
+            if available {
+                if old_key != "rifle" {
+                    *self.weapon_stock.entry(old_key.clone()).or_insert(0) += 1;
+                }
+                if next != "rifle" {
+                    *self.weapon_stock.get_mut(next).expect("checked") -= 1;
+                }
+                self.soldiers[soldier].weapon_key = next.to_string();
+                return Ok(next.to_string());
+            }
+        }
+        Ok(old_key)
+    }
+
+    /// Issue or return a blade / circlet / armor suit from the stocks.
+    pub fn toggle_blade(&mut self, soldier: usize) -> Result<(), GeoError> {
+        self.guard_over()?;
+        let s = self.soldiers.get_mut(soldier).ok_or(GeoError::BadAssignment)?;
+        if s.has_blade {
+            s.has_blade = false;
+            self.blade_stock += 1;
+        } else if self.blade_stock > 0 {
+            self.blade_stock -= 1;
+            s.has_blade = true;
+        } else {
+            return Err(GeoError::NoMaterials);
+        }
+        Ok(())
+    }
+
+    pub fn toggle_circlet(&mut self, soldier: usize) -> Result<(), GeoError> {
+        self.guard_over()?;
+        let s = self.soldiers.get_mut(soldier).ok_or(GeoError::BadAssignment)?;
+        if s.has_circlet {
+            s.has_circlet = false;
+            self.circlet_stock += 1;
+        } else if self.circlet_stock > 0 {
+            self.circlet_stock -= 1;
+            s.has_circlet = true;
+        } else {
+            return Err(GeoError::NoMaterials);
+        }
+        Ok(())
+    }
+
+    /// Cycle armor: vestments -> plate -> aegis -> vestments, stock allowing.
+    pub fn cycle_armor(&mut self, soldier: usize) -> Result<ArmorTier, GeoError> {
+        self.guard_over()?;
+        let current = self.soldiers.get(soldier).ok_or(GeoError::BadAssignment)?.armor;
+        // Give back what they wear.
+        match current {
+            ArmorTier::Plate => self.plate_stock += 1,
+            ArmorTier::Aegis => self.aegis_stock += 1,
+            ArmorTier::Vestments => {}
+        }
+        let next = match current {
+            ArmorTier::Vestments if self.plate_stock > 0 => ArmorTier::Plate,
+            ArmorTier::Vestments if self.aegis_stock > 0 => ArmorTier::Aegis,
+            ArmorTier::Plate if self.aegis_stock > 0 => ArmorTier::Aegis,
+            _ => ArmorTier::Vestments,
+        };
+        match next {
+            ArmorTier::Plate => self.plate_stock -= 1,
+            ArmorTier::Aegis => self.aegis_stock -= 1,
+            ArmorTier::Vestments => {}
+        }
+        self.soldiers[soldier].armor = next;
+        Ok(next)
+    }
+
+    /// Hang a relic from the pool on a soldier (or take it back: None).
+    pub fn assign_relic(&mut self, soldier: usize, pool_idx: Option<usize>) -> Result<(), GeoError> {
+        self.guard_over()?;
+        let s = self.soldiers.get_mut(soldier).ok_or(GeoError::BadAssignment)?;
+        if let Some(worn) = s.relic.take() {
+            self.relic_pool.push(worn);
+        }
+        if let Some(i) = pool_idx {
+            if i >= self.relic_pool.len() {
+                return Err(GeoError::BadAssignment);
+            }
+            let relic = self.relic_pool.remove(i);
+            self.soldiers[soldier].relic = Some(relic);
         }
         Ok(())
     }
@@ -1362,6 +1592,14 @@ impl Campaign {
                         self.score(region, kind.banish_score());
                         // Every gibbet cut down counts for something.
                         self.score(region, report.atrocities_found as i64 * 3);
+                        // And sometimes the rubble gives something back.
+                        if self.rng.roll(100) < 20 {
+                            let relic = self.roll_relic();
+                            self.pending_events.push(GeoEvent::RelicFound {
+                                name: relic.name.clone(),
+                            });
+                            self.relic_pool.push(relic);
+                        }
                         self.shift_panic(region, -10);
                         self.collect_salvage(kind, report.demons_slain);
                         self.reckoning_heat += 1;
@@ -1524,6 +1762,15 @@ impl Campaign {
                 }
             }
         }
+        // Relics on the dead: recovered with the body on a held field,
+        // lost with it otherwise.
+        for &p in &report.dead {
+            if let Some(relic) = self.soldiers[squad_idx[p]].relic.take()
+                && report.victory
+            {
+                self.relic_pool.push(relic);
+            }
+        }
         let mut dead_roster: Vec<usize> = report.dead.iter().map(|&p| squad_idx[p]).collect();
         dead_roster.sort_unstable_by(|a, b| b.cmp(a));
         for idx in dead_roster {
@@ -1537,6 +1784,27 @@ impl Campaign {
                 cause: cause.to_string(),
             });
         }
+    }
+
+    /// Forge a relic's name and nature from the same dice.
+    fn roll_relic(&mut self) -> Relic {
+        let affix = match self.rng.roll(5) {
+            0 => Affix::Vigil,
+            1 => Affix::SteadyHand,
+            2 => Affix::Vigor,
+            3 => Affix::Bulwark,
+            _ => Affix::Grisly,
+        };
+        let noun = ["Icon", "Chain", "Lantern", "Psalter", "Bell"]
+            [self.rng.roll(5) as usize];
+        let title = match affix {
+            Affix::Vigil => "of the Vigil",
+            Affix::SteadyHand => "of the Steady Hand",
+            Affix::Vigor => "of Unresting Strength",
+            Affix::Bulwark => "of the Bulwark",
+            Affix::Grisly => "of Grisly Comfort",
+        };
+        Relic { name: format!("{noun} {title}"), affix }
     }
 
     fn score(&mut self, region: Region, delta: i64) {
@@ -1591,7 +1859,7 @@ impl Campaign {
     // The clock
 
     pub fn advance_day(&mut self) -> Vec<GeoEvent> {
-        let mut events = Vec::new();
+        let mut events = std::mem::take(&mut self.pending_events);
         if self.over.is_some() {
             return events;
         }
@@ -1624,6 +1892,22 @@ impl Campaign {
                     ManufactureItem::HellsteelLimb => self.limb_stock += 1,
                     ManufactureItem::FleshGraft => self.graft_stock += 1,
                     ManufactureItem::MountTrophy => self.trophies += 1,
+                    ManufactureItem::ForgeArbalest => {
+                        *self.weapon_stock.entry("arbalest".into()).or_insert(0) += 1
+                    }
+                    ManufactureItem::ForgeCenser => {
+                        *self.weapon_stock.entry("censer".into()).or_insert(0) += 1
+                    }
+                    ManufactureItem::ForgeHammer => {
+                        *self.weapon_stock.entry("ram_hammer".into()).or_insert(0) += 1
+                    }
+                    ManufactureItem::ForgeMortar => {
+                        *self.weapon_stock.entry("salt_mortar".into()).or_insert(0) += 1
+                    }
+                    ManufactureItem::ForgeBlade => self.blade_stock += 1,
+                    ManufactureItem::ForgeCirclet => self.circlet_stock += 1,
+                    ManufactureItem::ForgePlate => self.plate_stock += 1,
+                    ManufactureItem::ForgeAegis => self.aegis_stock += 1,
                 }
                 events.push(GeoEvent::ManufactureComplete { item: done });
             }
@@ -1635,6 +1919,24 @@ impl Campaign {
                 s.recovery_days -= 1;
                 if s.recovery_days == 0 {
                     events.push(GeoEvent::SoldierRecovered { name: s.name.clone() });
+                }
+            }
+        }
+
+        // The Sanctum's cells: garrisoned soldiers sit the silence and
+        // come out steadier.
+        let sanctum = self
+            .bases
+            .iter()
+            .any(|b| b.count_active(Facility::Sanctum) > 0);
+        if sanctum {
+            for s in &mut self.soldiers {
+                if s.warding.is_none()
+                    && s.aboard.is_none()
+                    && s.stats.bravery < 85
+                    && self.rng.roll(100) < 20
+                {
+                    s.stats.bravery += 1;
                 }
             }
         }
@@ -2820,6 +3122,12 @@ mod tests {
             }
             if c.soldiers.is_empty() {
                 return; // a doomed seed proves nothing either way
+            }
+            // Patch everyone up between missions — this test counts codex
+            // entries and ledger lines, not attrition.
+            for s in &mut c.soldiers {
+                s.recovery_days = 0;
+                s.sanity = 100;
             }
         }
         assert!(!c.codex_seen.is_empty(), "the squads met something out there");

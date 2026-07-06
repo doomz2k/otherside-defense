@@ -539,6 +539,88 @@ impl Core {
                         ui.label("Click a fit soldier's @base tag to rotate their station.");
                     });
 
+                egui::CollapsingHeader::new("Armoury assignments").show(ui, |ui| {
+                    ui.label(format!(
+                        "stock — arbalest {} · censer {} · hammer {} · mortar {} | \
+                         blades {} · circlets {} | plate {} · aegis {}",
+                        c.weapon_stock.get("arbalest").copied().unwrap_or(0),
+                        c.weapon_stock.get("censer").copied().unwrap_or(0),
+                        c.weapon_stock.get("ram_hammer").copied().unwrap_or(0),
+                        c.weapon_stock.get("salt_mortar").copied().unwrap_or(0),
+                        c.blade_stock,
+                        c.circlet_stock,
+                        c.plate_stock,
+                        c.aegis_stock,
+                    ));
+                    let mut act: Option<(usize, u8)> = None;
+                    egui::Grid::new("armoury").striped(true).show(ui, |ui| {
+                        for h in ["Name", "Weapon", "Blade", "Circlet", "Armor", "Relic"] {
+                            ui.strong(h);
+                        }
+                        ui.end_row();
+                        for (si, s) in c.soldiers.iter().enumerate() {
+                            ui.label(&s.name);
+                            if ui.small_button(s.weapon_key.replace('_', " ")).clicked() {
+                                act = Some((si, 0));
+                            }
+                            if ui.small_button(if s.has_blade { "🗡" } else { "–" }).clicked() {
+                                act = Some((si, 1));
+                            }
+                            if ui.small_button(if s.has_circlet { "◎" } else { "–" }).clicked() {
+                                act = Some((si, 2));
+                            }
+                            if ui.small_button(s.armor.name()).clicked() {
+                                act = Some((si, 3));
+                            }
+                            match &s.relic {
+                                Some(r) => {
+                                    if ui
+                                        .small_button(&r.name)
+                                        .on_hover_text(r.affix.describe())
+                                        .clicked()
+                                    {
+                                        act = Some((si, 4)); // return it
+                                    }
+                                }
+                                None => {
+                                    ui.menu_button("–", |ui| {
+                                        for (ri, r) in c.relic_pool.iter().enumerate() {
+                                            if ui
+                                                .button(format!(
+                                                    "{} ({})",
+                                                    r.name,
+                                                    r.affix.describe()
+                                                ))
+                                                .clicked()
+                                            {
+                                                act = Some((si, 10 + ri as u8));
+                                                ui.close();
+                                            }
+                                        }
+                                        if c.relic_pool.is_empty() {
+                                            ui.label("the reliquary is bare");
+                                        }
+                                    });
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+                    if let Some((si, what)) = act {
+                        let outcome = match what {
+                            0 => c.cycle_weapon(si).map(|_| ()),
+                            1 => c.toggle_blade(si),
+                            2 => c.toggle_circlet(si),
+                            3 => c.cycle_armor(si).map(|_| ()),
+                            4 => c.assign_relic(si, None),
+                            n => c.assign_relic(si, Some((n - 10) as usize)),
+                        };
+                        if let Err(e) = outcome {
+                            self.log.push(format!("cannot issue: {e:?}"));
+                        }
+                    }
+                });
+
                 let maimed: Vec<usize> = c
                     .soldiers
                     .iter()

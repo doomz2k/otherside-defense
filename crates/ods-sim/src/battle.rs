@@ -28,6 +28,10 @@ pub(crate) const DEVOUR_TU: i32 = 20;
 pub(crate) const DEFILE_TU: i32 = 25;
 const AMPUTATE_TU: i32 = 25;
 const WARD_TU: i32 = 20;
+/// How far the censer throws its burning arc.
+const CENSER_RANGE_TILES: i32 = 5;
+/// The consecrated blade's riposte damage base.
+const BLADE_POWER: i32 = 18;
 /// How far the obelisk's veins can reach.
 const CORRUPTION_CAP: usize = 20;
 /// What a ward does to the demon that crosses it.
@@ -143,6 +147,12 @@ pub enum Event {
     Whispered { unit: UnitId },
     /// A soldier stumbles onto what the demons did here before you came.
     AtrocityFound { unit: UnitId, at: IVec3 },
+    /// A counterstrike: the blade answers the claw.
+    Riposte { unit: UnitId, target: UnitId, hit: bool },
+    /// The warded circlet takes the psi blow and dies of it.
+    CircletShattered { unit: UnitId },
+    /// An officer steadies every heart in earshot.
+    Rallied { by: UnitId },
     /// A Prince seizes a mind outright.
     Possessed { unit: UnitId, by: UnitId },
     PossessionEnds { unit: UnitId },
@@ -672,6 +682,12 @@ impl Battle {
         }
         self.unit_mut(id).tu -= cost;
 
+        // A warded circlet takes the seizure — once.
+        if self.unit(target).circlet {
+            self.unit_mut(target).circlet = false;
+            return Ok(vec![Event::CircletShattered { unit: target }]);
+        }
+
         let attack = 45 + self.rng.roll(56) as i32;
         let defense = {
             let t = self.unit(target);
@@ -1159,6 +1175,12 @@ impl Battle {
         }
         self.unit_mut(id).tu -= cost;
 
+        // A warded circlet takes the blow — once.
+        if self.unit(target).circlet {
+            self.unit_mut(target).circlet = false;
+            return Ok(vec![Event::CircletShattered { unit: target }]);
+        }
+
         // The whisper needs no line of sight. Will is the only wall.
         let attack = 40 + self.rng.roll(56) as i32;
         let defense = self.unit(target).bravery + self.rng.roll(31) as i32;
@@ -1384,6 +1406,45 @@ impl Battle {
         } else if !self.can_see(id, target) {
             return Err(ActionError::NoLineOfSight);
         }
+        // The censer doesn't shoot: it hoses burning ground at the target.
+        if self.unit(id).weapon.fire_cone {
+            if dist > CENSER_RANGE_TILES {
+                return Err(ActionError::OutOfRange);
+            }
+            let (from, to) = (self.unit(id).tile, self.unit(target).tile);
+            {
+                let u = self.unit_mut(id);
+                u.tu -= cost;
+                let d = to - from;
+                if d.x != 0 || d.y != 0 {
+                    u.facing = IVec3::new(d.x.signum(), d.y.signum(), 0);
+                }
+            }
+            let mut events = vec![Event::Fired { unit: id, target, mode, reaction: false, hit: true }];
+            self.last_noise = Some(from);
+            // Fire walks the line to the target and spills one tile wide.
+            let step = (to - from).signum();
+            let mut at = from;
+            for _ in 0..CENSER_RANGE_TILES {
+                at += IVec3::new(step.x, step.y, 0);
+                for spill in [at, at + IVec3::new(step.y, step.x, 0)] {
+                    if self.tiles.is_walkable(spill)
+                        && !self
+                            .clouds
+                            .iter()
+                            .any(|(t, k, _)| *t == spill && *k == CloudKind::Fire)
+                    {
+                        self.add_cloud(spill, CloudKind::Fire, 3);
+                        events.push(Event::FireStarted { at: spill });
+                    }
+                }
+                if at == to {
+                    break;
+                }
+            }
+            self.check_hazards(&mut events);
+            return Ok(events);
+        }
         let mut events = Vec::new();
         self.resolve_shot(id, target, mode, false, &mut events);
         Ok(events)
@@ -1400,7 +1461,7 @@ impl Battle {
         reaction: bool,
         events: &mut Vec<Event>,
     ) {
-        let (cost, chance, rounds, power, breach, melee) = {
+        let (cost, chance, rounds, power, breach, melee, silent, stun_power) = {
             let s = self.unit(shooter);
             let (Some(cost), Some(chance)) = (s.fire_cost(mode), s.hit_chance(mode)) else {
                 return;
@@ -1412,6 +1473,8 @@ impl Battle {
                 s.weapon.power,
                 s.weapon.breach_radius,
                 s.weapon.melee,
+                s.weapon.silent,
+                s.weapon.stun_power,
             )
         };
         {
@@ -1430,7 +1493,9 @@ impl Battle {
         } else {
             chance
         };
-        self.last_noise = Some(self.unit(shooter).tile);
+        if !silent {
+            self.last_noise = Some(self.unit(shooter).tile);
+        }
 
         for _ in 0..rounds {
             if !self.unit(target).is_active() || self.winner.is_some() {
@@ -1446,11 +1511,70 @@ impl Battle {
 
             if hit {
                 self.xp[shooter.0 as usize].shots_hit += 1;
-                // 0–200% of weapon power, the original's famous swingy roll.
-                let damage = power * self.rng.roll(201) as i32 / 100;
-                self.apply_damage(target, damage, Some(shooter), events);
+                if stun_power > 0 {
+                    // Salt-shot: trauma without blood, splashing the tile.
+                    let center = self.unit(target).tile;
+                    let hits: Vec<UnitId> = self
+                        .units
+                        .iter()
+                        .filter(|u| u.is_active() && cheb(u.tile, center) <= 1)
+                        .map(|u| u.id)
+                        .collect();
+                    for id in hits {
+                        let full = id == target;
+                        let amount =
+                            stun_power * self.rng.roll(101) as i32 / (if full { 100 } else { 200 });
+                        let t = self.unit_mut(id);
+                        t.stun += amount;
+                        let total = t.stun;
+                        events.push(Event::Stunned { unit: id, stun: total });
+                        if t.stun >= t.health && t.conscious {
+                            t.conscious = false;
+                            events.push(Event::Subdued { unit: id });
+                        }
+                    }
+                    self.check_victory(events);
+                } else {
+                    // 0–200% of weapon power, the original's famous swingy roll.
+                    let damage = power * self.rng.roll(201) as i32 / 100;
+                    self.apply_damage(target, damage, Some(shooter), events);
+                    // The ram hammer cracks scenery through its target.
+                    if melee && breach > 0.0 {
+                        let c = (self.unit(target).tile * TILE_VOXELS).as_vec3()
+                            + Vec3::new(8.0, 8.0, 8.0);
+                        let destroyed = self.world.carve_sphere(c + Vec3::new(0.0, 0.0, 2.0), breach);
+                        if destroyed > 0 {
+                            let ci = c.as_ivec3();
+                            let r = breach.ceil() as i32 + 1;
+                            self.tiles.rederive_region(
+                                &self.world,
+                                ci - IVec3::splat(r),
+                                ci + IVec3::splat(r),
+                            );
+                        }
+                    }
+                }
             } else if !melee {
                 self.stray_shot(shooter, target, breach, events);
+            }
+        }
+
+        // The blade answers: a melee attacker leaves an opening, and a
+        // defender with a consecrated blade takes it — once, for free.
+        if melee
+            && !reaction
+            && self.unit(target).blade
+            && self.unit(target).is_active()
+            && self.unit(shooter).is_active()
+            && cheb(self.unit(shooter).tile, self.unit(target).tile) <= 1
+        {
+            let chance = (self.unit(target).accuracy * 85 / 100).clamp(5, 95);
+            let hit = (self.rng.roll(100) as i32) < chance;
+            events.push(Event::Riposte { unit: target, target: shooter, hit });
+            if hit {
+                self.xp[target.0 as usize].shots_hit += 1;
+                let damage = BLADE_POWER * self.rng.roll(201) as i32 / 100;
+                self.apply_damage(shooter, damage, Some(target), events);
             }
         }
     }
@@ -3310,5 +3434,83 @@ mod tests {
         let obliterate = b.unit(UnitId(0)).health + 50;
         b.apply_damage(UnitId(0), obliterate, None, &mut events);
         assert!(b.unit(UnitId(2)).horror > 0, "the witness carries it home");
+    }
+
+    #[test]
+    fn the_censer_burns_a_cone_and_the_mortar_stuns() {
+        // Censer: fire clouds walk the line to the target.
+        let mut units = duelists();
+        units[0].weapon = crate::units::Weapon::from_data("censer", "censer");
+        units[1].tile = IVec3::new(4, 5, 0);
+        let mut b = open_field(units, 31);
+        let events = b
+            .perform(Action::Fire { unit: UnitId(0), target: UnitId(1), mode: FireMode::Snap })
+            .unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, Event::FireStarted { .. })),
+            "{events:?}"
+        );
+        assert!(!b.clouds.is_empty(), "the ground burns");
+
+        // Mortar: stun, not blood.
+        let mut units = duelists();
+        units[0].weapon = crate::units::Weapon::from_data("salt-shot mortar", "salt_mortar");
+        units[0].accuracy = 95;
+        units[1].tile = IVec3::new(7, 5, 0); // inside arcing range
+        let mut b = open_field(units, 32);
+        let hp = b.unit(UnitId(1)).health;
+        for _ in 0..8 {
+            if b.unit(UnitId(1)).stun > 0 || !b.unit(UnitId(1)).conscious {
+                break;
+            }
+            if b.unit(UnitId(0)).fire_cost(FireMode::Snap).is_some_and(|c| b.unit(UnitId(0)).tu < c) {
+                b.perform(Action::EndTurn).unwrap();
+                b.perform(Action::EndTurn).unwrap();
+            }
+            b.perform(Action::Fire { unit: UnitId(0), target: UnitId(1), mode: FireMode::Snap })
+                .unwrap();
+        }
+        assert!(b.unit(UnitId(1)).stun > 0, "salt trauma lands");
+        assert_eq!(b.unit(UnitId(1)).health, hp, "and draws no blood");
+    }
+
+    #[test]
+    fn blades_riposte_and_circlets_shatter() {
+        // A hound bites a bladed soldier and gets answered.
+        let mut units = duelists();
+        units[0].blade = true;
+        units[0].accuracy = 95;
+        units[1] = Unit::hellhound(1, "Hound", IVec3::new(2, 5, 0));
+        let mut b = open_field(units, 33);
+        b.perform(Action::EndTurn).unwrap(); // demons to move
+        let events = b
+            .perform(Action::Fire { unit: UnitId(1), target: UnitId(0), mode: FireMode::Snap })
+            .unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Riposte { unit, .. } if *unit == UnitId(0))),
+            "{events:?}"
+        );
+
+        // A circlet eats one Terrify and dies of it.
+        let mut units = duelists();
+        units[0].circlet = true;
+        units[1] = Unit::overseer(1, "Overseer", IVec3::new(6, 5, 0));
+        let mut b = open_field(units, 34);
+        b.perform(Action::EndTurn).unwrap();
+        let events = b
+            .perform(Action::Terrify { unit: UnitId(1), target: UnitId(0) })
+            .unwrap();
+        assert!(matches!(events[0], Event::CircletShattered { unit: UnitId(0) }));
+        assert!(!b.unit(UnitId(0)).circlet, "one blow, one circlet");
+    }
+
+    #[test]
+    fn silent_weapons_leave_no_noise() {
+        let mut units = duelists();
+        units[0].weapon = crate::units::Weapon::from_data("consecrated arbalest", "arbalest");
+        let mut b = open_field(units, 35);
+        b.perform(Action::Fire { unit: UnitId(0), target: UnitId(1), mode: FireMode::Snap })
+            .unwrap();
+        assert!(b.last_noise.is_none(), "the arbalest tells nobody anything");
     }
 }

@@ -22,16 +22,19 @@ pub enum Facility {
     Workshop,
     /// Candles, psalms, and quiet: where broken minds are mended.
     Chapel,
+    /// Warded meditation cells: garrisoned soldiers slowly steel their nerve.
+    Sanctum,
 }
 
 impl Facility {
-    pub const BUILDABLE: [Facility; 6] = [
+    pub const BUILDABLE: [Facility; 7] = [
         Facility::Quarters,
         Facility::AugurArray,
         Facility::Library,
         Facility::Infirmary,
         Facility::Workshop,
         Facility::Chapel,
+        Facility::Sanctum,
     ];
 
     pub fn cost(self) -> i64 {
@@ -43,6 +46,7 @@ impl Facility {
             Facility::Infirmary => 200,
             Facility::Workshop => 150,
             Facility::Chapel => 180,
+            Facility::Sanctum => 220,
         }
     }
 
@@ -55,6 +59,7 @@ impl Facility {
             Facility::Infirmary => 12,
             Facility::Workshop => 10,
             Facility::Chapel => 12,
+            Facility::Sanctum => 14,
         }
     }
 
@@ -67,6 +72,7 @@ impl Facility {
             Facility::Infirmary => 15,
             Facility::Workshop => 10,
             Facility::Chapel => 8,
+            Facility::Sanctum => 10,
         }
     }
 
@@ -79,6 +85,7 @@ impl Facility {
             Facility::Infirmary => "Infirmary",
             Facility::Workshop => "Workshop",
             Facility::Chapel => "Chapel",
+            Facility::Sanctum => "Sanctum",
         }
     }
 }

@@ -241,11 +241,62 @@ fn make_unit(id: u32, s: &Soldier, kit: (u32, u32), research: &ResearchState) ->
     }
     u.health = u.health_max;
     if s.has_lance && research.is_complete(Project::HellfireLance) {
-        // A forged lance replaces the rifle outright.
+        // A forged lance replaces everything else outright.
         u.weapon = ods_sim::units::hellfire_lance();
-    } else if research.is_complete(Project::BlessedArms) {
-        u.weapon.power += 8;
+    } else {
+        // The issued weapon, from the armoury tables.
+        let display = match s.weapon_key.as_str() {
+            "arbalest" => "consecrated arbalest",
+            "censer" => "censer",
+            "ram_hammer" => "ram hammer",
+            "salt_mortar" => "salt-shot mortar",
+            _ => "consecrated rifle",
+        };
+        let key = if ods_sim::data::weapons().contains_key(&s.weapon_key) {
+            s.weapon_key.as_str()
+        } else {
+            "rifle"
+        };
+        u.weapon = ods_sim::units::Weapon::from_data(display, key);
+        if research.is_complete(Project::BlessedArms) {
+            u.weapon.power += 8;
+        }
     }
+    u.blade = s.has_blade;
+    u.circlet = s.has_circlet;
+    match s.armor {
+        crate::campaign::ArmorTier::Vestments => {}
+        crate::campaign::ArmorTier::Plate => {
+            u.armor_front += 3;
+            u.armor_side += 2;
+            u.armor_rear += 1;
+            u.health_max += 8;
+            u.tu_max -= 2;
+        }
+        crate::campaign::ArmorTier::Aegis => {
+            u.armor_front += 6;
+            u.armor_side += 5;
+            u.armor_rear += 3;
+            u.health_max += 12;
+            u.tu_max -= 6;
+        }
+    }
+    u.health = u.health_max;
+    if let Some(relic) = &s.relic {
+        match relic.affix {
+            crate::campaign::Affix::Vigil => u.reactions += 10,
+            crate::campaign::Affix::SteadyHand => u.accuracy += 8,
+            crate::campaign::Affix::Vigor => u.tu_max += 5,
+            crate::campaign::Affix::Bulwark => {
+                u.armor_front += 2;
+                u.armor_side += 2;
+                u.armor_rear += 2;
+            }
+            crate::campaign::Affix::Grisly => u.bravery = (u.bravery + 8).min(95),
+        }
+    }
+    // Officers rally (wave T's teeth, wired where the rank already lives).
+    u.can_rally = s.missions + s.kills * 2 >= 13;
     for &part in &s.lost_parts {
         if !u.injuries.contains(&part) {
             u.injuries.push(part);

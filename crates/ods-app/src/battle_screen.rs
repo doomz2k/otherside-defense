@@ -695,6 +695,15 @@ impl BattleScreen {
             Event::AtrocityFound { unit, .. } => {
                 self.float(*unit, "ATROCITY", egui::Color32::from_rgb(220, 60, 40));
             }
+            Event::Riposte { target, hit: true, .. } => {
+                self.float(*target, "RIPOSTE", egui::Color32::from_rgb(230, 230, 160));
+            }
+            Event::CircletShattered { unit } => {
+                self.float(*unit, "CIRCLET SHATTERS", egui::Color32::from_rgb(120, 200, 255));
+            }
+            Event::Rallied { by } => {
+                self.float(*by, "RALLY", egui::Color32::from_rgb(255, 220, 120));
+            }
             Event::Panicked { unit } => {
                 self.float(*unit, "PANIC", egui::Color32::from_rgb(255, 210, 90));
             }
@@ -1375,6 +1384,18 @@ fn describe(event: &Event, battle: &Battle) -> String {
         }
         Event::Whispered { unit } => {
             format!("{} stands on corrupted ground... the ground knows their name", name(unit))
+        }
+        Event::Riposte { unit, target, hit } => format!(
+            "{}'s blade answers {} — {}",
+            name(unit),
+            name(target),
+            if *hit { "and BITES" } else { "and misses" }
+        ),
+        Event::CircletShattered { unit } => {
+            format!("{}'s circlet takes the psi blow and SHATTERS", name(unit))
+        }
+        Event::Rallied { by } => {
+            format!("{} rallies the line — every heart steadies", name(by))
         }
         Event::AtrocityFound { unit, at } => {
             format!("!!! {} finds what the demons left at {at}. Nobody should see this.", name(unit))

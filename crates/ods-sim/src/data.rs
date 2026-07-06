@@ -24,6 +24,12 @@ pub struct WeaponDef {
     pub breach_radius: f32,
     pub melee: bool,
     pub arcing: bool,
+    #[serde(default)]
+    pub silent: bool,
+    #[serde(default)]
+    pub fire_cone: bool,
+    #[serde(default)]
+    pub stun_power: i32,
 }
 
 #[derive(Clone, Copy, Debug, serde::Deserialize)]

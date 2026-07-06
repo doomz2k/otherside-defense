@@ -113,6 +113,12 @@ pub struct Weapon {
     pub melee: bool,
     /// Arcing weapons lob over cover: no line of sight needed in range.
     pub arcing: bool,
+    /// Silent weapons betray no position (no noise cue when fired).
+    pub silent: bool,
+    /// Fires a cone of burning ground instead of a projectile (the censer).
+    pub fire_cone: bool,
+    /// Deals stun instead of blood (the salt-shot mortar); 0 = normal.
+    pub stun_power: i32,
 }
 
 impl Weapon {
@@ -133,6 +139,9 @@ impl Weapon {
             breach_radius: d.breach_radius,
             melee: d.melee,
             arcing: d.arcing,
+            silent: d.silent,
+            fire_cone: d.fire_cone,
+            stun_power: d.stun_power,
         }
     }
 }
@@ -214,6 +223,12 @@ pub struct Unit {
     pub smoke_grenades: u32,
     /// Ward kits: chalk-and-salt for one burning ward each.
     pub ward_kits: u32,
+    /// A consecrated blade at the hip: free riposte against melee attacks.
+    pub blade: bool,
+    /// A warded circlet: shatters to block one psi assault.
+    pub circlet: bool,
+    /// Officers rally once per battle (set by the campaign from rank).
+    pub can_rally: bool,
     /// Non-combatant caught in the massacre (soldier-shaped, unarmed).
     pub civilian: bool,
     /// True flight: ignores floors, ramps, and drops.
@@ -268,6 +283,9 @@ impl Unit {
             possessed: 0,
             smoke_grenades: 0,
             ward_kits: 0,
+            blade: false,
+            circlet: false,
+            can_rally: false,
             civilian: false,
             flies: false,
             smasher: false,

@@ -145,10 +145,30 @@ pub enum ManufactureItem {
     /// Mount a slain breed as a trophy: the halls remember, the garrison
     /// stands taller, the council pays for the spectacle.
     MountTrophy,
+    /// Silent, patient, precise: the marksman's answer to the dark.
+    ForgeArbalest,
+    /// A swung firestorm: burning ground in a cone (needs Blessed Arms).
+    ForgeCenser,
+    /// Cracks demons and the walls they hide behind alike.
+    ForgeHammer,
+    /// Arcing salt-shot: trauma without blood, for capture runs
+    /// (needs Blessed Arms).
+    ForgeMortar,
+    /// A consecrated blade: a free riposte against every melee attacker.
+    ForgeBlade,
+    /// A warded circlet: shatters to stop one psi assault
+    /// (needs Interrogation).
+    ForgeCirclet,
+    /// Hellsteel plate armor: +armor, +health, a little slower
+    /// (needs Hellsteel Plate).
+    ForgePlate,
+    /// The abyssal aegis, forged from Behemoth hide: a walking bulwark
+    /// (needs Hellsteel Plate and a slain Behemoth).
+    ForgeAegis,
 }
 
 impl ManufactureItem {
-    pub const ALL: [ManufactureItem; 7] = [
+    pub const ALL: [ManufactureItem; 15] = [
         ManufactureItem::HellfireCharges,
         ManufactureItem::FieldDressings,
         ManufactureItem::TradeArms,
@@ -156,6 +176,14 @@ impl ManufactureItem {
         ManufactureItem::HellsteelLimb,
         ManufactureItem::FleshGraft,
         ManufactureItem::MountTrophy,
+        ManufactureItem::ForgeArbalest,
+        ManufactureItem::ForgeCenser,
+        ManufactureItem::ForgeHammer,
+        ManufactureItem::ForgeMortar,
+        ManufactureItem::ForgeBlade,
+        ManufactureItem::ForgeCirclet,
+        ManufactureItem::ForgePlate,
+        ManufactureItem::ForgeAegis,
     ];
 
     /// Artificer-days of work.
@@ -168,6 +196,14 @@ impl ManufactureItem {
             ManufactureItem::HellsteelLimb => 45,
             ManufactureItem::FleshGraft => 55,
             ManufactureItem::MountTrophy => 25,
+            ManufactureItem::ForgeArbalest => 35,
+            ManufactureItem::ForgeCenser => 45,
+            ManufactureItem::ForgeHammer => 30,
+            ManufactureItem::ForgeMortar => 50,
+            ManufactureItem::ForgeBlade => 20,
+            ManufactureItem::ForgeCirclet => 40,
+            ManufactureItem::ForgePlate => 45,
+            ManufactureItem::ForgeAegis => 70,
         }
     }
 
@@ -181,6 +217,14 @@ impl ManufactureItem {
             ManufactureItem::HellsteelLimb => (0, 6),
             ManufactureItem::FleshGraft => (3, 3),
             ManufactureItem::MountTrophy => (0, 2),
+            ManufactureItem::ForgeArbalest => (0, 3),
+            ManufactureItem::ForgeCenser => (3, 2),
+            ManufactureItem::ForgeHammer => (0, 4),
+            ManufactureItem::ForgeMortar => (2, 3),
+            ManufactureItem::ForgeBlade => (0, 2),
+            ManufactureItem::ForgeCirclet => (2, 1),
+            ManufactureItem::ForgePlate => (0, 5),
+            ManufactureItem::ForgeAegis => (2, 8),
         }
     }
 
@@ -193,6 +237,14 @@ impl ManufactureItem {
             ManufactureItem::HellsteelLimb => "Cast a hellsteel limb",
             ManufactureItem::FleshGraft => "Cut a flesh graft",
             ManufactureItem::MountTrophy => "Mount a trophy",
+            ManufactureItem::ForgeArbalest => "Forge an arbalest",
+            ManufactureItem::ForgeCenser => "Forge a censer",
+            ManufactureItem::ForgeHammer => "Forge a ram hammer",
+            ManufactureItem::ForgeMortar => "Forge a salt-shot mortar",
+            ManufactureItem::ForgeBlade => "Consecrate a blade",
+            ManufactureItem::ForgeCirclet => "Forge a warded circlet",
+            ManufactureItem::ForgePlate => "Forge hellsteel plate",
+            ManufactureItem::ForgeAegis => "Forge the abyssal aegis",
         }
     }
 }

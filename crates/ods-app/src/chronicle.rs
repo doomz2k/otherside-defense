@@ -102,6 +102,9 @@ pub fn narrate(c: &Campaign, event: &GeoEvent) -> String {
         E::NightTerror { name } => {
             format!("{stamp} {name} wakes screaming; the ward-candles are lit until dawn")
         }
+        E::RelicFound { name } => {
+            format!("{stamp} in the rubble, something old and holy: {name}")
+        }
         E::DreamOfTheRift { region } => format!(
             "{stamp} ...but the dream was a MAP: an unseen rift in {}, revealed in sleep",
             region.name()

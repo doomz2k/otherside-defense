@@ -15,10 +15,11 @@ mod research;
 
 pub use base::{Chapterhouse, Facility, GRID};
 pub use campaign::{
-    ARTIFICER_HIRE_COST, Campaign, CampaignOutcome, CampaignStats, CHAPTERHOUSE_COST, Difficulty,
+    Affix, ArmorTier, ARTIFICER_HIRE_COST, Campaign, CampaignOutcome, CampaignStats,
+    CHAPTERHOUSE_COST, Difficulty,
     Fallen, FINAL_ASSAULT_BRIMSTONE, GeoError, GeoEvent, MissionKind, MissionToken,
     OCCULTIST_HIRE_COST, PANIC_BREAKPOINT, Phobia, Prisoners, Quirk, SOLDIER_HIRE_COST, Soldier,
-    SoldierStats, Sortie,
+    Relic, SoldierStats, Sortie,
 };
 pub use director::{Nest, Rift, RiftKind};
 pub use geography::Region;
