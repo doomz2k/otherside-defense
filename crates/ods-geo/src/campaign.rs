@@ -402,7 +402,7 @@ impl Campaign {
                 self.base.gate(),
             )
         } else {
-            missions::build_assault(seed, &squad, garrison, &self.research)
+            missions::build_assault(seed, &squad, garrison, self.month, &self.research)
         };
         Ok((battle, MissionToken { kind, squad_idx }))
     }

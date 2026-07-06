@@ -51,8 +51,60 @@ fn run_side_turn(battle: &mut Battle, side: Side) -> Vec<Event> {
 
 fn pick_action(battle: &Battle, id: UnitId, side: Side) -> Option<Action> {
     let me = battle.unit(id);
+    let prey = battle
+        .living(side.enemy())
+        .min_by_key(|u| (dist(me.tile, u.tile), u.id.0))?;
+    let prey_dist = dist(me.tile, prey.tile);
 
-    // Shoot the nearest visible enemy while we can afford it.
+    // Broken creatures run from what broke them (the fearless never do).
+    if me.morale < 35 && me.bravery < 80 && prey_dist <= 6 {
+        let away = me.tile + (me.tile - prey.tile).signum() * 4;
+        if let Some(goal) = nearest_open_neighbor(battle, away, me.tile, false)
+            && goal != me.tile
+        {
+            return Some(Action::Move { unit: id, to: goal });
+        }
+    }
+
+    // Psi talents whisper before they fight: break the bravest target.
+    if me.psi
+        && me.fire_cost(FireMode::Snap).is_some_and(|c| me.tu >= c + me.tu_max / 4)
+        && prey_dist <= crate::battle::TERRIFY_RANGE_TILES
+    {
+        return Some(Action::Terrify { unit: id, target: prey.id });
+    }
+
+    if me.weapon.melee {
+        // Claws: charge the nearest prey; strike when adjacent.
+        if prey_dist <= 1 {
+            if me.fire_cost(FireMode::Snap).is_some_and(|c| me.tu >= c) {
+                return Some(Action::Fire { unit: id, target: prey.id, mode: FireMode::Snap });
+            }
+            return None;
+        }
+        let goal = nearest_open_neighbor(battle, prey.tile, me.tile, false)?;
+        if goal == me.tile {
+            return None;
+        }
+        return Some(Action::Move { unit: id, to: goal });
+    }
+
+    if me.weapon.arcing {
+        // Lob globs from beyond retaliation; close only when out of range.
+        if prey_dist <= crate::units::ARC_RANGE_TILES {
+            if me.fire_cost(FireMode::Snap).is_some_and(|c| me.tu >= c) {
+                return Some(Action::Fire { unit: id, target: prey.id, mode: FireMode::Snap });
+            }
+            return None;
+        }
+        let goal = nearest_open_neighbor(battle, prey.tile, me.tile, true)?;
+        if goal == me.tile {
+            return None;
+        }
+        return Some(Action::Move { unit: id, to: goal });
+    }
+
+    // Gunline: shoot the nearest visible enemy while we can afford it.
     let mut visible: Vec<UnitId> = battle
         .visible_enemies(side)
         .into_iter()
@@ -67,13 +119,9 @@ fn pick_action(battle: &Battle, id: UnitId, side: Side) -> Option<Action> {
         return None; // in contact but dry — hold position
     }
 
-    // Nothing visible: advance toward the nearest living enemy. The AI is
-    // map-omniscient for now; scent-of-prey works fine for imps, and the
-    // auto-resolver needs battles to conclude.
-    let prey = battle
-        .living(side.enemy())
-        .min_by_key(|u| (dist(me.tile, u.tile), u.id.0))?;
-    let goal = nearest_open_neighbor(battle, prey.tile, me.tile)?;
+    // Nothing visible: advance toward the nearest living enemy, preferring
+    // tiles that hug cover. The AI is map-omniscient for now.
+    let goal = nearest_open_neighbor(battle, prey.tile, me.tile, true)?;
     if goal == me.tile {
         return None;
     }
@@ -85,8 +133,20 @@ fn dist(a: IVec3, b: IVec3) -> i32 {
     d.x.max(d.y).max(d.z)
 }
 
-fn nearest_open_neighbor(battle: &Battle, around: IVec3, from: IVec3) -> Option<IVec3> {
-    let mut best: Option<IVec3> = None;
+/// Does this tile touch something solid to duck behind?
+fn hugs_cover(battle: &Battle, tile: IVec3) -> bool {
+    [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .iter()
+        .any(|&(dx, dy)| !battle.tiles.is_walkable(tile + IVec3::new(dx, dy, 0)))
+}
+
+fn nearest_open_neighbor(
+    battle: &Battle,
+    around: IVec3,
+    from: IVec3,
+    prefer_cover: bool,
+) -> Option<IVec3> {
+    let mut best: Option<(i32, IVec3)> = None;
     for dy in -1..=1 {
         for dx in -1..=1 {
             if dx == 0 && dy == 0 {
@@ -96,12 +156,16 @@ fn nearest_open_neighbor(battle: &Battle, around: IVec3, from: IVec3) -> Option<
             if !battle.tiles.is_walkable(t) || battle.unit_at(t).is_some() {
                 continue;
             }
-            if best.is_none_or(|b| dist(from, t) < dist(from, b)) {
-                best = Some(t);
+            let mut score = dist(from, t) * 2;
+            if prefer_cover && !hugs_cover(battle, t) {
+                score += 3;
+            }
+            if best.is_none_or(|(s, _)| score < s) {
+                best = Some((score, t));
             }
         }
     }
-    best
+    best.map(|(_, t)| t)
 }
 
 #[cfg(test)]

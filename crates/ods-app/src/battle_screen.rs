@@ -385,6 +385,28 @@ fn describe(event: &Event, battle: &Battle) -> String {
         }
         Event::Panicked { unit } => format!("{} freezes in dread!", name(unit)),
         Event::Berserked { unit } => format!("{} SNAPS — firing wildly!", name(unit)),
+        Event::Kneeled { unit, kneeling } => {
+            if *kneeling {
+                format!("{} kneels", name(unit))
+            } else {
+                format!("{} rises", name(unit))
+            }
+        }
+        Event::Stunned { unit, stun } => {
+            format!("{} reels from the binding rod (stun {stun})", name(unit))
+        }
+        Event::Subdued { unit } => format!("*** {} is subdued — bound where it lies ***", name(unit)),
+        Event::Awakened { unit } => format!("{} shakes off the binding!", name(unit)),
+        Event::Terrified { unit, target, morale_lost } => {
+            if *morale_lost > 0 {
+                format!("{} whispers into {}'s mind (-{morale_lost} morale)", name(unit), name(target))
+            } else {
+                format!("{} resists the whispering of {}", name(target), name(unit))
+            }
+        }
+        Event::Taken { unit } => format!("!!! {} IS TAKEN — the body rises !!!", name(unit)),
+        Event::Hatched { unit } => format!("!!! {} tears free of the husk !!!", name(unit)),
+        Event::ObjectiveDestroyed => "THE OBELISK FALLS — the rift collapses!".to_string(),
         Event::BattleOver { winner } => format!("=== BATTLE OVER: {winner:?} wins ==="),
     }
 }

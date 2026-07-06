@@ -24,10 +24,19 @@ const HEADROOM_Z: i32 = 4;
 /// (one full 16x16 layer's worth).
 const FLOOR_SUPPORT_MIN: i32 = TILE_VOXELS * TILE_VOXELS;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TileKind {
+    Blocked,
+    Open,
+    /// Waist-high climbable mass (rubble, steps): passable, and the only
+    /// place a unit can transition between z-levels.
+    Ramp,
+}
+
 pub struct TileMap {
     min: IVec3,
     size: IVec3,
-    walkable: Vec<bool>,
+    kinds: Vec<TileKind>,
 }
 
 impl TileMap {
@@ -36,14 +45,14 @@ impl TileMap {
         let mut map = Self {
             min,
             size,
-            walkable: vec![false; (size.x * size.y * size.z) as usize],
+            kinds: vec![TileKind::Blocked; (size.x * size.y * size.z) as usize],
         };
         for z in 0..size.z {
             for y in 0..size.y {
                 for x in 0..size.x {
                     let tile = min + IVec3::new(x, y, z);
                     let idx = map.index(tile).expect("in bounds by construction");
-                    map.walkable[idx] = derive_tile(world, tile);
+                    map.kinds[idx] = derive_tile(world, tile);
                 }
             }
         }
@@ -67,7 +76,13 @@ impl TileMap {
     }
 
     pub fn is_walkable(&self, tile: IVec3) -> bool {
-        self.index(tile).is_some_and(|i| self.walkable[i])
+        self.index(tile)
+            .is_some_and(|i| self.kinds[i] != TileKind::Blocked)
+    }
+
+    /// Ramp tiles are where units can climb between z-levels.
+    pub fn is_ramp(&self, tile: IVec3) -> bool {
+        self.index(tile).is_some_and(|i| self.kinds[i] == TileKind::Ramp)
     }
 
     /// Re-derive all tiles overlapping the voxel-space AABB `[vmin, vmax]`.
@@ -80,7 +95,7 @@ impl TileMap {
                 for x in tmin.x..=tmax.x {
                     let tile = IVec3::new(x, y, z);
                     if let Some(idx) = self.index(tile) {
-                        self.walkable[idx] = derive_tile(world, tile);
+                        self.kinds[idx] = derive_tile(world, tile);
                     }
                 }
             }
@@ -97,19 +112,20 @@ impl TileMap {
         let h = |t: IVec3| {
             let d = (to - t).abs();
             let (lo, hi) = (d.x.min(d.y), d.x.max(d.y));
-            MOVE_COST_DIAG * lo + MOVE_COST_ORTHO * (hi - lo)
+            MOVE_COST_DIAG * lo + MOVE_COST_ORTHO * (hi - lo) + CLIMB_COST * d.z
         };
 
-        let mut open: BinaryHeap<Reverse<(i32, u32, i32, i32)>> = BinaryHeap::new();
+        type OpenEntry = Reverse<(i32, u32, i32, i32, i32)>;
+        let mut open: BinaryHeap<OpenEntry> = BinaryHeap::new();
         let mut g: HashMap<IVec3, i32> = HashMap::new();
         let mut came: HashMap<IVec3, IVec3> = HashMap::new();
         let mut tie = 0u32;
 
         g.insert(from, 0);
-        open.push(Reverse((h(from), tie, from.x, from.y)));
+        open.push(Reverse((h(from), tie, from.x, from.y, from.z)));
 
-        while let Some(Reverse((_, _, cx, cy))) = open.pop() {
-            let current = IVec3::new(cx, cy, from.z);
+        while let Some(Reverse((_, _, cx, cy, cz))) = open.pop() {
+            let current = IVec3::new(cx, cy, cz);
             if current == to {
                 let mut path = vec![to];
                 let mut node = to;
@@ -125,34 +141,46 @@ impl TileMap {
             }
             let current_g = g[&current];
 
-            for dy in -1..=1 {
-                for dx in -1..=1 {
-                    if dx == 0 && dy == 0 {
-                        continue;
-                    }
-                    let next = current + IVec3::new(dx, dy, 0);
-                    if !self.is_walkable(next) || blocked.contains(&next) {
-                        continue;
-                    }
-                    // No cutting corners diagonally past a blocked tile.
-                    if dx != 0 && dy != 0 {
-                        let a = current + IVec3::new(dx, 0, 0);
-                        let b = current + IVec3::new(0, dy, 0);
-                        if !self.is_walkable(a)
-                            || !self.is_walkable(b)
-                            || blocked.contains(&a)
-                            || blocked.contains(&b)
-                        {
+            for dz in -1i32..=1 {
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue; // no purely vertical hops
+                        }
+                        let next = current + IVec3::new(dx, dy, dz);
+                        if !self.is_walkable(next) || blocked.contains(&next) {
                             continue;
                         }
-                    }
-                    let cost = step_cost(current, next);
-                    let next_g = current_g + cost;
-                    if g.get(&next).is_none_or(|&old| next_g < old) {
-                        g.insert(next, next_g);
-                        came.insert(next, current);
-                        tie += 1;
-                        open.push(Reverse((next_g + h(next), tie, next.x, next.y)));
+                        // Level changes only happen over climbable mass.
+                        if dz != 0 && !(self.is_ramp(current) || self.is_ramp(next)) {
+                            continue;
+                        }
+                        // No cutting corners diagonally past a blocked tile.
+                        if dx != 0 && dy != 0 && dz == 0 {
+                            let a = current + IVec3::new(dx, 0, 0);
+                            let b = current + IVec3::new(0, dy, 0);
+                            if !self.is_walkable(a)
+                                || !self.is_walkable(b)
+                                || blocked.contains(&a)
+                                || blocked.contains(&b)
+                            {
+                                continue;
+                            }
+                        }
+                        let cost = step_cost(current, next);
+                        let next_g = current_g + cost;
+                        if g.get(&next).is_none_or(|&old| next_g < old) {
+                            g.insert(next, next_g);
+                            came.insert(next, current);
+                            tie += 1;
+                            open.push(Reverse((
+                                next_g + h(next),
+                                tie,
+                                next.x,
+                                next.y,
+                                next.z,
+                            )));
+                        }
                     }
                 }
             }
@@ -161,38 +189,43 @@ impl TileMap {
     }
 }
 
+/// Extra TU for hauling yourself up or down a level.
+pub const CLIMB_COST: i32 = 4;
+
 /// TU cost of stepping between two adjacent tiles.
 pub fn step_cost(a: IVec3, b: IVec3) -> i32 {
     let d = (b - a).abs();
-    if d.x + d.y == 2 { MOVE_COST_DIAG } else { MOVE_COST_ORTHO }
+    let flat = if d.x + d.y == 2 { MOVE_COST_DIAG } else { MOVE_COST_ORTHO };
+    flat + CLIMB_COST * d.z
 }
 
-fn derive_tile(world: &VoxelWorld, tile: IVec3) -> bool {
+fn derive_tile(world: &VoxelWorld, tile: IVec3) -> TileKind {
     let origin = crate::tile_to_voxel_min(tile);
 
-    // Headroom: nothing solid in the torso/head band of this tile.
-    for z in HEADROOM_Z..TILE_VOXELS {
-        for y in 0..TILE_VOXELS {
-            for x in 0..TILE_VOXELS {
-                if world.voxel(origin + IVec3::new(x, y, z)).is_solid() {
-                    return false;
+    // Count solid voxels per vertical band: head (top half), waist (quarter
+    // to half), and feet (bottom quarter).
+    let band = |z0: i32, z1: i32| -> i32 {
+        let mut count = 0;
+        for z in z0..z1 {
+            for y in 0..TILE_VOXELS {
+                for x in 0..TILE_VOXELS {
+                    if world.voxel(origin + IVec3::new(x, y, z)).is_solid() {
+                        count += 1;
+                    }
                 }
             }
         }
+        count
+    };
+
+    let head = band(TILE_VOXELS * 5 / 8, TILE_VOXELS);
+    if head > 0 {
+        return TileKind::Blocked;
     }
 
     // Floor support: solid voxels in this tile's foot band, or the top band
     // of the tile below.
-    let mut support = 0;
-    for z in 0..HEADROOM_Z {
-        for y in 0..TILE_VOXELS {
-            for x in 0..TILE_VOXELS {
-                if world.voxel(origin + IVec3::new(x, y, z)).is_solid() {
-                    support += 1;
-                }
-            }
-        }
-    }
+    let mut support = band(0, HEADROOM_Z);
     let below = origin - IVec3::new(0, 0, TILE_VOXELS);
     for z in (TILE_VOXELS - HEADROOM_Z)..TILE_VOXELS {
         for y in 0..TILE_VOXELS {
@@ -203,7 +236,20 @@ fn derive_tile(world: &VoxelWorld, tile: IVec3) -> bool {
             }
         }
     }
-    support >= FLOOR_SUPPORT_MIN
+    if support < FLOOR_SUPPORT_MIN {
+        return TileKind::Blocked;
+    }
+
+    // Waist band: empty = open ground; substantial mass = climbable ramp.
+    let waist = band(HEADROOM_Z, TILE_VOXELS * 5 / 8);
+    if waist == 0 {
+        TileKind::Open
+    } else if waist >= TILE_VOXELS * TILE_VOXELS {
+        // At least a full layer's worth of mass to clamber on.
+        TileKind::Ramp
+    } else {
+        TileKind::Blocked
+    }
 }
 
 #[cfg(test)]

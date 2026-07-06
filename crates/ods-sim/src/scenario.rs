@@ -8,7 +8,7 @@ use crate::TILE_VOXELS;
 use crate::battle::Battle;
 use crate::units::Unit;
 
-pub const MAP_TILES: IVec3 = IVec3::new(24, 24, 1);
+pub const MAP_TILES: IVec3 = IVec3::new(24, 24, 2);
 
 /// Ground fills voxels z 0..4 (the tile's foot band), so shallow craters
 /// don't punch through to the void.
@@ -19,6 +19,8 @@ const WALL_TOP: i32 = 14;
 pub const MAT_GROUND: Voxel = Voxel(1);
 pub const MAT_WALL: Voxel = Voxel(2);
 pub const MAT_RUBBLE: Voxel = Voxel(3);
+/// The rift obelisk: hell's anchor into the world. Demolish it to win.
+pub const MAT_OBELISK: Voxel = Voxel(4);
 
 pub fn skirmish(seed: u64) -> Battle {
     let mut world = VoxelWorld::new();
@@ -80,10 +82,40 @@ const ORDER_SPAWNS: [(i32, i32); 8] =
 const DEMON_SPAWNS: [(i32, i32); 8] =
     [(21, 8), (21, 11), (21, 14), (20, 16), (21, 5), (20, 18), (21, 20), (20, 3)];
 
-/// Build a battle on the standard map from campaign-supplied soldiers and a
-/// demon head-count. Unit ids are reassigned to match battle indexing; squad
-/// order is preserved so the caller can map results back to its roster.
-pub fn incursion(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32) -> Battle {
+/// The demon pack that answers a given incursion strength (roughly the
+/// campaign month). Early months are imp swarms; later the pack diversifies,
+/// gains an Overseer, and eventually brings a Taker.
+pub fn demon_pack(count: u32, strength: u32, first_id: u32, spawns: &[(i32, i32)]) -> Vec<Unit> {
+    let names = ["Wrath", "Envy", "Gluttony", "Sloth", "Pride", "Greed", "Lust", "Despair"];
+    let mut pack = Vec::new();
+    for i in 0..count.min(spawns.len() as u32) as usize {
+        let id = first_id + i as u32;
+        let (x, y) = spawns[i];
+        let tile = IVec3::new(x, y, 0);
+        let name = names[i % names.len()];
+        let unit = if strength >= 5 && i == 0 {
+            Unit::overseer(id, &format!("Overseer of {name}"), tile)
+        } else if strength >= 7 && i == 1 {
+            Unit::taker(id, "The Taker", tile)
+        } else if strength >= 3 {
+            match i % 4 {
+                2 => Unit::hellhound(id, &format!("Hound of {name}"), tile),
+                3 => Unit::bile_wisp(id, &format!("Wisp of {name}"), tile),
+                _ => Unit::imp(id, &format!("Imp of {name}"), tile),
+            }
+        } else {
+            Unit::imp(id, &format!("Imp of {name}"), tile)
+        };
+        pack.push(unit);
+    }
+    pack
+}
+
+/// Build a battle on the standard map from campaign-supplied soldiers, a
+/// demon head-count, and an escalation strength. Unit ids are reassigned to
+/// match battle indexing; squad order is preserved so the caller can map
+/// results back to its roster.
+pub fn incursion(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32, strength: u32) -> Battle {
     let mut world = VoxelWorld::new();
     world.fill_box(
         IVec3::ZERO,
@@ -103,6 +135,33 @@ pub fn incursion(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32) -> Battle
         fill_tile_walls(&mut world, IVec3::new(6, ty, 0), MAT_WALL);
     }
 
+    // A gutted watchtower: raised floor reached over a rubble mound. High
+    // ground overwatches the yard.
+    world.fill_box(
+        IVec3::new(16 * TILE_VOXELS, 3 * TILE_VOXELS, TILE_VOXELS),
+        IVec3::new(20 * TILE_VOXELS, 6 * TILE_VOXELS, TILE_VOXELS + GROUND_TOP),
+        MAT_WALL,
+    );
+    for (px, py) in [(16, 3), (19, 3), (16, 5), (19, 5)] {
+        world.fill_box(
+            IVec3::new(px * TILE_VOXELS + 4, py * TILE_VOXELS + 4, GROUND_TOP),
+            IVec3::new(px * TILE_VOXELS + 12, py * TILE_VOXELS + 12, TILE_VOXELS),
+            MAT_WALL,
+        );
+    }
+    // The climbable mound at the tower's west face.
+    let mound = IVec3::new(15, 4, 0) * TILE_VOXELS;
+    world.fill_box(
+        mound + IVec3::new(0, 0, GROUND_TOP),
+        mound + IVec3::new(TILE_VOXELS, TILE_VOXELS, 10),
+        MAT_RUBBLE,
+    );
+
+    // The rift obelisk, deep in demon territory (clear of spawn tiles).
+    let obelisk_min = IVec3::new(22 * TILE_VOXELS, 11 * TILE_VOXELS, GROUND_TOP);
+    let obelisk_max = IVec3::new(23 * TILE_VOXELS, 13 * TILE_VOXELS, 24);
+    world.fill_box(obelisk_min, obelisk_max, MAT_OBELISK);
+
     soldiers.truncate(ORDER_SPAWNS.len());
     let mut units = Vec::new();
     for (i, mut s) in soldiers.into_iter().enumerate() {
@@ -111,17 +170,11 @@ pub fn incursion(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32) -> Battle
         s.tile = IVec3::new(x, y, 0);
         units.push(s);
     }
-    let demon_names = ["Wrath", "Envy", "Gluttony", "Sloth", "Pride", "Greed", "Lust", "Despair"];
-    for i in 0..demon_count.min(DEMON_SPAWNS.len() as u32) as usize {
-        let (x, y) = DEMON_SPAWNS[i];
-        units.push(Unit::imp(
-            units.len() as u32,
-            &format!("Imp of {}", demon_names[i]),
-            IVec3::new(x, y, 0),
-        ));
-    }
+    units.extend(demon_pack(demon_count, strength, units.len() as u32, &DEMON_SPAWNS));
 
-    Battle::new(world, IVec3::ZERO, MAP_TILES, units, seed)
+    let mut battle = Battle::new(world, IVec3::ZERO, MAP_TILES, units, seed);
+    battle.set_objective(obelisk_min, obelisk_max);
+    battle
 }
 
 /// Tiles per chapterhouse grid cell in a base-defense map.
@@ -315,7 +368,7 @@ mod tests {
             Unit::imp(1, "Imp", glam::IVec3::new(8, 5, 0)),
         ];
         units[0].accuracy = 90; // make hits likely so the test converges fast
-        let mut b = super::incursion(3, units, 0);
+        let mut b = super::incursion(3, units, 0, 1);
         // incursion() repositions; overwrite for a clean point-blank duel.
         b.units[0].tile = glam::IVec3::new(4, 11, 0);
         b.units[1].tile = glam::IVec3::new(6, 11, 0);
@@ -338,6 +391,64 @@ mod tests {
         let xp = b.experience(UnitId(0));
         assert!(xp.shots_hit > 0, "hits must be recorded: {xp:?}");
         assert_eq!(xp.kills, 1, "the kill goes on the record: {xp:?}");
+    }
+
+    #[test]
+    fn escalation_changes_the_pack() {
+        use crate::units::Species;
+        let spawns: Vec<(i32, i32)> = (0..8).map(|i| (21, 2 + i * 2)).collect();
+
+        let early = super::demon_pack(6, 1, 0, &spawns);
+        assert!(early.iter().all(|u| u.species == Species::Imp));
+
+        let mid = super::demon_pack(6, 4, 0, &spawns);
+        assert!(mid.iter().any(|u| u.species == Species::Hellhound));
+        assert!(mid.iter().any(|u| u.species == Species::BileWisp));
+
+        let late = super::demon_pack(6, 7, 0, &spawns);
+        assert!(late.iter().any(|u| u.species == Species::Overseer));
+        assert!(late.iter().any(|u| u.species == Species::Taker));
+    }
+
+    #[test]
+    fn tower_is_reachable_over_the_mound() {
+        use std::collections::HashSet;
+        let b = super::incursion(9, vec![Unit::soldier(0, "S", glam::IVec3::ZERO)], 0, 1);
+        let mound = glam::IVec3::new(15, 4, 0);
+        let tower = glam::IVec3::new(17, 4, 1);
+        assert!(b.tiles.is_ramp(mound), "the rubble mound is climbable");
+        assert!(b.tiles.is_walkable(tower), "the tower floor holds");
+        let path = b
+            .tiles
+            .path(glam::IVec3::new(12, 4, 0), tower, &HashSet::new())
+            .expect("a route up the mound exists");
+        assert!(path.contains(&mound), "the climb goes over the rubble: {path:?}");
+    }
+
+    #[test]
+    fn demolishing_the_obelisk_wins_the_battle() {
+        use glam::Vec3;
+        let mut b = super::incursion(21, vec![Unit::soldier(0, "S", glam::IVec3::ZERO)], 2, 1);
+        assert!(b.objective.is_some());
+        // Cheat demolition charges straight onto the obelisk (the sim only
+        // cares that the voxels die, not who is holding the detonator).
+        let mut all_events = Vec::new();
+        for dy in 0..3 {
+            let at = glam::IVec3::new(22, 11 + dy, 0);
+            let center = (at * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, 12.0);
+            b.world.carve_sphere(center, 14.0);
+            let mut events = Vec::new();
+            b.check_objective_for_test(&mut events);
+            all_events.extend(events);
+            if b.winner.is_some() {
+                break;
+            }
+        }
+        assert!(
+            all_events.iter().any(|e| matches!(e, crate::battle::Event::ObjectiveDestroyed)),
+            "{all_events:?}"
+        );
+        assert_eq!(b.winner, Some(crate::units::Side::Order));
     }
 
     #[test]

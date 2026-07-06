@@ -7,7 +7,7 @@ use glam::{IVec3, Vec3};
 use ods_voxel::VoxelWorld;
 
 use crate::tiles::{TileMap, step_cost};
-use crate::units::{FireMode, Side, Unit, UnitId};
+use crate::units::{FireMode, Side, Species, Unit, UnitId};
 use crate::{SimRng, TILE_VOXELS};
 
 /// Vision range in tiles (Chebyshev). The Otherside fights at night.
@@ -29,6 +29,15 @@ pub const BLAST_TILES: i32 = 2;
 pub const HEAL_COST_TU: i32 = 12;
 pub const HEAL_AMOUNT: i32 = 4;
 
+/// TU cost to kneel or rise.
+pub const KNEEL_COST: i32 = 4;
+/// Binding rod: cost as % of max TUs, base stun inflicted.
+pub const BIND_COST_PCT: i32 = 25;
+pub const BIND_STUN: i32 = 15;
+/// Terrify psi attack: cost and range.
+pub const TERRIFY_COST_PCT: i32 = 25;
+pub const TERRIFY_RANGE_TILES: i32 = 14;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     TurnStarted { side: Side, turn: u32 },
@@ -47,6 +56,21 @@ pub enum Event {
     Panicked { unit: UnitId },
     /// Dread broke the other way: wild firing at the nearest visible enemy.
     Berserked { unit: UnitId },
+    Kneeled { unit: UnitId, kneeling: bool },
+    /// Non-lethal trauma from a binding rod.
+    Stunned { unit: UnitId, stun: i32 },
+    /// Stun overwhelmed the target: it drops, bound where it lies.
+    Subdued { unit: UnitId },
+    /// An unconscious unit came round.
+    Awakened { unit: UnitId },
+    /// A psi assault on the mind; morale_lost is 0 when resisted.
+    Terrified { unit: UnitId, target: UnitId, morale_lost: i32 },
+    /// A Taker's kill: the victim rises as a Husk on the demons' side.
+    Taken { unit: UnitId },
+    /// A destroyed Husk splits open: a fresh Taker is born.
+    Hatched { unit: UnitId },
+    /// The rift obelisk is demolished; the incursion collapses.
+    ObjectiveDestroyed,
     BattleOver { winner: Side },
 }
 
@@ -58,6 +82,14 @@ pub enum Action {
     Throw { unit: UnitId, at: IVec3 },
     /// Field-dress a wounded ally (or yourself) on an adjacent tile.
     Heal { medic: UnitId, target: UnitId },
+    /// Toggle kneeling (+15% accuracy; ends when the unit moves).
+    Kneel { unit: UnitId },
+    /// Reserve enough TUs for a snap shot while moving.
+    SetReserve { unit: UnitId, on: bool },
+    /// Strike an adjacent enemy with a binding rod: stun, not blood.
+    Bind { unit: UnitId, target: UnitId },
+    /// Psi assault (Overseers and worse): batters morale through walls.
+    Terrify { unit: UnitId, target: UnitId },
     EndTurn,
 }
 
@@ -76,6 +108,8 @@ pub enum ActionError {
     /// No grenades / heal charges left.
     NoCharges,
     NotAdjacent,
+    /// The unit has no psionic talent.
+    NoPsi,
 }
 
 fn cheb(a: IVec3, b: IVec3) -> i32 {
@@ -94,6 +128,15 @@ pub struct Experience {
     pub dread_survived: u32,
 }
 
+/// A destructible mission objective: demolish enough of it and the
+/// incursion collapses regardless of surviving defenders.
+#[derive(Clone, Copy, Debug)]
+pub struct Objective {
+    pub min: IVec3,
+    pub max: IVec3,
+    initial_voxels: usize,
+}
+
 pub struct Battle {
     pub world: VoxelWorld,
     pub tiles: TileMap,
@@ -101,6 +144,9 @@ pub struct Battle {
     pub side_to_move: Side,
     pub turn: u32,
     pub winner: Option<Side>,
+    /// Sight range in tiles; night assaults shrink it.
+    pub vision_tiles: i32,
+    pub objective: Option<Objective>,
     xp: Vec<Experience>,
     rng: SimRng,
 }
@@ -122,6 +168,8 @@ impl Battle {
             side_to_move: Side::Order,
             turn: 1,
             winner: None,
+            vision_tiles: VISION_TILES,
+            objective: None,
             xp,
             rng: SimRng::from_seed(seed),
         }
@@ -129,6 +177,48 @@ impl Battle {
 
     pub fn experience(&self, id: UnitId) -> Experience {
         self.xp[id.0 as usize]
+    }
+
+    /// Register the destructible objective (voxel-space AABB, `[min, max)`).
+    pub fn set_objective(&mut self, min: IVec3, max: IVec3) {
+        let initial_voxels = self.count_objective_voxels(min, max);
+        self.objective = Some(Objective { min, max, initial_voxels });
+    }
+
+    fn count_objective_voxels(&self, min: IVec3, max: IVec3) -> usize {
+        let mut count = 0;
+        for z in min.z..max.z {
+            for y in min.y..max.y {
+                for x in min.x..max.x {
+                    if self.world.voxel(IVec3::new(x, y, z)).is_solid() {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    #[cfg(test)]
+    pub fn check_objective_for_test(&mut self, events: &mut Vec<Event>) {
+        self.check_objective(events);
+    }
+
+    /// After any destruction: has the obelisk fallen below a third?
+    fn check_objective(&mut self, events: &mut Vec<Event>) {
+        if self.winner.is_some() {
+            return;
+        }
+        let Some(obj) = self.objective else { return };
+        if obj.initial_voxels == 0 {
+            return;
+        }
+        let left = self.count_objective_voxels(obj.min, obj.max);
+        if left * 3 < obj.initial_voxels {
+            events.push(Event::ObjectiveDestroyed);
+            self.winner = Some(Side::Order);
+            events.push(Event::BattleOver { winner: Side::Order });
+        }
     }
 
     pub fn unit(&self, id: UnitId) -> &Unit {
@@ -139,14 +229,17 @@ impl Battle {
         &mut self.units[id.0 as usize]
     }
 
+    /// Units still on their feet: alive AND conscious.
     pub fn living(&self, side: Side) -> impl Iterator<Item = &Unit> {
-        self.units.iter().filter(move |u| u.alive && u.side == side)
+        self.units
+            .iter()
+            .filter(move |u| u.is_active() && u.side == side)
     }
 
     pub fn unit_at(&self, tile: IVec3) -> Option<UnitId> {
         self.units
             .iter()
-            .find(|u| u.alive && u.tile == tile)
+            .find(|u| u.is_active() && u.tile == tile)
             .map(|u| u.id)
     }
 
@@ -175,7 +268,7 @@ impl Battle {
     pub fn can_see(&self, a: UnitId, b: UnitId) -> bool {
         let (a, b) = (self.unit(a), self.unit(b));
         let d = (b.tile - a.tile).abs();
-        d.x.max(d.y).max(d.z) <= VISION_TILES
+        d.x.max(d.y).max(d.z) <= self.vision_tiles
             && self.los_clear(Self::eye(a.tile), Self::chest(b.tile))
     }
 
@@ -201,7 +294,7 @@ impl Battle {
                     let tile = IVec3::new(x, y, z);
                     let visible = viewers.iter().any(|&v| {
                         let d = (tile - v).abs();
-                        d.x.max(d.y).max(d.z) <= VISION_TILES
+                        d.x.max(d.y).max(d.z) <= self.vision_tiles
                             && self.los_clear(Self::eye(v), Self::chest(tile))
                     });
                     if visible {
@@ -225,13 +318,17 @@ impl Battle {
             Action::Fire { unit, target, mode } => self.do_fire(unit, target, mode),
             Action::Throw { unit, at } => self.do_throw(unit, at),
             Action::Heal { medic, target } => self.do_heal(medic, target),
+            Action::Kneel { unit } => self.do_kneel(unit),
+            Action::SetReserve { unit, on } => self.do_set_reserve(unit, on),
+            Action::Bind { unit, target } => self.do_bind(unit, target),
+            Action::Terrify { unit, target } => self.do_terrify(unit, target),
             Action::EndTurn => Ok(self.end_turn()),
         }
     }
 
     fn check_actor(&self, id: UnitId) -> Result<(), ActionError> {
         let u = self.unit(id);
-        if !u.alive {
+        if !u.is_active() {
             return Err(ActionError::DeadUnit);
         }
         if u.side != self.side_to_move {
@@ -240,26 +337,119 @@ impl Battle {
         Ok(())
     }
 
+    fn do_kneel(&mut self, id: UnitId) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        if self.unit(id).tu < KNEEL_COST {
+            return Err(ActionError::NotEnoughTu);
+        }
+        let u = self.unit_mut(id);
+        u.tu -= KNEEL_COST;
+        u.kneeling = !u.kneeling;
+        let kneeling = u.kneeling;
+        Ok(vec![Event::Kneeled { unit: id, kneeling }])
+    }
+
+    fn do_set_reserve(&mut self, id: UnitId, on: bool) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        self.unit_mut(id).reserve_snap = on;
+        Ok(Vec::new())
+    }
+
+    fn do_bind(&mut self, id: UnitId, target: UnitId) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        let t = self.unit(target);
+        if !t.is_active() || t.side == self.unit(id).side {
+            return Err(ActionError::BadTarget);
+        }
+        if cheb(self.unit(id).tile, t.tile) > 1 {
+            return Err(ActionError::NotAdjacent);
+        }
+        let cost = self.unit(id).tu_max * BIND_COST_PCT / 100;
+        if self.unit(id).tu < cost {
+            return Err(ActionError::NotEnoughTu);
+        }
+        self.unit_mut(id).tu -= cost;
+
+        let mut events = Vec::new();
+        // A practiced strike: connects unless fate is cruel.
+        if self.rng.roll(100) < 75 {
+            let stun = BIND_STUN + self.rng.roll(16) as i32;
+            let t = self.unit_mut(target);
+            t.stun += stun;
+            let total = t.stun;
+            events.push(Event::Stunned { unit: target, stun: total });
+            if t.stun >= t.health && t.conscious {
+                t.conscious = false;
+                events.push(Event::Subdued { unit: target });
+                self.check_victory(&mut events);
+            }
+        } else {
+            events.push(Event::Stunned { unit: target, stun: self.unit(target).stun });
+        }
+        Ok(events)
+    }
+
+    fn do_terrify(&mut self, id: UnitId, target: UnitId) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        if !self.unit(id).psi {
+            return Err(ActionError::NoPsi);
+        }
+        let t = self.unit(target);
+        if !t.is_active() || t.side == self.unit(id).side {
+            return Err(ActionError::BadTarget);
+        }
+        if cheb(self.unit(id).tile, t.tile) > TERRIFY_RANGE_TILES {
+            return Err(ActionError::OutOfRange);
+        }
+        let cost = self.unit(id).tu_max * TERRIFY_COST_PCT / 100;
+        if self.unit(id).tu < cost {
+            return Err(ActionError::NotEnoughTu);
+        }
+        self.unit_mut(id).tu -= cost;
+
+        // The whisper needs no line of sight. Will is the only wall.
+        let attack = 40 + self.rng.roll(56) as i32;
+        let defense = self.unit(target).bravery + self.rng.roll(31) as i32;
+        let morale_lost = if attack > defense {
+            let loss = 25 + self.rng.roll(21) as i32;
+            let t = self.unit_mut(target);
+            t.morale = (t.morale - loss).max(0);
+            loss
+        } else {
+            0
+        };
+        Ok(vec![Event::Terrified { unit: id, target, morale_lost }])
+    }
+
     fn do_move(&mut self, id: UnitId, to: IVec3) -> Result<Vec<Event>, ActionError> {
         self.check_actor(id)?;
         let from = self.unit(id).tile;
         let blocked: HashSet<IVec3> = self
             .units
             .iter()
-            .filter(|u| u.alive && u.id != id)
+            .filter(|u| u.is_active() && u.id != id)
             .map(|u| u.tile)
             .collect();
         let path = self.tiles.path(from, to, &blocked).ok_or(ActionError::NoPath)?;
 
-        if self.unit(id).tu < step_cost(from, path[0]) {
+        // A reserving unit keeps a snap shot's worth of TUs banked.
+        let reserve = if self.unit(id).reserve_snap {
+            self.unit(id).fire_cost(FireMode::Snap).unwrap_or(0)
+        } else {
+            0
+        };
+        let budget = |u: &Unit| u.tu - reserve;
+
+        if budget(self.unit(id)) < step_cost(from, path[0]) {
             return Err(ActionError::NotEnoughTu);
         }
+        self.unit_mut(id).kneeling = false; // you can't stay low and sprint
 
         let mut events = Vec::new();
         let mut here = from;
         for next in path {
             let cost = step_cost(here, next);
-            if self.unit(id).tu < cost {
+            if budget(self.unit(id)) < cost {
                 break;
             }
             {
@@ -276,7 +466,7 @@ impl Battle {
             here = next;
 
             self.resolve_reactions(id, &mut events);
-            if !self.unit(id).alive || self.winner.is_some() {
+            if !self.unit(id).is_active() || self.winner.is_some() {
                 break;
             }
         }
@@ -290,14 +480,17 @@ impl Battle {
         let mover_initiative = m.reactions * m.tu / m.tu_max.max(1);
         let mover_side = m.side;
 
+        let mover_tile = self.unit(mover).tile;
         let shooters: Vec<UnitId> = self
             .units
             .iter()
             .filter(|e| {
-                e.alive
+                e.is_active()
                     && e.side == mover_side.enemy()
                     && e.fire_cost(FireMode::Snap).is_some_and(|c| e.tu >= c)
                     && e.reactions * e.tu / e.tu_max.max(1) > mover_initiative
+                    // Melee reactions only trigger when you brush past claws.
+                    && (!e.weapon.melee || cheb(e.tile, mover_tile) <= 1)
             })
             .map(|e| e.id)
             .collect();
@@ -320,7 +513,7 @@ impl Battle {
     ) -> Result<Vec<Event>, ActionError> {
         self.check_actor(id)?;
         let t = self.unit(target);
-        if !t.alive || t.side == self.unit(id).side {
+        if !t.is_active() || t.side == self.unit(id).side {
             return Err(ActionError::BadTarget);
         }
         let cost = self
@@ -330,7 +523,18 @@ impl Battle {
         if self.unit(id).tu < cost {
             return Err(ActionError::NotEnoughTu);
         }
-        if !self.can_see(id, target) {
+        let shooter = self.unit(id);
+        let dist = cheb(shooter.tile, self.unit(target).tile);
+        if shooter.weapon.melee {
+            if dist > 1 {
+                return Err(ActionError::NotAdjacent);
+            }
+        } else if shooter.weapon.arcing {
+            // Lobbed globs clear cover but only so far.
+            if dist > crate::units::ARC_RANGE_TILES {
+                return Err(ActionError::OutOfRange);
+            }
+        } else if !self.can_see(id, target) {
             return Err(ActionError::NoLineOfSight);
         }
         let mut events = Vec::new();
@@ -349,17 +553,24 @@ impl Battle {
         reaction: bool,
         events: &mut Vec<Event>,
     ) {
-        let (cost, chance, rounds, power, breach) = {
+        let (cost, chance, rounds, power, breach, melee) = {
             let s = self.unit(shooter);
             let (Some(cost), Some(chance)) = (s.fire_cost(mode), s.hit_chance(mode)) else {
                 return;
             };
-            (cost, chance, s.rounds_per_action(mode), s.weapon.power, s.weapon.breach_radius)
+            (
+                cost,
+                chance,
+                s.rounds_per_action(mode),
+                s.weapon.power,
+                s.weapon.breach_radius,
+                s.weapon.melee,
+            )
         };
         self.unit_mut(shooter).tu -= cost;
 
         for _ in 0..rounds {
-            if !self.unit(target).alive || self.winner.is_some() {
+            if !self.unit(target).is_active() || self.winner.is_some() {
                 break; // remaining rounds of the burst go wide, harmlessly
             }
             let hit = (self.rng.roll(100) as i32) < chance;
@@ -373,7 +584,7 @@ impl Battle {
                 // 0–200% of weapon power, the original's famous swingy roll.
                 let damage = power * self.rng.roll(201) as i32 / 100;
                 self.apply_damage(target, damage, Some(shooter), events);
-            } else {
+            } else if !melee {
                 self.stray_shot(shooter, target, breach, events);
             }
         }
@@ -413,6 +624,7 @@ impl Battle {
         self.tiles
             .rederive_region(&self.world, c - IVec3::splat(r), c + IVec3::splat(r));
         events.push(Event::Exploded { at, voxels: destroyed });
+        self.check_objective(events);
 
         let victims: Vec<UnitId> = self
             .units
@@ -497,6 +709,7 @@ impl Battle {
                     center: impact.position,
                     voxels: destroyed,
                 });
+                self.check_objective(events);
             }
         }
     }
@@ -522,6 +735,14 @@ impl Battle {
         if self.unit(target).health <= 0 {
             if let Some(killer) = source {
                 self.xp[killer.0 as usize].kills += 1;
+                // A Taker's melee kill doesn't leave a corpse. It leaves a Husk.
+                if self.unit(killer).species == Species::Taker
+                    && self.unit(killer).weapon.melee
+                    && self.unit(target).species == Species::Soldier
+                {
+                    self.take_unit(target, events);
+                    return;
+                }
             }
             self.kill_unit(target, events);
         } else if damage >= 5 {
@@ -536,8 +757,30 @@ impl Battle {
         }
     }
 
+    /// The Taking: the victim's body stands back up on the other side.
+    fn take_unit(&mut self, victim: UnitId, events: &mut Vec<Event>) {
+        let (name, tile) = {
+            let v = self.unit(victim);
+            (v.name.clone(), v.tile)
+        };
+        // Squadmates witness something worse than a death.
+        let side = self.unit(victim).side;
+        for u in &mut self.units {
+            if u.alive && u.side == side && u.id != victim {
+                u.morale = (u.morale - 20).max(0);
+            }
+        }
+        let husk = Unit::husk(victim.0, &format!("{name} (Taken)"), tile);
+        *self.unit_mut(victim) = husk;
+        events.push(Event::Taken { unit: victim });
+        self.check_victory(events);
+    }
+
     fn kill_unit(&mut self, target: UnitId, events: &mut Vec<Event>) {
-        let dead_side = self.unit(target).side;
+        let (dead_side, dead_species, tile) = {
+            let t = self.unit(target);
+            (t.side, t.species, t.tile)
+        };
         self.unit_mut(target).alive = false;
         events.push(Event::Died { unit: target });
 
@@ -546,6 +789,14 @@ impl Battle {
             if u.alive && u.side == dead_side {
                 u.morale = (u.morale - (15 - u.bravery / 10)).max(0);
             }
+        }
+
+        // A destroyed Husk splits open and something new crawls out.
+        if dead_species == Species::Husk && self.winner.is_none() {
+            let id = self.units.len() as u32;
+            self.units.push(Unit::taker(id, "Hatched Taker", tile));
+            self.xp.push(Experience::default());
+            events.push(Event::Hatched { unit: UnitId(id) });
         }
         self.check_victory(events);
     }
@@ -566,6 +817,23 @@ impl Battle {
             self.turn += 1;
         }
         let mut events = vec![Event::TurnStarted { side: self.side_to_move, turn: self.turn }];
+
+        // Stun trauma fades; the subdued may come round groggy.
+        let side_units: Vec<UnitId> = self
+            .units
+            .iter()
+            .filter(|u| u.alive && u.side == self.side_to_move)
+            .map(|u| u.id)
+            .collect();
+        for id in side_units {
+            let u = self.unit_mut(id);
+            u.stun = (u.stun - 3).max(0);
+            if !u.conscious && u.stun < u.health {
+                u.conscious = true;
+                u.tu = u.tu_max / 2;
+                events.push(Event::Awakened { unit: id });
+            }
+        }
 
         // For the side coming on turn: refresh TUs, bleed open wounds, then
         // roll dread checks (panic or berserk).
@@ -1024,6 +1292,172 @@ mod tests {
             b.perform(Action::Heal { medic: UnitId(0), target: UnitId(2) }),
             Err(ActionError::BadTarget)
         );
+    }
+
+    #[test]
+    fn melee_needs_adjacency_and_never_flies_wide() {
+        // An Order-side hound so it can act on the first turn of the test.
+        let mut units = vec![
+            Unit::hellhound(0, "Hound", IVec3::new(1, 5, 0)),
+            Unit::imp(1, "Prey", IVec3::new(8, 5, 0)),
+        ];
+        units[0].side = Side::Order;
+        let mut b = open_field(units, 3);
+        assert_eq!(
+            b.perform(Action::Fire { unit: UnitId(0), target: UnitId(1), mode: FireMode::Snap }),
+            Err(ActionError::NotAdjacent)
+        );
+        b.units[0].tile = IVec3::new(7, 5, 0);
+        let events = b
+            .perform(Action::Fire { unit: UnitId(0), target: UnitId(1), mode: FireMode::Snap })
+            .unwrap();
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::TerrainDestroyed { .. })),
+            "claws don't chip distant walls: {events:?}"
+        );
+    }
+
+    #[test]
+    fn binding_subdues_and_the_bound_can_wake() {
+        let mut units = duelists();
+        units[1].health_max = 12;
+        units[1].health = 12;
+        let mut b = open_field(units, 5);
+        b.units[0].tile = IVec3::new(9, 5, 0); // adjacent to the imp
+
+        let mut subdued = false;
+        for _ in 0..12 {
+            if !b.unit(UnitId(1)).conscious {
+                subdued = true;
+                break;
+            }
+            if b.unit(UnitId(0)).tu < 55 * BIND_COST_PCT / 100 {
+                b.perform(Action::EndTurn).unwrap();
+                b.perform(Action::EndTurn).unwrap();
+            }
+            b.perform(Action::Bind { unit: UnitId(0), target: UnitId(1) }).unwrap();
+        }
+        assert!(subdued, "repeated rod strikes must knock the imp out");
+        assert_eq!(b.winner, Some(Side::Order), "an unconscious garrison holds nothing");
+        assert!(b.unit(UnitId(1)).alive, "subdued is not dead — that's the point");
+    }
+
+    #[test]
+    fn terrify_needs_psi_and_batters_morale() {
+        let mut units = duelists();
+        units[1] = Unit::overseer(1, "Overseer", IVec3::new(10, 5, 0));
+        let mut b = open_field(units, 11);
+        assert_eq!(
+            b.perform(Action::Terrify { unit: UnitId(0), target: UnitId(1) }),
+            Err(ActionError::NoPsi)
+        );
+        b.perform(Action::EndTurn).unwrap();
+
+        let mut broken = false;
+        for _ in 0..20 {
+            if b.unit(UnitId(1)).tu < 50 * TERRIFY_COST_PCT / 100 {
+                b.perform(Action::EndTurn).unwrap();
+                b.perform(Action::EndTurn).unwrap();
+            }
+            let events = b
+                .perform(Action::Terrify { unit: UnitId(1), target: UnitId(0) })
+                .unwrap();
+            if events
+                .iter()
+                .any(|e| matches!(e, Event::Terrified { morale_lost, .. } if *morale_lost > 0))
+            {
+                broken = true;
+                break;
+            }
+        }
+        assert!(broken, "a soldier's will (bravery 30) cannot hold forever");
+        assert!(b.unit(UnitId(0)).morale < 100);
+    }
+
+    #[test]
+    fn kneeling_steadies_the_hand_until_you_move() {
+        let mut b = open_field(duelists(), 2);
+        let standing = b.unit(UnitId(0)).hit_chance(FireMode::Snap).unwrap();
+        b.perform(Action::Kneel { unit: UnitId(0) }).unwrap();
+        assert!(b.unit(UnitId(0)).kneeling);
+        let kneeling = b.unit(UnitId(0)).hit_chance(FireMode::Snap).unwrap();
+        assert!(kneeling > standing, "{kneeling} vs {standing}");
+        assert_eq!(b.unit(UnitId(0)).tu, 55 - KNEEL_COST);
+
+        b.perform(Action::Move { unit: UnitId(0), to: IVec3::new(2, 5, 0) }).unwrap();
+        assert!(!b.unit(UnitId(0)).kneeling, "moving stands you up");
+    }
+
+    #[test]
+    fn reserve_banks_a_snap_shot() {
+        let mut b = open_field(duelists(), 2);
+        b.units[1].tu = 0; // the imp may not interrupt this drill with reactions
+        b.perform(Action::SetReserve { unit: UnitId(0), on: true }).unwrap();
+        // A long march: the soldier must stop while a snap shot (13 TU) remains.
+        b.perform(Action::Move { unit: UnitId(0), to: IVec3::new(11, 11, 0) }).unwrap();
+        let tu = b.unit(UnitId(0)).tu;
+        assert!(tu >= 13, "reserved TU spent on walking: {tu} left");
+        assert!(tu < 30, "but the unit did march: {tu} left");
+    }
+
+    #[test]
+    fn bile_arcs_over_walls() {
+        let mut units = duelists();
+        units[1] = Unit::bile_wisp(1, "Wisp", IVec3::new(7, 5, 0));
+        let mut b = walled_field(units, 13); // wall at x=5 between them
+        assert!(!b.can_see(UnitId(0), UnitId(1)), "wall hides the wisp");
+        b.units[0].tile = IVec3::new(3, 5, 0); // within arc range (4 tiles)
+        b.perform(Action::EndTurn).unwrap();
+
+        let events = b
+            .perform(Action::Fire { unit: UnitId(1), target: UnitId(0), mode: FireMode::Snap })
+            .unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Fired { .. })),
+            "the glob is lobbed blind over the wall: {events:?}"
+        );
+    }
+
+    #[test]
+    fn the_taking_and_the_hatching() {
+        let mut units = vec![
+            Unit::soldier(0, "Victim", IVec3::new(5, 5, 0)),
+            Unit::soldier(1, "Witness", IVec3::new(1, 1, 0)),
+            Unit::taker(2, "The Taker", IVec3::new(6, 5, 0)),
+        ];
+        units[0].health = 5; // one strike will do it
+        units[0].health_max = 5;
+        let mut b = open_field(units, 4);
+        b.perform(Action::EndTurn).unwrap();
+
+        // Strike until the victim falls (power 90 vs 5 hp: any hit kills).
+        let mut taken = false;
+        for _ in 0..10 {
+            if b.unit(UnitId(2)).tu < 70 / 4 {
+                b.perform(Action::EndTurn).unwrap();
+                b.perform(Action::EndTurn).unwrap();
+            }
+            let events = b
+                .perform(Action::Fire { unit: UnitId(2), target: UnitId(0), mode: FireMode::Snap })
+                .unwrap();
+            if events.iter().any(|e| matches!(e, Event::Taken { unit } if *unit == UnitId(0))) {
+                taken = true;
+                break;
+            }
+        }
+        assert!(taken, "the Taker's kill must Take");
+        let husk = b.unit(UnitId(0));
+        assert_eq!(husk.side, Side::Demons, "the body stands up on the other side");
+        assert_eq!(husk.species, Species::Husk);
+        assert!(husk.alive);
+
+        // Now destroy the Husk and watch what crawls out.
+        let unit_count = b.units.len();
+        let mut events = Vec::new();
+        b.apply_damage(UnitId(0), 999, None, &mut events);
+        assert!(events.iter().any(|e| matches!(e, Event::Hatched { .. })), "{events:?}");
+        assert_eq!(b.units.len(), unit_count + 1, "a fresh Taker joins the field");
+        assert_eq!(b.units.last().unwrap().species, Species::Taker);
     }
 
     #[test]

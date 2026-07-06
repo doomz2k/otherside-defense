@@ -30,9 +30,10 @@ pub(crate) fn build_assault(
     seed: u64,
     squad: &[&Soldier],
     demon_count: u32,
+    strength: u32,
     research: &ResearchState,
 ) -> Battle {
-    scenario::incursion(seed, make_units(squad, research), demon_count)
+    scenario::incursion(seed, make_units(squad, research), demon_count, strength)
 }
 
 /// Build a Reckoning: demons breaching the chapterhouse itself, on a map
