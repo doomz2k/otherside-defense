@@ -98,6 +98,8 @@ pub struct Core {
     last_cursor: (f32, f32),
     last_frame: Instant,
     sun_drift: f32,
+    /// Seconds since launch; feeds the emissive-material pulse.
+    clock: f32,
 }
 
 impl ApplicationHandler for App {
@@ -176,6 +178,7 @@ impl Core {
             last_cursor: (0.0, 0.0),
             last_frame: Instant::now(),
             sun_drift: 0.0,
+            clock: 0.0,
         })
     }
 
@@ -326,6 +329,7 @@ impl Core {
     fn redraw(&mut self) {
         let dt = self.last_frame.elapsed().as_secs_f32().min(0.1);
         self.last_frame = Instant::now();
+        self.clock = (self.clock + dt) % 3600.0;
 
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let ctx = self.egui_ctx.clone();
@@ -349,7 +353,7 @@ impl Core {
                     } else {
                         Vec3::new(0.35, 0.5, 0.8)
                     };
-                    self.renderer.set_camera(vp, sun);
+                    self.renderer.set_camera(vp, sun, self.clock);
                 }
             }
             Screen::Geoscape => {
@@ -382,7 +386,7 @@ impl Core {
                 let (lights, light_idx) = globe::build_city_lights(sun_lon, self.sun_drift);
                 self.renderer.set_fx(&lights, &light_idx);
                 let vp = self.geo_camera.view_proj(self.renderer.aspect());
-                self.renderer.set_camera(vp, sun);
+                self.renderer.set_camera(vp, sun, self.clock);
             }
             Screen::Menu => {
                 if let Some(a) = self.audio.as_mut() {
@@ -394,7 +398,7 @@ impl Core {
                 }
                 self.menu_camera.yaw += dt * 0.07;
                 let vp = self.menu_camera.view_proj(self.renderer.aspect());
-                self.renderer.set_camera(vp, Vec3::new(-0.3, -0.4, 0.45));
+                self.renderer.set_camera(vp, Vec3::new(-0.3, -0.4, 0.45), self.clock);
             }
         }
 

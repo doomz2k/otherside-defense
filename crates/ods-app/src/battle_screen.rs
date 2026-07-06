@@ -248,6 +248,12 @@ impl BattleScreen {
             }
             KeyCode::KeyH => self.heal_selected(renderer, audio),
             KeyCode::KeyX => self.amputate_selected(renderer, audio),
+            KeyCode::KeyR => {
+                if let Some(id) = self.selected {
+                    let result = self.battle.perform(Action::InscribeWard { unit: id });
+                    self.apply(renderer, audio, result);
+                }
+            }
             KeyCode::Tab => {
                 self.select_next_soldier();
                 self.refresh_scene(renderer);
@@ -392,7 +398,7 @@ impl BattleScreen {
                     }
                 }
                 ui.separator();
-                ui.weak("[F] floor cutaway  [O] door  [V] smoke  [B] bind  [K] kneel  [X] amputate");
+                ui.weak("[F] floor cutaway  [O] door  [V] smoke  [B] bind  [K] kneel  [X] amputate  [R] ward");
             });
         });
 
@@ -406,6 +412,44 @@ impl BattleScreen {
             });
 
         self.draw_floaters(ctx, renderer.aspect());
+
+        // While a Prince holds one of yours, the world's edges bleed violet.
+        let mind_held = self
+            .battle
+            .units
+            .iter()
+            .any(|u| u.is_active() && u.side == Side::Order && u.possessed > 0);
+        if mind_held {
+            let screen = ctx.viewport_rect();
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Background,
+                egui::Id::new("possession-vignette"),
+            ));
+            let pulse = 0.10 + 0.07 * (self.fx_clock * 2.2).sin();
+            let a = (pulse * 255.0) as u8;
+            let color = egui::Color32::from_rgba_unmultiplied(120, 25, 160, a);
+            let t = 30.0;
+            painter.rect_filled(
+                egui::Rect::from_min_max(screen.min, egui::pos2(screen.max.x, screen.min.y + t)),
+                0.0,
+                color,
+            );
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(screen.min.x, screen.max.y - t), screen.max),
+                0.0,
+                color,
+            );
+            painter.rect_filled(
+                egui::Rect::from_min_max(screen.min, egui::pos2(screen.min.x + t, screen.max.y)),
+                0.0,
+                color,
+            );
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(screen.max.x - t, screen.min.y), screen.max),
+                0.0,
+                color,
+            );
+        }
 
         if let Some((text, ttl)) = &self.banner {
             let alpha = (ttl.min(0.6) / 0.6 * 255.0) as u8;
@@ -614,6 +658,15 @@ impl BattleScreen {
             Event::CorpseEaten { corpse, .. } => {
                 self.float(*corpse, "DEVOURED", egui::Color32::from_rgb(200, 120, 60));
             }
+            Event::Summoned { unit } => {
+                self.float(*unit, "IT COMES THROUGH", egui::Color32::from_rgb(255, 60, 50));
+            }
+            Event::WardBurned { unit, .. } => {
+                self.float(*unit, "WARDED", egui::Color32::from_rgb(60, 230, 200));
+            }
+            Event::Whispered { unit } => {
+                self.float(*unit, "whispers...", egui::Color32::from_rgb(190, 120, 230));
+            }
             Event::Panicked { unit } => {
                 self.float(*unit, "PANIC", egui::Color32::from_rgb(255, 210, 90));
             }
@@ -737,6 +790,19 @@ impl BattleScreen {
                 play(Sound::Dread);
             }
             Event::Panicked { .. } | Event::Berserked { .. } => play(Sound::Dread),
+            Event::Whispered { .. } | Event::Possessed { .. } => play(Sound::Whisper),
+            Event::SummoningScribed { at } | Event::SummoningDisrupted { at } => {
+                let p = Self::tile_pos(*at, 5.0);
+                self.fx.push(Fx {
+                    kind: FxKind::Flash,
+                    from: p,
+                    to: p,
+                    color: [1.0, 0.15, 0.1, 0.7],
+                    age: 0.0,
+                    life: 0.6,
+                });
+                play(Sound::Dread);
+            }
             Event::Terrified { morale_lost, .. } if *morale_lost > 0 => play(Sound::Dread),
             Event::Subdued { .. } => play(Sound::Click),
             _ => {}
@@ -884,6 +950,23 @@ impl BattleScreen {
                 FxKind::Flash => {
                     push_flat_square(&mut verts, &mut indices, fx.from, 6.0, color);
                 }
+            }
+        }
+        // Possession halos: a slow-turning sigil diamond over seized minds.
+        for u in &self.battle.units {
+            if u.is_active() && u.possessed > 0 {
+                let c = (u.tile * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, 21.0);
+                let a = self.fx_clock * 1.7;
+                let r = 4.5;
+                let e1 = Vec3::new(a.cos(), a.sin(), 0.0) * r;
+                let e2 = Vec3::new(-a.sin(), a.cos(), 0.0) * r;
+                let pulse = 0.45 + 0.2 * (self.fx_clock * 3.0).sin();
+                push_quad(
+                    &mut verts,
+                    &mut indices,
+                    [c + e1, c + e2, c - e1, c - e2],
+                    [0.65, 0.2, 0.9, pulse],
+                );
             }
         }
         renderer.set_fx(&verts, &indices);
@@ -1097,6 +1180,17 @@ impl BattleScreen {
             };
             push_tile_quad(&mut verts, &mut indices, *tile, color);
         }
+        // Occult ground: summoning circles bleed red light, wards burn teal,
+        // corruption veins glow violet (the voxel runes carry the detail).
+        for (tile, _, _) in &self.battle.summons {
+            push_tile_quad(&mut verts, &mut indices, *tile, [1.0, 0.1, 0.08, 0.22]);
+        }
+        for tile in &self.battle.wards {
+            push_tile_quad(&mut verts, &mut indices, *tile, [0.1, 0.9, 0.8, 0.16]);
+        }
+        for tile in &self.battle.corruption {
+            push_tile_quad(&mut verts, &mut indices, *tile, [0.6, 0.15, 0.8, 0.14]);
+        }
         if let Some(id) = self.selected {
             let u = self.battle.unit(id);
             if u.alive {
@@ -1197,6 +1291,27 @@ fn describe(event: &Event, battle: &Battle) -> String {
         }
         Event::InfectionTurned { unit } => {
             format!("!!! the rot finishes its work: {} is one of THEM now", name(unit))
+        }
+        Event::SummoningScribed { at } => {
+            format!("!!! a summoning circle scribes itself at {at} — foul it or face what comes")
+        }
+        Event::Summoned { unit } => {
+            format!("!!! the circle delivers: {} steps through", name(unit))
+        }
+        Event::SummoningDisrupted { at } => {
+            format!("the summoning at {at} is fouled — nothing comes through")
+        }
+        Event::WardInscribed { at } => {
+            format!("a ward burns witchfire-bright at {at}")
+        }
+        Event::WardBurned { unit, at } => {
+            format!("{} crosses the ward at {at} — and the ward answers", name(unit))
+        }
+        Event::CorruptionSpread { at } => {
+            format!("the obelisk's veins reach {at}")
+        }
+        Event::Whispered { unit } => {
+            format!("{} stands on corrupted ground... the ground knows their name", name(unit))
         }
         Event::TerrainDestroyed { voxels, .. } => {
             format!("terrain shattered ({voxels} voxels)")

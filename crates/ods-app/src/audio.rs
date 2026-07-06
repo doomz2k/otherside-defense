@@ -18,6 +18,8 @@ pub enum Sound {
     Click,
     Victory,
     Defeat,
+    /// Something on the edge of hearing, saying your name.
+    Whisper,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -81,6 +83,7 @@ impl Audio {
             (Sound::Click, synth_click()),
             (Sound::Victory, synth_sting(true)),
             (Sound::Defeat, synth_sting(false)),
+            (Sound::Whisper, synth_whisper()),
         ];
         Some(Self {
             _stream: stream,
@@ -241,6 +244,22 @@ fn synth_warfront() -> Vec<f32> {
             };
             let bed = (t * 41.2 * std::f32::consts::TAU).sin() * 0.05;
             pulse * 0.22 + bed
+        })
+        .collect()
+}
+
+/// Breathy filtered noise that swells and dies: a voice with no words.
+fn synth_whisper() -> Vec<f32> {
+    let len = (RATE as f32 * 0.9) as usize;
+    let env = envelope(len, 0.35, 3.0);
+    let mut low = 0.0f32;
+    (0..len)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            // One-pole lowpass over noise, wobbled for a syllabic feel.
+            low += (noise(i) - low) * 0.12;
+            let syllable = 0.6 + 0.4 * (t * 9.0 * std::f32::consts::TAU).sin();
+            low * syllable * env(i) * 0.4
         })
         .collect()
 }

@@ -17,7 +17,8 @@ const VOXEL_SHADER: &str = r#"
 struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
-var<private> PALETTE: array<vec3<f32>, 16> = array<vec3<f32>, 16>(
+// Entries 16+ are EMISSIVE: they ignore the sun and pulse on the clock.
+var<private> PALETTE: array<vec3<f32>, 19> = array<vec3<f32>, 19>(
     vec3<f32>(1.0, 0.0, 1.0),    // 0: unused (empty)
     vec3<f32>(0.42, 0.41, 0.38), // 1: ground stone
     vec3<f32>(0.45, 0.27, 0.22), // 2: chapel brick
@@ -33,7 +34,10 @@ var<private> PALETTE: array<vec3<f32>, 16> = array<vec3<f32>, 16>(
     vec3<f32>(0.20, 0.36, 0.16), // 12: foliage
     vec3<f32>(0.34, 0.23, 0.13), // 13: tree trunk
     vec3<f32>(0.38, 0.05, 0.05), // 14: spilled blood
-    vec3<f32>(0.52, 0.10, 0.12)  // 15: viscera
+    vec3<f32>(0.52, 0.10, 0.12), // 15: viscera
+    vec3<f32>(0.95, 0.12, 0.10), // 16: sigil crimson (summoning circles, runes)
+    vec3<f32>(0.15, 0.85, 0.75), // 17: witchfire teal (the Order's wards)
+    vec3<f32>(0.70, 0.20, 0.85)  // 18: corruption glow (the obelisk's veins)
 );
 
 struct VsIn {
@@ -58,8 +62,14 @@ fn vs_main(in: VsIn) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let base = PALETTE[min(in.material, 18u)];
+    if in.material >= 16u {
+        // Occult light: full-bright, breathing on the clock. Unlit by sun,
+        // so sigils burn brightest exactly where the night is darkest.
+        let pulse = 0.75 + 0.35 * sin(camera.sun.w * 3.2 + f32(in.material) * 1.9);
+        return vec4<f32>(base * pulse, 1.0);
+    }
     let ndl = max(dot(normalize(in.normal), camera.sun.xyz), 0.0);
-    let base = PALETTE[min(in.material, 15u)];
     let lit = base * (0.35 + 0.65 * ndl);
     return vec4<f32>(lit, 1.0);
 }
@@ -472,14 +482,16 @@ impl Renderer {
         (self.config.width as f32, self.config.height as f32)
     }
 
-    pub fn set_camera(&mut self, view_proj: Mat4, sun: glam::Vec3) {
+    /// Upload the camera. `clock` (seconds, wrapping is fine) drives the
+    /// pulse of emissive materials and rides in the sun vector's w lane.
+    pub fn set_camera(&mut self, view_proj: Mat4, sun: glam::Vec3, clock: f32) {
         let sun = sun.normalize_or(glam::Vec3::Z);
         self.queue.write_buffer(
             &self.camera_buffer,
             0,
             bytemuck::bytes_of(&CameraUniform {
                 view_proj: view_proj.to_cols_array_2d(),
-                sun: [sun.x, sun.y, sun.z, 0.0],
+                sun: [sun.x, sun.y, sun.z, clock],
             }),
         );
     }

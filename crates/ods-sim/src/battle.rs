@@ -27,6 +27,11 @@ const GIB_OVERKILL: i32 = 12;
 pub(crate) const DEVOUR_TU: i32 = 20;
 pub(crate) const DEFILE_TU: i32 = 25;
 const AMPUTATE_TU: i32 = 25;
+const WARD_TU: i32 = 20;
+/// How far the obelisk's veins can reach.
+const CORRUPTION_CAP: usize = 20;
+/// What a ward does to the demon that crosses it.
+const WARD_BURN: i32 = 8;
 /// Turns of festering before an infected soldier turns.
 const INFECTION_TURNS: u32 = 4;
 pub const GRENADE_RANGE_TILES: i32 = 10;
@@ -122,6 +127,20 @@ pub enum Event {
     FireStarted { at: IVec3 },
     Burned { unit: UnitId, amount: i32 },
     DoorOpened { at: IVec3 },
+    /// A glowing circle scribes itself onto the ground: something is coming.
+    SummoningScribed { at: IVec3 },
+    /// The circle delivers. A fresh demon stands where the light was.
+    Summoned { unit: UnitId },
+    /// The circle was fouled — a boot on the lines, or the ground destroyed.
+    SummoningDisrupted { at: IVec3 },
+    /// The Order chalks a burning ward onto the ground.
+    WardInscribed { at: IVec3 },
+    /// A demon crossed the ward, and the ward answered.
+    WardBurned { unit: UnitId, at: IVec3 },
+    /// The obelisk's glowing veins reach one tile further.
+    CorruptionSpread { at: IVec3 },
+    /// Standing on corrupted ground, a soldier hears the ground talk.
+    Whispered { unit: UnitId },
     /// A Prince seizes a mind outright.
     Possessed { unit: UnitId, by: UnitId },
     PossessionEnds { unit: UnitId },
@@ -150,6 +169,8 @@ pub enum Action {
     Defile { unit: UnitId, corpse: UnitId },
     /// Saw an infected part off an adjacent (or own) body before it turns.
     Amputate { medic: UnitId, target: UnitId },
+    /// Chalk a burning ward on the unit's own tile (consumes a ward kit).
+    InscribeWard { unit: UnitId },
     /// Face a direction (1 TU per 45°) — sets the reaction-fire arc.
     Turn { unit: UnitId, toward: IVec3 },
     /// Prime a charge and drop it at your feet; it detonates after `timer`
@@ -269,6 +290,12 @@ pub struct Battle {
     pub pools: Vec<(IVec3, bool)>,
     /// The loudest recent violence (demons investigate it).
     pub last_noise: Option<IVec3>,
+    /// Summoning circles mid-scribe: (tile, demon-turns left, pack strength).
+    pub summons: Vec<(IVec3, u32, u32)>,
+    /// The Order's burning wards: demons crossing one pay for it.
+    pub wards: Vec<IVec3>,
+    /// Ground the obelisk has veined with glowing corruption.
+    pub corruption: Vec<IVec3>,
     /// Unseen demon movement this enemy turn (flushed as cues).
     heard: Vec<IVec3>,
     xp: Vec<Experience>,
@@ -300,9 +327,80 @@ impl Battle {
             casks: Vec::new(),
             pools: Vec::new(),
             last_noise: None,
+            summons: Vec::new(),
+            wards: Vec::new(),
+            corruption: Vec::new(),
             heard: Vec::new(),
             xp,
             rng: SimRng::from_seed(seed),
+        }
+    }
+
+    /// Scribe a summoning circle: the pentagram burns into the ground now,
+    /// and delivers after `delay` demon turns (unless fouled first).
+    pub fn schedule_summon(&mut self, tile: IVec3, delay: u32, strength: u32) {
+        self.paint_sigil(tile, crate::scenario::MAT_SIGIL);
+        self.summons.push((tile, delay, strength));
+    }
+
+    /// Chalk a ward onto a tile (map setup / the InscribeWard action).
+    pub fn place_ward(&mut self, tile: IVec3) {
+        self.paint_sigil(tile, crate::scenario::MAT_WARD);
+        self.wards.push(tile);
+    }
+
+    /// Burn an occult pattern into a tile's ground surface: a ring with a
+    /// crossed center — pentagram enough at sixteen voxels a side.
+    fn paint_sigil(&mut self, tile: IVec3, mat: ods_voxel::Voxel) {
+        let o = tile * TILE_VOXELS;
+        let z = crate::scenario::GROUND_TOP - 1;
+        let c = TILE_VOXELS / 2;
+        let r2 = 36; // radius 6
+        for y in 0..TILE_VOXELS {
+            for x in 0..TILE_VOXELS {
+                let (dx, dy) = (x - c, y - c);
+                let d2 = dx * dx + dy * dy;
+                let on_ring = (r2 - 10..=r2 + 10).contains(&d2);
+                let on_cross = d2 < r2 && (dx == dy || dx == -dy || dx == 0 || dy == 0);
+                if on_ring || on_cross {
+                    let p = o + IVec3::new(x, y, z);
+                    if self.world.voxel(p).is_solid() {
+                        self.world.set_voxel(p, mat);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Thread glowing veins across a corrupted tile's surface.
+    fn paint_veins(&mut self, tile: IVec3) {
+        let o = tile * TILE_VOXELS;
+        let z = crate::scenario::GROUND_TOP - 1;
+        for i in 0..TILE_VOXELS {
+            // Two crossing wandering lines: enough to read as veins.
+            for p in [
+                o + IVec3::new(i, (i * 5 + 3) % TILE_VOXELS, z),
+                o + IVec3::new((i * 7 + 5) % TILE_VOXELS, i, z),
+            ] {
+                if self.world.voxel(p).is_solid() {
+                    self.world.set_voxel(p, crate::scenario::MAT_VEIN);
+                }
+            }
+        }
+    }
+
+    /// Scorch a spent sigil to dead black.
+    fn scorch_sigil(&mut self, tile: IVec3) {
+        let o = tile * TILE_VOXELS;
+        let z = crate::scenario::GROUND_TOP - 1;
+        for y in 0..TILE_VOXELS {
+            for x in 0..TILE_VOXELS {
+                let p = o + IVec3::new(x, y, z);
+                let v = self.world.voxel(p);
+                if v == crate::scenario::MAT_SIGIL || v == crate::scenario::MAT_WARD {
+                    self.world.set_voxel(p, crate::scenario::MAT_OBSIDIAN);
+                }
+            }
         }
     }
 
@@ -396,6 +494,20 @@ impl Battle {
         let left = self.count_objective_voxels(obj.min, obj.max);
         if left * 3 < obj.initial_voxels {
             events.push(Event::ObjectiveDestroyed);
+            // The veins die with their source: scorch them to dead rock.
+            let veins = std::mem::take(&mut self.corruption);
+            for tile in veins {
+                let o = tile * TILE_VOXELS;
+                let z = crate::scenario::GROUND_TOP - 1;
+                for y in 0..TILE_VOXELS {
+                    for x in 0..TILE_VOXELS {
+                        let p = o + IVec3::new(x, y, z);
+                        if self.world.voxel(p) == crate::scenario::MAT_VEIN {
+                            self.world.set_voxel(p, crate::scenario::MAT_OBSIDIAN);
+                        }
+                    }
+                }
+            }
             self.winner = Some(Side::Order);
             events.push(Event::BattleOver { winner: Side::Order });
         }
@@ -505,6 +617,7 @@ impl Battle {
             Action::Devour { unit, corpse } => self.do_devour(unit, corpse),
             Action::Defile { unit, corpse } => self.do_defile(unit, corpse),
             Action::Amputate { medic, target } => self.do_amputate(medic, target),
+            Action::InscribeWard { unit } => self.do_inscribe_ward(unit),
             Action::Kneel { unit } => self.do_kneel(unit),
             Action::SetReserve { unit, on } => self.do_set_reserve(unit, on),
             Action::Bind { unit, target } => self.do_bind(unit, target),
@@ -782,6 +895,26 @@ impl Battle {
             events.push(Event::Subdued { unit: target });
         }
         Ok(events)
+    }
+
+    /// Chalk and salt and a psalm: the ground itself takes a side.
+    fn do_inscribe_ward(&mut self, id: UnitId) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        let u = self.unit(id);
+        if u.side != Side::Order || u.civilian || u.ward_kits == 0 {
+            return Err(ActionError::BadTarget);
+        }
+        let at = u.tile;
+        if self.wards.contains(&at) {
+            return Err(ActionError::BadTarget);
+        }
+        if u.tu < WARD_TU {
+            return Err(ActionError::NotEnoughTu);
+        }
+        self.unit_mut(id).tu -= WARD_TU;
+        self.unit_mut(id).ward_kits -= 1;
+        self.place_ward(at);
+        Ok(vec![Event::WardInscribed { at }])
     }
 
     /// Register a fuel cask hazard (counts its shell voxels).
@@ -1118,6 +1251,20 @@ impl Battle {
                 tu_left: self.unit(id).tu,
             });
             here = next;
+
+            // A demon crossing a ward line is answered by it.
+            if self.unit(id).side == Side::Demons
+                && let Some(pos) = self.wards.iter().position(|&w| w == next)
+            {
+                self.wards.remove(pos);
+                self.scorch_sigil(next);
+                events.push(Event::WardBurned { unit: id, at: next });
+                self.unit_mut(id).morale = (self.unit(id).morale - 15).max(0);
+                self.apply_damage(id, WARD_BURN, None, &mut events);
+                if !self.unit(id).is_active() || self.winner.is_some() {
+                    break;
+                }
+            }
 
             self.resolve_reactions(id, &mut events);
             if !self.unit(id).is_active() || self.winner.is_some() {
@@ -1675,6 +1822,84 @@ impl Battle {
                 events.push(Event::NoiseInDark { near: at + fuzz });
             }
             self.heard.clear();
+        }
+
+        // Summoning circles scribe a demon-turn closer to delivering.
+        if self.side_to_move == Side::Demons && self.winner.is_none() {
+            let mut due = Vec::new();
+            for s in &mut self.summons {
+                s.1 = s.1.saturating_sub(1);
+                if s.1 == 0 {
+                    due.push((s.0, s.2));
+                }
+            }
+            self.summons.retain(|(_, t, _)| *t > 0);
+            for (at, strength) in due {
+                // A boot on the lines fouls the working.
+                let fouled = self
+                    .units
+                    .iter()
+                    .any(|u| u.is_active() && u.tile == at)
+                    || !self.tiles.is_walkable(at);
+                self.scorch_sigil(at);
+                if fouled {
+                    events.push(Event::SummoningDisrupted { at });
+                    continue;
+                }
+                let id = self.units.len() as u32;
+                let fresh = if strength >= 5 {
+                    Unit::hellhound(id, "Summoned Hound", at)
+                } else {
+                    Unit::imp(id, "Summoned Imp", at)
+                };
+                self.units.push(fresh);
+                self.xp.push(Experience::default());
+                events.push(Event::Summoned { unit: UnitId(id) });
+            }
+        }
+
+        // The obelisk's corruption creeps — and whispers at whoever stands
+        // on it. Its veins die with the obelisk.
+        if self.side_to_move == Side::Order
+            && self.winner.is_none()
+            && let Some(obj) = self.objective
+        {
+            {
+                if self.corruption.is_empty() {
+                    // First veins break ground beside the obelisk.
+                    let seed_tile = crate::voxel_to_tile(obj.min) + IVec3::new(-1, 1, 0);
+                    if self.tiles.is_walkable(seed_tile) {
+                        self.corruption.push(seed_tile);
+                        self.paint_veins(seed_tile);
+                        events.push(Event::CorruptionSpread { at: seed_tile });
+                    }
+                } else if self.corruption.len() < CORRUPTION_CAP {
+                    // One vein per round reaches for fresh ground.
+                    let from = self.corruption[self.rng.roll(self.corruption.len() as u32) as usize];
+                    const RING: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+                    let (dx, dy) = RING[self.rng.roll(4) as usize];
+                    let next = from + IVec3::new(dx, dy, 0);
+                    if self.tiles.is_walkable(next) && !self.corruption.contains(&next) {
+                        self.corruption.push(next);
+                        self.paint_veins(next);
+                        events.push(Event::CorruptionSpread { at: next });
+                    }
+                }
+                // The ground talks to whoever stands on it.
+                let standing: Vec<UnitId> = self
+                    .units
+                    .iter()
+                    .filter(|u| {
+                        u.is_active() && u.side == Side::Order && self.corruption.contains(&u.tile)
+                    })
+                    .map(|u| u.id)
+                    .collect();
+                for id in standing {
+                    let u = self.unit_mut(id);
+                    u.morale = (u.morale - 8).max(0);
+                    events.push(Event::Whispered { unit: id });
+                }
+            }
         }
 
         // Primed charges burn down — and go off.
@@ -2898,5 +3123,115 @@ mod tests {
             }
         }
         assert!(stains > 0, "serious wounds leave blood on the ground");
+    }
+
+    #[test]
+    fn summoning_circles_deliver_unless_fouled() {
+        // Delivery: an empty circle brings something through.
+        let mut units = duelists();
+        units[1].tile = IVec3::new(10, 10, 0);
+        let mut b = open_field(units, 23);
+        b.schedule_summon(IVec3::new(6, 6, 0), 1, 2);
+        let before = b.units.len();
+        b.perform(Action::EndTurn).unwrap(); // demons: circle resolves
+        assert_eq!(b.units.len(), before + 1, "the circle delivers");
+        assert_eq!(b.units.last().unwrap().side, Side::Demons);
+
+        // Fouling: a boot on the lines stops the working.
+        let mut units = duelists();
+        units[0].tile = IVec3::new(6, 6, 0); // soldier stands on the circle
+        units[1].tile = IVec3::new(10, 10, 0);
+        let mut b = open_field(units, 24);
+        b.schedule_summon(IVec3::new(6, 6, 0), 1, 2);
+        let before = b.units.len();
+        let events = b.perform(Action::EndTurn).unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, Event::SummoningDisrupted { .. })),
+            "{events:?}"
+        );
+        assert_eq!(b.units.len(), before, "nothing came through");
+    }
+
+    #[test]
+    fn wards_burn_the_demon_that_crosses() {
+        let mut units = duelists();
+        units[1] = Unit::hellhound(1, "Hound", IVec3::new(6, 5, 0));
+        let mut b = open_field(units, 25);
+        b.place_ward(IVec3::new(5, 5, 0));
+        b.perform(Action::EndTurn).unwrap(); // demons to move
+        let hp = b.unit(UnitId(1)).health;
+        let events = b
+            .perform(Action::Move { unit: UnitId(1), to: IVec3::new(4, 5, 0) })
+            .unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, Event::WardBurned { .. })),
+            "{events:?}"
+        );
+        assert!(b.unit(UnitId(1)).health < hp, "the ward answers");
+        assert!(b.wards.is_empty(), "a ward spends itself");
+    }
+
+    #[test]
+    fn soldiers_inscribe_wards_from_kits() {
+        let mut b = open_field(duelists(), 26);
+        assert_eq!(b.unit(UnitId(0)).ward_kits, 1);
+        let events = b.perform(Action::InscribeWard { unit: UnitId(0) }).unwrap();
+        assert!(matches!(events[0], Event::WardInscribed { .. }));
+        assert!(b.wards.contains(&b.unit(UnitId(0)).tile));
+        assert_eq!(b.unit(UnitId(0)).ward_kits, 0);
+        assert_eq!(
+            b.perform(Action::InscribeWard { unit: UnitId(0) }),
+            Err(ActionError::BadTarget),
+            "one kit, one ward"
+        );
+    }
+
+    #[test]
+    fn corruption_creeps_whispers_and_dies_with_the_obelisk() {
+        let mut b = crate::scenario::incursion(
+            3,
+            vec![Unit::soldier(0, "S", IVec3::ZERO), Unit::soldier(1, "T", IVec3::ZERO)],
+            1,
+            1,
+        );
+        // Round-trip turns until the veins break ground and spread.
+        for _ in 0..8 {
+            if b.winner.is_some() {
+                return; // some seeds end fast; nothing to prove here
+            }
+            b.perform(Action::EndTurn).unwrap();
+        }
+        assert!(!b.corruption.is_empty(), "the obelisk veins the ground");
+
+        // A soldier standing on a vein hears it.
+        let vein = b.corruption[0];
+        b.units[0].tile = vein;
+        let morale = b.unit(UnitId(0)).morale;
+        // Advance to the next Order turn start.
+        if b.side_to_move == Side::Order {
+            b.perform(Action::EndTurn).unwrap();
+        }
+        let events = b.perform(Action::EndTurn).unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Whispered { unit } if *unit == UnitId(0))),
+            "{events:?}"
+        );
+        assert!(b.unit(UnitId(0)).morale < morale);
+    }
+
+    #[test]
+    fn the_obelisk_wears_burning_runes() {
+        let b = crate::scenario::incursion(3, vec![Unit::soldier(0, "S", IVec3::ZERO)], 0, 1);
+        let mut runes = 0;
+        for z in 4..24 {
+            for y in 11 * TILE_VOXELS..13 * TILE_VOXELS {
+                for x in 22 * TILE_VOXELS..23 * TILE_VOXELS {
+                    if b.world.voxel(IVec3::new(x, y, z)) == crate::scenario::MAT_SIGIL {
+                        runes += 1;
+                    }
+                }
+            }
+        }
+        assert!(runes > 20, "the obelisk is written on: {runes}");
     }
 }

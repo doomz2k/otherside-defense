@@ -209,6 +209,8 @@ pub struct Unit {
     pub possessed: u32,
     /// Smoke grenades carried.
     pub smoke_grenades: u32,
+    /// Ward kits: chalk-and-salt for one burning ward each.
+    pub ward_kits: u32,
     /// Non-combatant caught in the massacre (soldier-shaped, unarmed).
     pub civilian: bool,
     /// True flight: ignores floors, ramps, and drops.
@@ -261,6 +263,7 @@ impl Unit {
             gibbed: false,
             possessed: 0,
             smoke_grenades: 0,
+            ward_kits: 0,
             civilian: false,
             flies: false,
             smasher: false,
@@ -302,6 +305,7 @@ impl Unit {
             grenades: 2,
             heal_charges: 3,
             smoke_grenades: 1,
+            ward_kits: 1,
             facing: IVec3::new(1, 0, 0),
             ..Self::base(id, Side::Order, Species::Soldier, name, tile)
         }

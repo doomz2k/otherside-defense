@@ -43,6 +43,12 @@ pub const MAT_TIMBER: Voxel = Voxel(13);
 pub const MAT_BLOOD: Voxel = Voxel(14);
 /// Viscera. What overkill leaves.
 pub const MAT_GORE: Voxel = Voxel(15);
+/// Glowing sigil-crimson: summoning circles, the obelisk's runes. EMISSIVE.
+pub const MAT_SIGIL: Voxel = Voxel(16);
+/// Witchfire teal: the Order's wards. EMISSIVE.
+pub const MAT_WARD: Voxel = Voxel(17);
+/// The obelisk's corruption veins. EMISSIVE.
+pub const MAT_VEIN: Voxel = Voxel(18);
 
 /// The kind of country a rift opens into. Chosen by the campaign from the
 /// rift's world region; drives ground material and terrain generation.
@@ -295,6 +301,7 @@ pub fn incursion_in_biome(
     let obelisk_min = IVec3::new(22 * TILE_VOXELS, 11 * TILE_VOXELS, GROUND_TOP);
     let obelisk_max = IVec3::new(23 * TILE_VOXELS, 13 * TILE_VOXELS, 24);
     world.fill_box(obelisk_min, obelisk_max, MAT_OBELISK);
+    carve_runes(&mut world, obelisk_min, obelisk_max);
 
     // ------------------------------------------------------------------
     // Biome dressing: seeded scatter over whatever ground the fixed
@@ -468,7 +475,34 @@ pub fn incursion_in_biome(
         battle.register_cask(tile);
     }
     battle.set_objective(obelisk_min, obelisk_max);
+    // Strong incursions keep the way open behind them: summoning circles
+    // scribe themselves in the yard, burning where everyone can see them.
+    if strength >= 4 {
+        for (anchor, delay) in [(IVec3::new(17, 8, 0), 3), (IVec3::new(18, 15, 0), 5)] {
+            if delay == 5 && strength < 7 {
+                continue; // the second circle takes a stronger rift
+            }
+            if let Some(open) = nearest_walkable(&battle, anchor) {
+                battle.schedule_summon(open, delay, strength);
+            }
+        }
+    }
     battle
+}
+
+/// The nearest walkable tile to an anchor (spiral out to radius 2).
+fn nearest_walkable(battle: &Battle, anchor: IVec3) -> Option<IVec3> {
+    for r in 0..=2 {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let t = anchor + IVec3::new(dx, dy, 0);
+                if battle.tiles.is_walkable(t) {
+                    return Some(t);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// A demon warren: tunnels gnawed through living flesh, with the nest-heart
@@ -577,6 +611,7 @@ pub fn otherside(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32, strength:
     let throne_min = IVec3::new(22 * TILE_VOXELS, 11 * TILE_VOXELS, GROUND_TOP);
     let throne_max = IVec3::new(23 * TILE_VOXELS, 13 * TILE_VOXELS, 26);
     world.fill_box(throne_min, throne_max, MAT_FLESH);
+    carve_runes(&mut world, throne_min, throne_max);
 
     soldiers.truncate(ORDER_SPAWNS.len());
     let mut units = Vec::new();
@@ -593,6 +628,10 @@ pub fn otherside(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32, strength:
         battle.register_pool(IVec3::new(tx, ty, 0));
     }
     battle.set_objective(throne_min, throne_max);
+    // The throne is scripture; the court keeps a circle burning before it.
+    if let Some(open) = nearest_walkable(&battle, IVec3::new(19, 12, 0)) {
+        battle.schedule_summon(open, 4, strength);
+    }
     battle
 }
 
@@ -681,6 +720,13 @@ pub fn base_defense(
         }
     }
 
+    let mut ward_tiles = Vec::new();
+    for idx in [6usize, 9] {
+        if idx < order.len().saturating_sub(8) {
+            ward_tiles.push(order[idx]);
+        }
+    }
+
     let demon_names = ["Wrath", "Envy", "Gluttony", "Sloth", "Pride", "Greed", "Lust", "Despair"];
     let mut units = Vec::new();
     soldiers.truncate(8);
@@ -699,7 +745,31 @@ pub fn base_defense(
         ));
     }
 
-    Battle::new(world, IVec3::ZERO, map_tiles, units, seed)
+    let mut battle = Battle::new(world, IVec3::ZERO, map_tiles, units, seed);
+    // The gate corridor is chalked and salted in advance: standing ward
+    // lines the breach must cross before it reaches the halls.
+    for tile in ward_tiles {
+        battle.place_ward(tile);
+    }
+    battle
+}
+
+/// Band an objective column with glowing rune rings: every few voxels of
+/// height, the column's outer shell burns sigil-crimson.
+fn carve_runes(world: &mut VoxelWorld, min: IVec3, max: IVec3) {
+    let mut z = min.z + 4;
+    while z < max.z - 1 {
+        for y in min.y..max.y {
+            for x in min.x..max.x {
+                let on_shell = x == min.x || x == max.x - 1 || y == min.y || y == max.y - 1;
+                // A broken stitch pattern reads as script better than a band.
+                if on_shell && (x + y + z) % 3 != 0 {
+                    world.set_voxel(IVec3::new(x, y, z), MAT_SIGIL);
+                }
+            }
+        }
+        z += 5;
+    }
 }
 
 /// Fill a tile's footprint with wall from the ground to `WALL_TOP`.
