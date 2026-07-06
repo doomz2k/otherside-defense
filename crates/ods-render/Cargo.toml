@@ -11,3 +11,5 @@ glam = { workspace = true }
 winit = { workspace = true }
 pollster = { workspace = true }
 anyhow = { workspace = true }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }

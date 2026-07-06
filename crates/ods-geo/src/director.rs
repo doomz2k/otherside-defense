@@ -4,7 +4,7 @@
 
 use crate::geography::Region;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum RiftKind {
     /// Probing the veil. Weak garrison, small stakes.
     Scouting,
@@ -74,7 +74,7 @@ impl RiftKind {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Rift {
     pub id: u32,
     pub kind: RiftKind,
@@ -103,7 +103,7 @@ impl Rift {
 }
 
 /// A completed NestBuilding mission: bleeds score daily until razed.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Nest {
     pub id: u32,
     pub region: Region,
@@ -115,7 +115,7 @@ pub const NEST_RAZE_SCORE: i64 = 50;
 pub const NEST_DAILY_PENALTY: i64 = 5;
 
 /// One rift the director has scheduled for the coming month.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PlannedRift {
     pub day: u32,
     pub kind: RiftKind,

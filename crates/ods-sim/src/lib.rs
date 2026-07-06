@@ -34,7 +34,9 @@ pub fn voxel_to_tile(voxel: IVec3) -> IVec3 {
     )
 }
 
-/// The only random number source the simulation may use.
+/// The only random number source the simulation may use. Serializable so a
+/// saved campaign resumes with an identical stream of fate.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SimRng(Pcg32);
 
 impl SimRng {

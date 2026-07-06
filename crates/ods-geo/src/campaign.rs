@@ -24,7 +24,7 @@ pub const SQUAD_SIZE: usize = 6;
 pub const BAD_MONTH_SCORE: i64 = -100;
 pub const DEBT_LIMIT: i64 = -500;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SoldierStats {
     pub tu: i32,
     pub health: i32,
@@ -33,7 +33,7 @@ pub struct SoldierStats {
     pub bravery: i32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Soldier {
     pub name: String,
     pub stats: SoldierStats,
@@ -63,7 +63,7 @@ fn apply_growth(stats: &mut SoldierStats, xp: ods_sim::battle::Experience) {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CampaignOutcome {
     /// Two consecutive badly-losing months: the council pulls the plug.
     FundingWithdrawn,
@@ -106,11 +106,28 @@ pub enum GeoError {
     PrerequisiteMissing,
 }
 
+/// A ground mission the campaign can stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MissionKind {
+    Rift(u32),
+    Nest(u32),
+    Reckoning,
+}
+
+/// Receipt from [`Campaign::begin_mission`]; hand it back to
+/// [`Campaign::conclude_mission`] with the finished battle. Not saveable —
+/// finish the fight before the world moves on.
+pub struct MissionToken {
+    kind: MissionKind,
+    squad_idx: Vec<usize>,
+}
+
 const RECRUIT_NAMES: [&str; 16] = [
     "Adeyemi", "Brandt", "Castillo", "Dubois", "Eriksen", "Farah", "Grigorescu", "Hale",
     "Iwata", "Jansen", "Karimi", "Lindqvist", "Mbeki", "Novak", "Oyelaran", "Petrov",
 ];
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Campaign {
     pub funds: i64,
     pub month: u32,
@@ -207,6 +224,19 @@ impl Campaign {
     }
 
     // ------------------------------------------------------------------
+    // Save / load
+
+    /// Serialize the entire campaign — including the RNG state, so a loaded
+    /// game continues with an identical stream of fate.
+    pub fn save_to_string(&self) -> String {
+        serde_json::to_string(self).expect("campaign state is always serializable")
+    }
+
+    pub fn load_from_str(save: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(save)
+    }
+
+    // ------------------------------------------------------------------
     // Player decisions
 
     pub fn hire_soldier(&mut self) -> Result<&Soldier, GeoError> {
@@ -294,29 +324,11 @@ impl Campaign {
         Ok(gain)
     }
 
-    /// Send the squad through a detected rift. The battle really happens.
+    /// Send the squad through a detected rift, AI-resolved. The battle
+    /// really happens; `begin_mission`/`conclude_mission` is the same path
+    /// the interactive Battlescape uses.
     pub fn assault_rift(&mut self, rift_id: u32) -> Result<BattleReport, GeoError> {
-        self.guard_over()?;
-        let rift = self
-            .rifts
-            .iter()
-            .find(|r| r.id == rift_id)
-            .ok_or(GeoError::UnknownRift)?;
-        if !rift.detected {
-            return Err(GeoError::NotDetected);
-        }
-        let (kind, region, garrison) = (rift.kind, rift.region, rift.effective_garrison());
-        let report = self.fight(garrison, false)?;
-        if report.victory {
-            self.rifts.retain(|r| r.id != rift_id);
-            self.score(region, kind.banish_score());
-            self.collect_salvage(kind, report.demons_slain);
-            self.reckoning_heat += 1;
-        } else {
-            // The squad withdraws; the incursion continues, emboldened.
-            self.score(region, -5);
-        }
-        Ok(report)
+        self.fight(MissionKind::Rift(rift_id))
     }
 
     /// What the field teams drag back from a banished incursion.
@@ -331,29 +343,42 @@ impl Campaign {
         };
     }
 
-    /// Storm an established nest.
+    /// Storm an established nest, AI-resolved.
     pub fn raze_nest(&mut self, nest_id: u32) -> Result<BattleReport, GeoError> {
-        self.guard_over()?;
-        let nest = self
-            .nests
-            .iter()
-            .find(|n| n.id == nest_id)
-            .ok_or(GeoError::UnknownNest)?;
-        let region = nest.region;
-        let report = self.fight(NEST_GARRISON, false)?;
-        if report.victory {
-            self.nests.retain(|n| n.id != nest_id);
-            self.score(region, NEST_RAZE_SCORE);
-            self.brimstone += 6;
-            self.hellsteel += report.demons_slain;
-            self.reckoning_heat += 1;
-        } else {
-            self.score(region, -5);
-        }
-        Ok(report)
+        self.fight(MissionKind::Nest(nest_id))
     }
 
-    fn fight(&mut self, garrison: u32, defense: bool) -> Result<BattleReport, GeoError> {
+    /// Set up a mission as a real Battle for the caller to drive — either
+    /// interactively (the Battlescape screen) or via AI. Squad selection,
+    /// research bonuses, and the battle seed all come from campaign state.
+    /// Feed the finished battle back through [`Campaign::conclude_mission`].
+    pub fn begin_mission(
+        &mut self,
+        kind: MissionKind,
+    ) -> Result<(ods_sim::battle::Battle, MissionToken), GeoError> {
+        self.guard_over()?;
+        let (garrison, defense) = match kind {
+            MissionKind::Rift(id) => {
+                let rift = self
+                    .rifts
+                    .iter()
+                    .find(|r| r.id == id)
+                    .ok_or(GeoError::UnknownRift)?;
+                if !rift.detected {
+                    return Err(GeoError::NotDetected);
+                }
+                (rift.effective_garrison(), false)
+            }
+            MissionKind::Nest(id) => {
+                self.nests
+                    .iter()
+                    .find(|n| n.id == id)
+                    .ok_or(GeoError::UnknownNest)?;
+                (NEST_GARRISON, false)
+            }
+            MissionKind::Reckoning => ((5 + self.month / 2).min(8), true),
+        };
+
         let squad_idx: Vec<usize> = self
             .soldiers
             .iter()
@@ -366,10 +391,10 @@ impl Campaign {
             return Err(GeoError::NoSquadFit);
         }
         let squad: Vec<&Soldier> = squad_idx.iter().map(|&i| &self.soldiers[i]).collect();
-        let battle_seed = (self.rng.roll(1 << 30) as u64) << 30 | self.rng.roll(1 << 30) as u64;
-        let report = if defense {
-            missions::auto_resolve_defense(
-                battle_seed,
+        let seed = (self.rng.roll(1 << 30) as u64) << 30 | self.rng.roll(1 << 30) as u64;
+        let battle = if defense {
+            missions::build_defense(
+                seed,
                 &squad,
                 garrison,
                 &self.research,
@@ -377,12 +402,70 @@ impl Campaign {
                 self.base.gate(),
             )
         } else {
-            missions::auto_resolve(battle_seed, &squad, garrison, &self.research)
+            missions::build_assault(seed, &squad, garrison, &self.research)
         };
+        Ok((battle, MissionToken { kind, squad_idx }))
+    }
 
-        // Fold the outcome back into the roster. Dead soldiers are gone; the
-        // wounded convalesce roughly a day per missing hit point; survivors
-        // grow by what they did out there.
+    /// Fold a finished battle back into the campaign: casualties, wounds,
+    /// growth, and the strategic outcome of the mission.
+    pub fn conclude_mission(
+        &mut self,
+        token: MissionToken,
+        battle: &ods_sim::battle::Battle,
+    ) -> BattleReport {
+        let report = missions::report_from(battle, token.squad_idx.len());
+        self.apply_to_roster(&token.squad_idx, &report);
+
+        match token.kind {
+            MissionKind::Rift(id) => {
+                if let Some(rift) = self.rifts.iter().find(|r| r.id == id) {
+                    let (kind, region) = (rift.kind, rift.region);
+                    if report.victory {
+                        self.rifts.retain(|r| r.id != id);
+                        self.score(region, kind.banish_score());
+                        self.collect_salvage(kind, report.demons_slain);
+                        self.reckoning_heat += 1;
+                    } else {
+                        // The squad withdraws; the incursion continues.
+                        self.score(region, -5);
+                    }
+                }
+            }
+            MissionKind::Nest(id) => {
+                if let Some(nest) = self.nests.iter().find(|n| n.id == id) {
+                    let region = nest.region;
+                    if report.victory {
+                        self.nests.retain(|n| n.id != id);
+                        self.score(region, NEST_RAZE_SCORE);
+                        self.brimstone += 6;
+                        self.hellsteel += report.demons_slain;
+                        self.reckoning_heat += 1;
+                    } else {
+                        self.score(region, -5);
+                    }
+                }
+            }
+            MissionKind::Reckoning => {
+                if report.victory {
+                    self.score(self.base.region, 30);
+                } else {
+                    self.over = Some(CampaignOutcome::ChapterhouseFallen);
+                }
+            }
+        }
+        report
+    }
+
+    fn fight(&mut self, kind: MissionKind) -> Result<BattleReport, GeoError> {
+        let (mut battle, token) = self.begin_mission(kind)?;
+        missions::run_auto(&mut battle);
+        Ok(self.conclude_mission(token, &battle))
+    }
+
+    /// Casualties are removed, the wounded convalesce roughly a day per
+    /// missing hit point, and survivors grow by what they did out there.
+    fn apply_to_roster(&mut self, squad_idx: &[usize], report: &BattleReport) {
         let infirmary = self.base.count_active(Facility::Infirmary) > 0;
         for &(squad_pos, health, xp) in &report.survivors {
             let s = &mut self.soldiers[squad_idx[squad_pos]];
@@ -397,7 +480,6 @@ impl Campaign {
         for idx in dead_roster {
             self.soldiers.remove(idx);
         }
-        Ok(report)
     }
 
     fn score(&mut self, region: Region, delta: i64) {
@@ -408,16 +490,20 @@ impl Campaign {
     /// Hell answers success. Fought in the chapterhouse's own floor plan;
     /// with no fit defenders, the chapterhouse simply falls.
     fn resolve_reckoning(&mut self, events: &mut Vec<GeoEvent>) {
-        let garrison = (5 + self.month / 2).min(8);
-        match self.fight(garrison, true) {
+        match self.fight(MissionKind::Reckoning) {
             Ok(report) if report.victory => {
-                self.score(self.base.region, 30);
                 events.push(GeoEvent::ReckoningRepelled {
                     demons_slain: report.demons_slain,
                     dead: report.dead.len(),
                 });
             }
-            Ok(_) | Err(GeoError::NoSquadFit) => {
+            Ok(_) => {
+                // `conclude_mission` already marked the campaign over.
+                events.push(GeoEvent::CampaignOver {
+                    outcome: CampaignOutcome::ChapterhouseFallen,
+                });
+            }
+            Err(GeoError::NoSquadFit) => {
                 self.over = Some(CampaignOutcome::ChapterhouseFallen);
                 events.push(GeoEvent::CampaignOver {
                     outcome: CampaignOutcome::ChapterhouseFallen,
@@ -953,6 +1039,66 @@ mod tests {
         c.advance_day();
         assert!(c.reckoning_day.is_some(), "5 heat means hell answers next month");
         assert_eq!(c.reckoning_heat, 0);
+    }
+
+    #[test]
+    fn save_load_roundtrip_preserves_fate() {
+        let mut original = Campaign::new(404);
+        // Muddy the state first: build, research, take a fight.
+        original.start_build(Facility::Quarters, 0, 0).unwrap();
+        original.start_research(Project::RiftAugury).unwrap();
+        let id = detected_rift(&mut original, RiftKind::Scouting, Region::Africa);
+        original.assault_rift(id).unwrap();
+        for _ in 0..10 {
+            original.advance_day();
+        }
+
+        let save = original.save_to_string();
+        let mut loaded = Campaign::load_from_str(&save).unwrap();
+
+        // The load must not merely match — it must CONTINUE identically,
+        // which requires the RNG stream to have survived the round trip.
+        let mut log_a = Vec::new();
+        let mut log_b = Vec::new();
+        for _ in 0..60 {
+            log_a.extend(original.advance_day().into_iter().map(|e| format!("{e:?}")));
+            log_b.extend(loaded.advance_day().into_iter().map(|e| format!("{e:?}")));
+        }
+        assert_eq!(log_a, log_b, "a loaded game continues the same timeline");
+        assert_eq!(original.funds, loaded.funds);
+        assert_eq!(original.soldiers.len(), loaded.soldiers.len());
+    }
+
+    #[test]
+    fn interactive_missions_flow_through_begin_and_conclude() {
+        use ods_sim::ai;
+
+        let mut c = Campaign::new(31);
+        let id = detected_rift(&mut c, RiftKind::Scouting, Region::Europe);
+        let roster_before = c.soldiers.len();
+
+        let (mut battle, token) = c.begin_mission(MissionKind::Rift(id)).unwrap();
+        // "Player" plays exactly like the AI would, for the test's purposes.
+        let mut turns = 0;
+        while battle.winner.is_none() && turns < 40 {
+            ai::run_order_turn(&mut battle);
+            if battle.winner.is_none() {
+                ai::run_demon_turn(&mut battle);
+            }
+            turns += 1;
+        }
+        let report = c.conclude_mission(token, &battle);
+        assert_eq!(c.soldiers.len(), roster_before - report.dead.len());
+        if report.victory {
+            assert!(c.rifts.iter().all(|r| r.id != id));
+            assert_eq!(c.reckoning_heat, 1);
+        }
+
+        // Undetected or missing rifts refuse to stage.
+        assert_eq!(
+            c.begin_mission(MissionKind::Rift(4242)).err(),
+            Some(GeoError::UnknownRift)
+        );
     }
 
     #[test]

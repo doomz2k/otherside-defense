@@ -6,7 +6,7 @@ use crate::geography::Region;
 
 pub const GRID: usize = 6;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Facility {
     /// The way in and out. Every chapterhouse has exactly one.
     Gatehouse,
@@ -62,12 +62,13 @@ impl Facility {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Slot {
     facility: Facility,
     days_left: u32,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Chapterhouse {
     pub region: Region,
     grid: [[Option<Slot>; GRID]; GRID],

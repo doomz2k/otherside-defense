@@ -1,7 +1,9 @@
-//! Auto-resolution of ground missions: a real `ods-sim` battle, both sides
-//! played by AI, deterministic given the seed. No abstract dice — if a wall
-//! gets blown open in the tactical sim, that's how the strategic result came
-//! to be.
+//! Ground-mission plumbing between the campaign and the tactical sim.
+//!
+//! The campaign builds a real `ods-sim` battle (assault or base defense),
+//! and folds the finished battle back into a report. Between those two
+//! moments the battle can be driven by AI (auto-resolve) or by the player
+//! (the interactive Battlescape) — the campaign doesn't care which.
 
 use ods_sim::battle::{Battle, Experience};
 use ods_sim::units::{Side, Unit, UnitId};
@@ -23,47 +25,46 @@ pub struct BattleReport {
 
 const MAX_AUTO_TURNS: u32 = 40;
 
-/// Resolve a rift-site assault on the standard field map.
-pub fn auto_resolve(
+/// Build a rift-site assault on the standard field map.
+pub(crate) fn build_assault(
     seed: u64,
     squad: &[&Soldier],
     demon_count: u32,
     research: &ResearchState,
-) -> BattleReport {
-    let units = make_units(squad, research);
-    let squad_len = units.len();
-    resolve(scenario::incursion(seed, units, demon_count), squad_len)
+) -> Battle {
+    scenario::incursion(seed, make_units(squad, research), demon_count)
 }
 
-/// Resolve a Reckoning: demons breaching the chapterhouse itself. The map is
+/// Build a Reckoning: demons breaching the chapterhouse itself, on a map
 /// generated from the actual facility layout.
-pub fn auto_resolve_defense(
+pub(crate) fn build_defense(
     seed: u64,
     squad: &[&Soldier],
     demon_count: u32,
     research: &ResearchState,
     cells: &[(usize, usize)],
     gate: (usize, usize),
-) -> BattleReport {
-    let units = make_units(squad, research);
-    let squad_len = units.len();
-    resolve(
-        scenario::base_defense(seed, units, demon_count, cells, gate),
-        squad_len,
-    )
+) -> Battle {
+    scenario::base_defense(seed, make_units(squad, research), demon_count, cells, gate)
 }
 
-fn resolve(mut battle: Battle, squad_len: usize) -> BattleReport {
-    let demons_start = battle.living(Side::Demons).count() as u32;
-
+/// Drive a battle to its end with AI on both sides.
+pub(crate) fn run_auto(battle: &mut Battle) -> u32 {
     let mut turns = 0;
     while battle.winner.is_none() && turns < MAX_AUTO_TURNS {
-        ai::run_order_turn(&mut battle);
+        ai::run_order_turn(battle);
         if battle.winner.is_none() {
-            ai::run_demon_turn(&mut battle);
+            ai::run_demon_turn(battle);
         }
         turns += 1;
     }
+    turns
+}
+
+/// Read a finished (or abandoned) battle back into a campaign-level report.
+/// A battle with no winner counts as a withdrawal: the demons hold the field.
+pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
+    let demons_total = (battle.units.len() - squad_len) as u32;
 
     let mut dead = Vec::new();
     let mut survivors = Vec::new();
@@ -77,12 +78,11 @@ fn resolve(mut battle: Battle, squad_len: usize) -> BattleReport {
     }
 
     BattleReport {
-        // A timeout is a withdrawal: the incursion holds the field.
         victory: battle.winner == Some(Side::Order),
-        turns,
+        turns: battle.turn,
         dead,
         survivors,
-        demons_slain: demons_start - battle.living(Side::Demons).count() as u32,
+        demons_slain: demons_total - battle.living(Side::Demons).count() as u32,
     }
 }
 
@@ -95,7 +95,7 @@ fn make_units(squad: &[&Soldier], research: &ResearchState) -> Vec<Unit> {
 }
 
 fn make_unit(id: u32, s: &Soldier, research: &ResearchState) -> Unit {
-    // Placeholder tile; `scenario::incursion` assigns the real deployment.
+    // Placeholder tile; the scenario builders assign the real deployment.
     let mut u = Unit::soldier(id, &s.name, glam::IVec3::ZERO);
     u.tu_max = s.stats.tu;
     u.tu = s.stats.tu;

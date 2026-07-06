@@ -1,208 +1,82 @@
-//! Otherside Defense — first playable Battlescape slice.
+//! Otherside Defense — application shell.
 //!
-//! Controls:
-//! - Left click a soldier: select. Left click ground: move there.
-//! - Left click a visible imp: fire at it with the current mode.
-//! - `1` / `2` / `3`: snap / aimed / auto fire mode. Tab: next soldier.
-//! - `G`: arm a hellfire charge — the next click throws it at that tile
-//!   (arcs over walls). `H`: field-dress the selected soldier.
-//! - Space or Enter: end turn (the demons then play).
-//! - Right-drag: orbit camera. Scroll: zoom. WASD: pan. Esc: deselect/disarm.
+//! Screens: main menu → Geoscape (campaign management) → Battlescape
+//! (3D voxel battle with an egui HUD). Campaign battles can be led
+//! interactively ("Lead") or auto-resolved ("Auto"); either way the same
+//! rules run underneath.
 //!
-//! Run with `--headless` to run the simulation smoke test without a window.
+//! Headless modes for CI / displayless sessions:
+//!   --headless       tactical smoke test
+//!   --campaign [N]   N-month narrated campaign
+
+mod battle_screen;
+mod chronicle;
+mod geoscape;
 
 use std::sync::Arc;
 
-use glam::{IVec3, Vec3};
-use ods_render::{OrbitCamera, OverlayVertex, Renderer};
-use ods_sim::battle::{Action, Battle, Event};
-use ods_sim::units::{FireMode, Side, UnitId};
-use ods_sim::{TILE_VOXELS, ai, scenario, voxel_to_tile};
-use ods_voxel::{MeshData, mesh_chunk};
+use battle_screen::BattleScreen;
+use geoscape::GeoAction;
+use ods_geo::{Campaign, Facility};
+use ods_render::{Renderer, UiFrame};
+use ods_sim::scenario;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
-const MAT_SOLDIER: u8 = 6;
-const MAT_IMP: u8 = 7;
+pub const SAVE_PATH: &str = "otherside-save.json";
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--headless") {
-        return headless_smoke_test();
+        return chronicle::headless_smoke_test();
     }
     if let Some(pos) = args.iter().position(|a| a == "--campaign") {
         let months: u32 = args.get(pos + 1).and_then(|m| m.parse().ok()).unwrap_or(6);
-        return campaign_chronicle(months);
+        return chronicle::campaign_chronicle(months);
     }
     let event_loop = EventLoop::new()?;
-    let mut app = App { game: None };
+    let mut app = App { core: None };
     event_loop.run_app(&mut app)?;
     Ok(())
 }
 
-/// Headless campaign: a simple commander policy plays N months and narrates.
-/// Every assault is a real auto-resolved Battlescape fight.
-fn campaign_chronicle(months: u32) -> anyhow::Result<()> {
-    use ods_geo::{Campaign, GeoEvent, Project};
-
-    let mut c = Campaign::new(1999);
-    let mut research_queue = vec![
-        Project::RiftAugury,
-        Project::BlessedArms,
-        Project::HellsteelPlate,
-        Project::HellfireLance,
-    ];
-
-    println!("== The Order convenes. {} soldiers sworn in. ==", c.soldiers.len());
-    for _day in 0..months * 30 {
-        if c.over.is_some() {
-            break;
-        }
-        // Commander policy: keep research running, keep the roster manned,
-        // storm everything we can see.
-        if c.research.active.is_none()
-            && let Some(&next) = research_queue.first()
-            && c.start_research(next).is_ok()
-        {
-            research_queue.remove(0);
-            println!("[m{} d{}] research begins: {}", c.month, c.day, next.name());
-        }
-        if c.soldiers.len() < 8 && c.funds > 500 {
-            let (m, d) = (c.month, c.day);
-            if let Ok(s) = c.hire_soldier() {
-                println!("[m{m} d{d}] recruited {}", s.name);
-            }
-        }
-
-        for event in c.advance_day() {
-            narrate(&c, &event);
-            if let GeoEvent::RiftDetected { id, kind, region, .. } = event {
-                // Don't feed lone survivors to the rift: wait for a real squad.
-                if c.soldiers.iter().filter(|s| s.is_fit()).count() < 4 {
-                    println!("    >> too few fit soldiers to assault — holding");
-                    continue;
-                }
-                match c.assault_rift(id) {
-                    Ok(r) if r.victory => println!(
-                        "    >> BANISHED the {} in {} ({} demons slain, {} lost, {} turns)",
-                        kind.name(),
-                        region.name(),
-                        r.demons_slain,
-                        r.dead.len(),
-                        r.turns
-                    ),
-                    Ok(r) => println!(
-                        "    >> REPELLED at the {} in {} ({} lost) — the rift holds",
-                        kind.name(),
-                        region.name(),
-                        r.dead.len()
-                    ),
-                    Err(e) => println!("    >> cannot assault: {e:?}"),
-                }
-            }
-        }
-        // Raze any nest as soon as the squad is on its feet.
-        if let Some(nest_id) = c.nests.first().map(|n| n.id)
-            && let Ok(r) = c.raze_nest(nest_id)
-            && r.victory
-        {
-            println!("    >> nest RAZED ({} demons slain)", r.demons_slain);
-        }
-    }
-
-    println!(
-        "\n== Chronicle ends: month {}, funds {}k, {} soldiers, {} nests standing, outcome: {} ==",
-        c.month,
-        c.funds,
-        c.soldiers.len(),
-        c.nests.len(),
-        match c.over {
-            None => "the Order fights on".to_string(),
-            Some(o) => format!("{o:?}"),
-        }
-    );
-    Ok(())
-}
-
-fn narrate(c: &ods_geo::Campaign, event: &ods_geo::GeoEvent) {
-    use ods_geo::GeoEvent as E;
-    let stamp = format!("[m{} d{}]", c.month, c.day);
-    match event {
-        E::FacilityComplete { facility } => {
-            println!("{stamp} construction complete: {}", facility.name());
-        }
-        E::ResearchComplete { project } => {
-            println!("{stamp} the Codex yields: {}", project.name());
-        }
-        E::SoldierRecovered { name } => println!("{stamp} {name} returns to duty"),
-        E::RiftDetected { kind, region, days_left, .. } => println!(
-            "{stamp} augurs scream: {} in {} ({days_left} days to act)",
-            kind.name(),
-            region.name()
-        ),
-        E::RiftExpired { kind, region, penalty, .. } => println!(
-            "{stamp} the {} in {} runs its course unopposed (-{penalty})",
-            kind.name(),
-            region.name()
-        ),
-        E::NestFounded { region, .. } => {
-            println!("{stamp} !!! a nest takes root in {}", region.name());
-        }
-        E::RegionInfiltrated { region } => {
-            println!("{stamp} !!! cultists seize power in {}", region.name());
-        }
-        E::ReckoningRepelled { demons_slain, dead } => println!(
-            "{stamp} !!! RECKONING: demons breached the chapterhouse — repelled \
-             ({demons_slain} slain, {dead} defenders lost)"
-        ),
-        E::MonthlyReport { month, score, income, expenses, funds } => println!(
-            "{stamp} === month {month} report: score {score}, income {income}k, \
-             expenses {expenses}k, treasury {funds}k | salvage: {} brimstone {} hellsteel ===",
-            c.brimstone, c.hellsteel
-        ),
-        E::CampaignOver { outcome } => println!("{stamp} ### THE ORDER FALLS: {outcome:?} ###"),
-    }
-}
-
-/// The old smoke test, kept for CI and cloud sessions with no display.
-fn headless_smoke_test() -> anyhow::Result<()> {
-    let mut battle = scenario::skirmish(42);
-    println!("skirmish begins: turn {}, {:?} to move", battle.turn, battle.side_to_move);
-    for _ in 0..30 {
-        if battle.winner.is_some() {
-            break;
-        }
-        battle.perform(Action::EndTurn).ok();
-        let events = ai::run_demon_turn(&mut battle);
-        println!("demon turn: {} events", events.len());
-    }
-    println!(
-        "after 30 turns: soldiers {}, imps {}",
-        battle.living(Side::Order).count(),
-        battle.living(Side::Demons).count()
-    );
-    Ok(())
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    Menu,
+    Geoscape,
+    Battle,
 }
 
 struct App {
-    game: Option<Game>,
+    core: Option<Core>,
+}
+
+pub struct Core {
+    window: Arc<Window>,
+    renderer: Renderer,
+    egui_ctx: egui::Context,
+    egui_state: egui_winit::State,
+    pub screen: Screen,
+    pub campaign: Option<Campaign>,
+    pub battle: Option<BattleScreen>,
+    pub log: Vec<String>,
+    pub status: Option<String>,
+    pub build_choice: Facility,
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.game.is_none() {
+        if self.core.is_none() {
             let window = Arc::new(
                 event_loop
-                    .create_window(
-                        Window::default_attributes().with_title("Otherside Defense"),
-                    )
+                    .create_window(Window::default_attributes().with_title("Otherside Defense"))
                     .expect("create window"),
             );
-            match Game::new(window) {
-                Ok(game) => self.game = Some(game),
+            match Core::new(window) {
+                Ok(core) => self.core = Some(core),
                 Err(e) => {
                     eprintln!("failed to initialise renderer: {e:#}");
                     event_loop.exit();
@@ -212,369 +86,191 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let Some(game) = self.game.as_mut() else { return };
-        if game.handle_event(event) {
+        let Some(core) = self.core.as_mut() else { return };
+        if core.handle_event(event) {
             event_loop.exit();
         }
     }
 }
 
-struct Game {
-    window: Arc<Window>,
-    renderer: Renderer,
-    camera: OrbitCamera,
-    battle: Battle,
-    selected: Option<UnitId>,
-    fire_mode: FireMode,
-    /// When true, the next ground click lobs a hellfire charge.
-    grenade_armed: bool,
-    cursor: (f32, f32),
-    right_drag: bool,
-    last_cursor: (f32, f32),
-}
-
-impl Game {
+impl Core {
     fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let renderer = Renderer::new(window.clone())?;
-        let battle = scenario::skirmish(42);
-        let center = (scenario::MAP_TILES.as_vec3() * TILE_VOXELS as f32) / 2.0;
-        let mut game = Self {
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            None,
+            None,
+            None,
+        );
+        Ok(Self {
             window,
             renderer,
-            camera: OrbitCamera::new(Vec3::new(center.x, center.y, 0.0)),
-            battle,
-            selected: None,
-            fire_mode: FireMode::Snap,
-            grenade_armed: false,
-            cursor: (0.0, 0.0),
-            right_drag: false,
-            last_cursor: (0.0, 0.0),
-        };
-        game.refresh_chunks();
-        game.refresh_scene();
-        game.update_title();
-        Ok(game)
+            egui_ctx,
+            egui_state,
+            screen: Screen::Menu,
+            campaign: None,
+            battle: None,
+            log: Vec::new(),
+            status: None,
+            build_choice: Facility::Quarters,
+        })
+    }
+
+    pub fn start_skirmish(&mut self) {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(42);
+        let battle = scenario::skirmish(seed);
+        self.battle = Some(BattleScreen::new(&mut self.renderer, battle, None));
+        self.screen = Screen::Battle;
     }
 
     /// Returns true when the app should exit.
     fn handle_event(&mut self, event: WindowEvent) -> bool {
+        let response = self.egui_state.on_window_event(&self.window, &event);
+
         match event {
             WindowEvent::CloseRequested => return true,
             WindowEvent::Resized(size) => {
                 self.renderer.resize(size.width, size.height);
             }
+            WindowEvent::RedrawRequested => {
+                self.redraw();
+            }
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor = (position.x as f32, position.y as f32);
-                if self.right_drag {
-                    let dx = self.cursor.0 - self.last_cursor.0;
-                    let dy = self.cursor.1 - self.last_cursor.1;
-                    self.camera.orbit(dx * -0.008, dy * 0.008);
+                if let Some(b) = self.battle.as_mut() {
+                    b.cursor = (position.x as f32, position.y as f32);
+                    if b.right_drag && !response.consumed {
+                        let dx = b.cursor.0 - b.last_cursor.0;
+                        let dy = b.cursor.1 - b.last_cursor.1;
+                        b.drag(dx, dy);
+                    }
+                    b.last_cursor = b.cursor;
                 }
-                self.last_cursor = self.cursor;
             }
-            WindowEvent::MouseInput { state, button, .. } => match button {
-                MouseButton::Right => self.right_drag = state == ElementState::Pressed,
-                MouseButton::Left if state == ElementState::Pressed => self.click(),
-                _ => {}
-            },
-            WindowEvent::MouseWheel { delta, .. } => {
-                let scroll = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
-                };
-                self.camera.zoom(1.0 - scroll * 0.1);
+            WindowEvent::MouseInput { state, button, .. }
+                if self.screen == Screen::Battle && !response.consumed =>
+            {
+                let (w, h) = self.renderer.size();
+                if let Some(b) = self.battle.as_mut() {
+                    match button {
+                        MouseButton::Right => b.right_drag = state == ElementState::Pressed,
+                        MouseButton::Left if state == ElementState::Pressed => {
+                            b.click(&mut self.renderer, w, h);
+                        }
+                        _ => {}
+                    }
+                }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::MouseWheel { delta, .. }
+                if self.screen == Screen::Battle && !response.consumed =>
+            {
+                if let Some(b) = self.battle.as_mut() {
+                    let scroll = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                    };
+                    b.camera.zoom(1.0 - scroll * 0.1);
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if self.screen == Screen::Battle && !response.consumed =>
+            {
                 if event.state == ElementState::Pressed
                     && let PhysicalKey::Code(code) = event.physical_key
+                    && let Some(b) = self.battle.as_mut()
                 {
-                    self.key(code);
+                    b.key(&mut self.renderer, code);
                 }
-            }
-            WindowEvent::RedrawRequested => {
-                let vp = self.camera.view_proj(self.renderer.aspect());
-                self.renderer.set_camera(vp);
-                if let Err(e) = self.renderer.render() {
-                    eprintln!("render error: {e:#}");
-                }
-                self.window.request_redraw();
             }
             _ => {}
         }
         false
     }
 
-    fn key(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Escape => {
-                if self.grenade_armed {
-                    self.grenade_armed = false;
-                } else {
-                    self.selected = None;
+    fn redraw(&mut self) {
+        let raw_input = self.egui_state.take_egui_input(&self.window);
+        let ctx = self.egui_ctx.clone();
+        let full_output = ctx.run(raw_input, |ctx| self.ui(ctx));
+        self.egui_state
+            .handle_platform_output(&self.window, full_output.platform_output);
+        let primitives = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+
+        if let Some(b) = &self.battle {
+            let vp = b.camera.view_proj(self.renderer.aspect());
+            self.renderer.set_camera(vp);
+        }
+
+        if let Err(e) = self.renderer.render(Some(UiFrame {
+            textures_delta: full_output.textures_delta,
+            primitives,
+            pixels_per_point: full_output.pixels_per_point,
+        })) {
+            eprintln!("render error: {e:#}");
+        }
+        self.window.request_redraw();
+    }
+
+    fn ui(&mut self, ctx: &egui::Context) {
+        match self.screen {
+            Screen::Menu => self.menu_ui(ctx),
+            Screen::Geoscape => {
+                let action = self.geoscape_ui(ctx);
+                if let GeoAction::LeadMission(kind) = action {
+                    self.launch_mission(kind);
                 }
             }
-            KeyCode::Digit1 => self.fire_mode = FireMode::Snap,
-            KeyCode::Digit2 => self.fire_mode = FireMode::Aimed,
-            KeyCode::Digit3 => self.fire_mode = FireMode::Auto,
-            KeyCode::KeyG => self.grenade_armed = !self.grenade_armed,
-            KeyCode::KeyH => self.heal_selected(),
-            KeyCode::Tab => self.select_next_soldier(),
-            KeyCode::Space | KeyCode::Enter => self.end_turn(),
-            KeyCode::KeyW => self.camera.pan(0.0, 12.0),
-            KeyCode::KeyS => self.camera.pan(0.0, -12.0),
-            KeyCode::KeyA => self.camera.pan(-12.0, 0.0),
-            KeyCode::KeyD => self.camera.pan(12.0, 0.0),
-            _ => return,
+            Screen::Battle => self.battle_ui(ctx),
         }
-        self.refresh_scene();
-        self.update_title();
     }
 
-    fn select_next_soldier(&mut self) {
-        let soldiers: Vec<UnitId> = self.battle.living(Side::Order).map(|u| u.id).collect();
-        if soldiers.is_empty() {
-            self.selected = None;
-            return;
-        }
-        let next = match self.selected {
-            Some(current) => soldiers
-                .iter()
-                .cycle()
-                .skip_while(|&&id| id != current)
-                .nth(1)
-                .copied(),
-            None => soldiers.first().copied(),
-        };
-        self.selected = next;
-    }
-
-    fn click(&mut self) {
-        if self.battle.winner.is_some() {
-            return;
-        }
-        let (w, h) = self.renderer.size();
-        let (origin, dir) = self.camera.screen_ray(self.cursor.0, self.cursor.1, w, h);
-        let Some(hit) = self.battle.world.raycast(origin, dir, 4000.0) else {
-            return;
-        };
-        // Nudge out of the surface so a floor hit resolves to the tile above.
-        let open = hit.position + hit.normal.as_vec3() * 0.01;
-        let tile = voxel_to_tile(open.floor().as_ivec3());
-
-        if self.grenade_armed {
-            self.grenade_armed = false;
-            let Some(thrower) = self.selected else { return };
-            match self.battle.perform(Action::Throw { unit: thrower, at: tile }) {
-                Ok(events) => self.consume_events(&events),
-                Err(e) => println!("cannot throw: {e:?}"),
+    fn launch_mission(&mut self, kind: ods_geo::MissionKind) {
+        let Some(c) = &mut self.campaign else { return };
+        match c.begin_mission(kind) {
+            Ok((battle, token)) => {
+                self.battle = Some(BattleScreen::new(&mut self.renderer, battle, Some(token)));
+                self.screen = Screen::Battle;
             }
-            return;
-        }
-
-        let events = if let Some(id) = self.battle.unit_at(tile) {
-            let unit = self.battle.unit(id);
-            match unit.side {
-                Side::Order => {
-                    self.selected = Some(id);
-                    self.refresh_scene();
-                    self.update_title();
-                    return;
-                }
-                Side::Demons => {
-                    let Some(shooter) = self.selected else { return };
-                    self.battle.perform(Action::Fire {
-                        unit: shooter,
-                        target: id,
-                        mode: self.fire_mode,
-                    })
-                }
-            }
-        } else {
-            let Some(mover) = self.selected else { return };
-            self.battle.perform(Action::Move { unit: mover, to: tile })
-        };
-
-        match events {
-            Ok(events) => self.consume_events(&events),
-            Err(e) => println!("cannot: {e:?}"),
+            Err(e) => self.log.push(format!("cannot stage the mission: {e:?}")),
         }
     }
 
-    fn heal_selected(&mut self) {
-        let Some(id) = self.selected else { return };
-        match self.battle.perform(Action::Heal { medic: id, target: id }) {
-            Ok(events) => self.consume_events(&events),
-            Err(e) => println!("cannot heal: {e:?}"),
-        }
-    }
-
-    fn end_turn(&mut self) {
-        if self.battle.winner.is_some() {
-            return;
-        }
-        match self.battle.perform(Action::EndTurn) {
-            Ok(events) => self.consume_events(&events),
-            Err(e) => {
-                println!("cannot end turn: {e:?}");
+    fn battle_ui(&mut self, ctx: &egui::Context) {
+        let leave = match self.battle.as_mut() {
+            Some(b) => b.hud(ctx, &mut self.renderer),
+            None => {
+                self.screen = Screen::Menu;
                 return;
             }
-        }
-        // The demons play immediately, then hand back.
-        let events = ai::run_demon_turn(&mut self.battle);
-        self.consume_events(&events);
-    }
-
-    fn consume_events(&mut self, events: &[Event]) {
-        for e in events {
-            println!("{}", describe(e, &self.battle));
-        }
-        self.refresh_chunks();
-        self.refresh_scene();
-        self.update_title();
-    }
-
-    /// Re-mesh chunks whose voxels changed (destruction, initial build).
-    fn refresh_chunks(&mut self) {
-        for coord in self.battle.world.take_dirty_chunks() {
-            let mesh = mesh_chunk(&self.battle.world, coord);
-            self.renderer.upsert_chunk(coord, &mesh);
-        }
-    }
-
-    /// Rebuild unit markers and the fog/selection overlay.
-    fn refresh_scene(&mut self) {
-        let visible = self.battle.visible_tiles(Side::Order);
-
-        let mut units = MeshData::default();
-        for u in &self.battle.units {
-            if !u.alive {
-                continue;
-            }
-            // Imps hide in the fog.
-            if u.side == Side::Demons && !visible.contains(&u.tile) {
-                continue;
-            }
-            let base = (u.tile * TILE_VOXELS).as_vec3();
-            let material = if u.side == Side::Order { MAT_SOLDIER } else { MAT_IMP };
-            units.push_box(
-                base + Vec3::new(5.0, 5.0, 4.0),
-                base + Vec3::new(11.0, 11.0, 15.0),
-                material,
-            );
-        }
-        self.renderer.set_units(&units);
-
-        let mut verts: Vec<OverlayVertex> = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
-        let (min, max) = self.battle.tiles.bounds();
-        for z in min.z..max.z {
-            for y in min.y..max.y {
-                for x in min.x..max.x {
-                    let tile = IVec3::new(x, y, z);
-                    if !visible.contains(&tile) {
-                        push_tile_quad(&mut verts, &mut indices, tile, [0.0, 0.0, 0.02, 0.55]);
-                    }
+        };
+        if leave {
+            let mut screen = self.battle.take().expect("battle present");
+            self.renderer.clear_scene();
+            match (screen.token.take(), &mut self.campaign) {
+                (Some(token), Some(c)) => {
+                    let report = c.conclude_mission(token, &screen.battle);
+                    self.log.push(if report.victory {
+                        format!(
+                            "Mission complete: {} demons slain, {} soldiers lost.",
+                            report.demons_slain,
+                            report.dead.len()
+                        )
+                    } else {
+                        format!(
+                            "The squad withdraws: {} soldiers lost. The enemy holds.",
+                            report.dead.len()
+                        )
+                    });
+                    self.screen = Screen::Geoscape;
+                }
+                _ => {
+                    self.screen = Screen::Menu;
                 }
             }
         }
-        if let Some(id) = self.selected {
-            let u = self.battle.unit(id);
-            if u.alive {
-                push_tile_quad(&mut verts, &mut indices, u.tile, [0.2, 1.0, 0.35, 0.35]);
-            }
-        }
-        self.renderer.set_overlay(&verts, &indices);
-    }
-
-    fn update_title(&mut self) {
-        let title = if let Some(winner) = self.battle.winner {
-            match winner {
-                Side::Order => "Otherside Defense — VICTORY: the incursion is banished".to_string(),
-                Side::Demons => "Otherside Defense — DEFEAT: the squad is lost".to_string(),
-            }
-        } else {
-            let sel = self
-                .selected
-                .map(|id| {
-                    let u = self.battle.unit(id);
-                    let wounds = if u.wounds > 0 {
-                        format!(" bleeding x{}", u.wounds)
-                    } else {
-                        String::new()
-                    };
-                    format!(
-                        "{} TU {}/{} HP {}{} | chg {} med {}",
-                        u.name, u.tu, u.tu_max, u.health, wounds, u.grenades, u.heal_charges
-                    )
-                })
-                .unwrap_or_else(|| "no selection (Tab)".to_string());
-            format!(
-                "Otherside Defense — turn {} | {} | mode: {:?} [1/2/3]{} | Space: end turn",
-                self.battle.turn,
-                sel,
-                self.fire_mode,
-                if self.grenade_armed { " | CHARGE ARMED — click target" } else { "" }
-            )
-        };
-        self.window.set_title(&title);
-    }
-}
-
-fn push_tile_quad(
-    verts: &mut Vec<OverlayVertex>,
-    indices: &mut Vec<u32>,
-    tile: IVec3,
-    color: [f32; 4],
-) {
-    let o = (tile * TILE_VOXELS).as_vec3();
-    let z = o.z + scenario::GROUND_TOP as f32 + 0.15;
-    let first = verts.len() as u32;
-    let s = TILE_VOXELS as f32;
-    for (dx, dy) in [(0.0, 0.0), (s, 0.0), (s, s), (0.0, s)] {
-        verts.push(OverlayVertex {
-            position: [o.x + dx, o.y + dy, z],
-            color,
-        });
-    }
-    indices.extend([0, 1, 2, 0, 2, 3].map(|k| first + k));
-}
-
-fn describe(event: &Event, battle: &Battle) -> String {
-    let name = |id: &UnitId| battle.unit(*id).name.clone();
-    match event {
-        Event::TurnStarted { side, turn } => format!("— turn {turn}: {side:?} to move —"),
-        Event::Moved { unit, to, tu_left, .. } => {
-            format!("{} moves to {to} ({tu_left} TU left)", name(unit))
-        }
-        Event::Fired { unit, target, mode, reaction, hit } => format!(
-            "{}{} fires ({mode:?}) at {} — {}",
-            name(unit),
-            if *reaction { " [reaction]" } else { "" },
-            name(target),
-            if *hit { "HIT" } else { "miss" }
-        ),
-        Event::Damaged { unit, amount, health_left } => {
-            format!("{} takes {amount} ({health_left} HP left)", name(unit))
-        }
-        Event::Died { unit } => format!("*** {} is down ***", name(unit)),
-        Event::TerrainDestroyed { voxels, .. } => {
-            format!("terrain shattered ({voxels} voxels)")
-        }
-        Event::Threw { unit, at } => format!("{} lobs a hellfire charge at {at}", name(unit)),
-        Event::Exploded { at, voxels } => {
-            format!("detonation at {at} ({voxels} voxels destroyed)")
-        }
-        Event::Wounded { unit, total } => {
-            format!("{} is bleeding ({total} open wounds)", name(unit))
-        }
-        Event::Bled { unit, health_left } => {
-            format!("{} bleeds ({health_left} HP left)", name(unit))
-        }
-        Event::Healed { medic, target, health_left } => {
-            format!("{} dresses {}'s wounds ({health_left} HP)", name(medic), name(target))
-        }
-        Event::Panicked { unit } => format!("{} freezes in dread!", name(unit)),
-        Event::Berserked { unit } => format!("{} SNAPS — firing wildly!", name(unit)),
-        Event::BattleOver { winner } => format!("=== BATTLE OVER: {winner:?} wins ==="),
     }
 }

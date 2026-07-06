@@ -15,7 +15,8 @@ mod research;
 
 pub use base::{Chapterhouse, Facility, GRID};
 pub use campaign::{
-    Campaign, CampaignOutcome, GeoError, GeoEvent, Soldier, SoldierStats,
+    Campaign, CampaignOutcome, GeoError, GeoEvent, MissionKind, MissionToken, OCCULTIST_HIRE_COST,
+    SOLDIER_HIRE_COST, Soldier, SoldierStats,
 };
 pub use director::{Nest, Rift, RiftKind};
 pub use missions::BattleReport;

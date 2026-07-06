@@ -110,6 +110,13 @@ struct CameraUniform {
     view_proj: [[f32; 4]; 4],
 }
 
+/// One frame's worth of egui output, ready to paint over the 3D scene.
+pub struct UiFrame {
+    pub textures_delta: egui::TexturesDelta,
+    pub primitives: Vec<egui::ClippedPrimitive>,
+    pub pixels_per_point: f32,
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -123,6 +130,7 @@ pub struct Renderer {
     chunk_meshes: HashMap<IVec3, GpuMesh>,
     unit_mesh: Option<GpuMesh>,
     overlay_mesh: Option<GpuMesh>,
+    ui_renderer: egui_wgpu::Renderer,
 }
 
 impl Renderer {
@@ -257,6 +265,12 @@ impl Renderer {
             cache: None,
         });
 
+        let ui_renderer = egui_wgpu::Renderer::new(
+            &device,
+            config.format,
+            egui_wgpu::RendererOptions::default(),
+        );
+
         Ok(Self {
             surface,
             device,
@@ -270,7 +284,15 @@ impl Renderer {
             chunk_meshes: HashMap::new(),
             unit_mesh: None,
             overlay_mesh: None,
+            ui_renderer,
         })
+    }
+
+    /// Drop all scene geometry (between battles / on returning to menus).
+    pub fn clear_scene(&mut self) {
+        self.chunk_meshes.clear();
+        self.unit_mesh = None;
+        self.overlay_mesh = None;
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -339,7 +361,7 @@ impl Renderer {
         };
     }
 
-    pub fn render(&mut self) -> Result<()> {
+    pub fn render(&mut self, ui: Option<UiFrame>) -> Result<()> {
         let frame = match self.surface.get_current_texture() {
             Ok(f) => f,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -352,6 +374,24 @@ impl Renderer {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+
+        let screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.config.width, self.config.height],
+            pixels_per_point: ui.as_ref().map_or(1.0, |u| u.pixels_per_point),
+        };
+        if let Some(ui) = &ui {
+            for (id, delta) in &ui.textures_delta.set {
+                self.ui_renderer
+                    .update_texture(&self.device, &self.queue, *id, delta);
+            }
+            self.ui_renderer.update_buffers(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &ui.primitives,
+                &screen,
+            );
+        }
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -399,8 +439,36 @@ impl Renderer {
             }
         }
 
+        // UI paints in its own pass (no depth buffer), over the scene.
+        if let Some(ui) = &ui {
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("ui-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                })
+                .forget_lifetime();
+            self.ui_renderer.render(&mut pass, &ui.primitives, &screen);
+        }
+
         self.queue.submit([encoder.finish()]);
         frame.present();
+
+        if let Some(ui) = ui {
+            for id in &ui.textures_delta.free {
+                self.ui_renderer.free_texture(id);
+            }
+        }
         Ok(())
     }
 }

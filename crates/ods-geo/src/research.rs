@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Project {
     /// Consecrated ammunition: +8 weapon power in battle.
     BlessedArms,
@@ -60,7 +60,7 @@ impl Project {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct ResearchState {
     pub completed: HashSet<Project>,
     pub active: Option<(Project, u32)>,

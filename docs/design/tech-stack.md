@@ -69,7 +69,7 @@ abstract dice for combat. Its UI (globe/map rendering) is future work; the
 | Windowing/input | `winit` | the standard pairing with wgpu |
 | GPU | `wgpu` | Vulkan/Metal/DX12 backends; WebGPU later if ever |
 | Math | `glam` | fast, simple, the ecosystem default |
-| Debug/tools UI | `egui` (via `egui-wgpu`/`egui-winit`) | in-game inspector, TU/LOS debug overlays; NOT the shipping game UI |
+| UI | `egui` (via `egui-wgpu`/`egui-winit`) | menus, Geoscape screens, battle HUD. Interim decision: egui is the whole game UI until the art direction demands bespoke chrome; revisit then |
 | Data files | `serde` + `ron` | weapon tables, unit stats, map recipes as human-diffable text |
 | Voxel assets | `dot_vox` | load MagicaVoxel `.vox` models |
 | Errors | `anyhow` / `thiserror` | app / library respectively |

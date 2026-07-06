@@ -19,10 +19,16 @@ Rust stable (1.85+ for edition 2024). Custom voxel engine on wgpu.
 
 ```sh
 cargo test --workspace                # headless: voxel core + sim + campaign tests
-cargo run -p ods-app                  # the skirmish (needs a display + GPU)
+cargo run -p ods-app                  # the game (needs a display + GPU)
 cargo run -p ods-app -- --headless    # sim-only smoke test (CI / cloud)
 cargo run -p ods-app -- --campaign 6  # 6-month Geoscape chronicle, fully headless
 ```
+
+The app opens on a main menu: **New campaign** (full Geoscape: manage the
+chapterhouse, advance days, and answer rifts — lead any assault yourself in
+the 3D Battlescape or hand it to the auto-resolver), **Load campaign**
+(campaigns save to `otherside-save.json`, RNG state included, so a loaded
+game continues the same timeline), or **Quick skirmish**.
 
 ## The first skirmish
 

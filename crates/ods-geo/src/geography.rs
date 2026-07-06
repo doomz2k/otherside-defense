@@ -1,7 +1,7 @@
 //! The world as the funding council sees it: eight regions, each with a
 //! monthly contribution that rises and falls with your performance there.
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Region {
     NorthAmerica,
     SouthAmerica,

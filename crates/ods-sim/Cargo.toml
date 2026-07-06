@@ -8,3 +8,4 @@ glam = { workspace = true }
 rand = { workspace = true }
 rand_pcg = { workspace = true }
 ods-voxel = { workspace = true }
+serde = { workspace = true }
