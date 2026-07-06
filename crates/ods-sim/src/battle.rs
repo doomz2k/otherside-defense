@@ -153,6 +153,12 @@ pub enum Event {
     CircletShattered { unit: UnitId },
     /// An officer steadies every heart in earshot.
     Rallied { by: UnitId },
+    /// A civilian reaches the west edge and is away.
+    Evacuated { unit: UnitId },
+    /// The clock beat the squad: the field is lost to time.
+    TimeExpired,
+    /// An overloaded floor gives way.
+    FloorCollapsed { at: IVec3 },
     /// A Prince seizes a mind outright.
     Possessed { unit: UnitId, by: UnitId },
     PossessionEnds { unit: UnitId },
@@ -271,6 +277,33 @@ pub struct Experience {
     pub dread_survived: u32,
 }
 
+/// What this battle is FOR, beyond killing: some fields are won by the
+/// clock, the saved, or the taken-alive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MissionRule {
+    /// Kill or demolish: the classic field.
+    Standard,
+    /// Walk `needed` civilians off the west edge before `turns` runs out.
+    Evacuate { needed: u32, turns: u32 },
+    /// The ritual completes at `turns` if the obelisk still stands.
+    Interrupt { turns: u32 },
+    /// Bind this one ALIVE. Its death is the mission's death.
+    Snatch { target: UnitId },
+}
+
+/// The sky the battle is fought under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Weather {
+    #[default]
+    Clear,
+    /// Vision and aim strangled by driven sand.
+    Sandstorm,
+    /// Every step costs more; every demon leaves tracks.
+    Snowfall,
+    /// Fire gutters; sound drowns.
+    Rain,
+}
+
 /// A destructible mission objective: demolish enough of it and the
 /// incursion collapses regardless of surviving defenders.
 #[derive(Clone, Copy, Debug)]
@@ -310,6 +343,14 @@ pub struct Battle {
     pub corruption: Vec<IVec3>,
     /// Atrocity sites on terror maps: (tile, discovered).
     pub atrocities: Vec<(IVec3, bool)>,
+    /// What wins this field (and what loses it).
+    pub rule: MissionRule,
+    /// The sky overhead.
+    pub weather: Weather,
+    /// Civilians walked off the west edge (Evacuate missions).
+    pub evacuated: u32,
+    /// Noise the squad made where no demon could see (they listen too).
+    pub alarm: Vec<IVec3>,
     /// Unseen demon movement this enemy turn (flushed as cues).
     heard: Vec<IVec3>,
     xp: Vec<Experience>,
@@ -345,6 +386,10 @@ impl Battle {
             wards: Vec::new(),
             corruption: Vec::new(),
             atrocities: Vec::new(),
+            rule: MissionRule::Standard,
+            weather: Weather::default(),
+            evacuated: 0,
+            alarm: Vec::new(),
             heard: Vec::new(),
             xp,
             rng: SimRng::from_seed(seed),
@@ -495,6 +540,11 @@ impl Battle {
     #[cfg(test)]
     pub fn check_objective_for_test(&mut self, events: &mut Vec<Event>) {
         self.check_objective(events);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn add_cloud_for_test(&mut self, at: IVec3, kind: CloudKind, ttl: u32) {
+        self.add_cloud(at, kind, ttl);
     }
 
     /// After any destruction: has the obelisk fallen below a third?
@@ -914,6 +964,7 @@ impl Battle {
         if t.stun >= t.health && t.conscious {
             t.conscious = false;
             events.push(Event::Subdued { unit: target });
+            self.check_victory(&mut events);
         }
         Ok(events)
     }
@@ -1222,7 +1273,10 @@ impl Battle {
         if budget(self.unit(id)) < step_cost(from, path[0]) * self.unit(id).move_cost_mult() {
             return Err(ActionError::NotEnoughTu);
         }
-        self.unit_mut(id).kneeling = false; // you can't stay low and sprint
+        // Moving ends the kneel (you can't stay low and sprint) — but a move
+        // BEGUN from a crouch is a crawl, and crawls are quiet.
+        let crouched = self.unit(id).kneeling;
+        self.unit_mut(id).kneeling = false;
 
         let mut events = Vec::new();
         let mut here = from;
@@ -1230,6 +1284,9 @@ impl Battle {
             let mut cost = step_cost(here, next) * self.unit(id).move_cost_mult();
             if self.unit(id).carrying.is_some() {
                 cost += 2; // a body over the shoulder
+            }
+            if self.weather == Weather::Snowfall {
+                cost += 1; // every step through the drifts
             }
             let smashing = mode == PathMode::Smash && !self.tiles.is_walkable(next);
             if smashing {
@@ -1256,6 +1313,8 @@ impl Battle {
                 self.tiles
                     .rederive_region(&self.world, o, o + IVec3::splat(TILE_VOXELS));
                 events.push(Event::WallSmashed { at: next, voxels: smashed });
+                self.check_collapse(&mut events);
+                self.settle_units(&mut events);
                 self.check_objective(&mut events);
                 if self.winner.is_some() {
                     return Ok(events);
@@ -1296,6 +1355,37 @@ impl Battle {
             // The Taker leaves bloody footprints between the screams.
             if self.unit(id).species == Species::Taker {
                 self.spatter(next, 1, MAT_BLOOD);
+            }
+            // Snow holds every print: demon movement writes itself down.
+            if self.weather == Weather::Snowfall && self.unit(id).side == Side::Demons {
+                self.spatter(next, 1, crate::scenario::MAT_RUBBLE);
+            }
+            // Loud boots: an unseen, un-crouched soldier is still audible.
+            if self.unit(id).side == Side::Order && !self.unit(id).civilian && !crouched {
+                let seen = self
+                    .units
+                    .iter()
+                    .filter(|u| u.is_active() && u.side == Side::Demons)
+                    .any(|u| self.can_see(u.id, id));
+                if !seen {
+                    self.alarm.push(next);
+                }
+            }
+            // Evacuation: a civilian stepping onto the west edge is away.
+            if let MissionRule::Evacuate { needed, .. } = self.rule
+                && self.unit(id).civilian
+                && self.unit(id).side == Side::Order
+                && next.x <= 3
+            {
+                self.evacuated += 1;
+                self.unit_mut(id).tile = IVec3::new(0, next.y, 0);
+                self.unit_mut(id).tu = 0;
+                events.push(Event::Evacuated { unit: id });
+                if self.evacuated >= needed && self.winner.is_none() {
+                    self.winner = Some(Side::Order);
+                    events.push(Event::BattleOver { winner: Side::Order });
+                }
+                break;
             }
 
             // Soldiers stumbling onto atrocity sites see what was done here.
@@ -1625,6 +1715,7 @@ impl Battle {
             .rederive_region(&self.world, c - IVec3::splat(r), c + IVec3::splat(r));
         events.push(Event::Exploded { at, voxels: destroyed });
         self.last_noise = Some(at);
+        self.check_collapse(events);
         self.settle_units(events);
         self.check_hazards(events);
         // Hellfire lingers: the blast site burns.
@@ -1942,6 +2033,16 @@ impl Battle {
         self.unit_mut(target).alive = false;
         events.push(Event::Died { unit: target });
 
+        // A Snatch target dead is the mission dead.
+        if let MissionRule::Snatch { target: wanted } = self.rule
+            && wanted == target
+            && self.winner.is_none()
+        {
+            self.winner = Some(Side::Demons);
+            events.push(Event::BattleOver { winner: Side::Demons });
+            return;
+        }
+
         // Seeing a comrade die is the great morale killer.
         for u in &mut self.units {
             if u.alive && u.side == dead_side {
@@ -1960,7 +2061,80 @@ impl Battle {
         self.check_victory(events);
     }
 
+    /// Upper floors need what holds them up. A slab shot down to scraps
+    /// gives way: whoever stands on it falls, whoever stands under it is
+    /// buried in the coming-down.
+    fn check_collapse(&mut self, events: &mut Vec<Event>) {
+        let (min, max) = self.tiles.bounds();
+        if max.z < 2 {
+            return; // single-story map
+        }
+        let mut fell = Vec::new();
+        for y in min.y..max.y {
+            for x in min.x..max.x {
+                // Count what's left of the slab (the upper tile's foot band):
+                // a full slab is sound and empty air is nothing to fall —
+                // only the shot-through in-between comes down.
+                let o = IVec3::new(x * TILE_VOXELS, y * TILE_VOXELS, TILE_VOXELS);
+                let mut left = 0;
+                for dz in 0..crate::scenario::GROUND_TOP {
+                    for dy in 0..TILE_VOXELS {
+                        for dx in 0..TILE_VOXELS {
+                            if self.world.voxel(o + IVec3::new(dx, dy, dz)).is_solid() {
+                                left += 1;
+                            }
+                        }
+                    }
+                }
+                let full = TILE_VOXELS * TILE_VOXELS * crate::scenario::GROUND_TOP;
+                if left > 0 && left < full * 3 / 10 {
+                    fell.push(IVec3::new(x, y, 0));
+                    // The scraps come down.
+                    self.world.fill_box(
+                        o,
+                        o + IVec3::new(TILE_VOXELS, TILE_VOXELS, crate::scenario::GROUND_TOP),
+                        ods_voxel::Voxel::EMPTY,
+                    );
+                    self.tiles.rederive_region(
+                        &self.world,
+                        o - IVec3::new(0, 0, TILE_VOXELS),
+                        o + IVec3::splat(TILE_VOXELS),
+                    );
+                }
+            }
+        }
+        for at in fell {
+            events.push(Event::FloorCollapsed { at: at + IVec3::new(0, 0, 1) });
+            self.spatter(at, 3, MAT_GORE);
+            // Buried: whoever stood underneath takes the slab.
+            let below: Vec<UnitId> = self
+                .units
+                .iter()
+                .filter(|u| u.is_active() && u.tile == at)
+                .map(|u| u.id)
+                .collect();
+            for id in below {
+                self.unit_mut(id).stun += 6;
+                self.apply_damage(id, 8, None, events);
+                if self.winner.is_some() {
+                    return;
+                }
+            }
+        }
+    }
+
     fn check_victory(&mut self, events: &mut Vec<Event>) {
+        // Snatch: the moment the mark is down-but-breathing, it's over.
+        if let MissionRule::Snatch { target } = self.rule
+            && self.winner.is_none()
+        {
+            let t = self.unit(target);
+            if t.alive && !t.conscious {
+                self.winner = Some(Side::Order);
+                events.push(Event::BattleOver { winner: Side::Order });
+                return;
+            }
+        }
         for side in [Side::Order, Side::Demons] {
             // Civilians can survive without holding the field.
             if self.living(side).filter(|u| !u.civilian).count() == 0 {
@@ -1978,7 +2152,11 @@ impl Battle {
         }
         let mut events = vec![Event::TurnStarted { side: self.side_to_move, turn: self.turn }];
 
-        // The dark reports what the eyes missed — vaguely.
+        // The dark reports what the eyes missed — vaguely. Rain drowns it.
+        if self.weather == Weather::Rain {
+            self.heard.clear();
+            self.alarm.clear();
+        }
         if self.side_to_move == Side::Order && !self.heard.is_empty() {
             let picks: Vec<IVec3> = self.heard.iter().step_by(4).copied().collect();
             for at in picks {
@@ -1990,6 +2168,21 @@ impl Battle {
                 events.push(Event::NoiseInDark { near: at + fuzz });
             }
             self.heard.clear();
+        }
+
+        // The clock is a combatant too.
+        if self.side_to_move == Side::Order && self.winner.is_none() {
+            let expired = match self.rule {
+                MissionRule::Evacuate { turns, .. } => self.turn > turns,
+                MissionRule::Interrupt { turns } => self.turn > turns && self.objective.is_some(),
+                _ => false,
+            };
+            if expired {
+                events.push(Event::TimeExpired);
+                self.winner = Some(Side::Demons);
+                events.push(Event::BattleOver { winner: Side::Demons });
+                return events;
+            }
         }
 
         // Summoning circles scribe a demon-turn closer to delivering.
@@ -2087,14 +2280,15 @@ impl Battle {
             }
         }
 
-        // Smoke thins; fire gutters, burns, and spreads.
+        // Smoke thins; fire gutters, burns, and spreads. Rain drowns it.
+        let rain = self.weather == Weather::Rain;
         for c in &mut self.clouds {
-            c.2 -= 1;
+            c.2 -= if rain && c.1 == CloudKind::Fire { 2 } else { 1 };
         }
         let expired: Vec<()> = Vec::new();
         let _ = expired;
         self.clouds.retain(|(_, _, ttl)| *ttl > 0);
-        if self.side_to_move == Side::Order {
+        if self.side_to_move == Side::Order && !rain {
             // Once per full round: fire reaches for fresh fuel.
             let fires: Vec<IVec3> = self
                 .clouds
@@ -3512,5 +3706,147 @@ mod tests {
         b.perform(Action::Fire { unit: UnitId(0), target: UnitId(1), mode: FireMode::Snap })
             .unwrap();
         assert!(b.last_noise.is_none(), "the arbalest tells nobody anything");
+    }
+
+    #[test]
+    fn evacuation_wins_by_walking_out_and_loses_to_the_clock() {
+        use crate::scenario::MissionSpec;
+        let squad = vec![Unit::soldier(0, "S", IVec3::ZERO)];
+        let mut b = crate::scenario::incursion_mission(
+            5, squad, 1, 1, 2, crate::scenario::Biome::Temperate, MissionSpec::Evacuate,
+        );
+        assert!(matches!(b.rule, MissionRule::Evacuate { needed: 1, .. }));
+        // Hand-walk a civilian to the west edge.
+        let civ = b.units.iter().find(|u| u.civilian).map(|u| u.id).unwrap();
+        b.units[civ.0 as usize].tile = IVec3::new(4, 11, 0);
+        b.units[civ.0 as usize].tu = 99;
+        let events = b
+            .perform(Action::Move { unit: civ, to: IVec3::new(2, 11, 0) })
+            .unwrap();
+        assert!(events.iter().any(|e| matches!(e, Event::Evacuated { .. })), "{events:?}");
+        assert_eq!(b.winner, Some(Side::Order), "the saved ARE the victory");
+
+        // And the clock kills: a fresh evacuation left to rot times out.
+        let squad = vec![Unit::soldier(0, "S", IVec3::ZERO)];
+        let mut b = crate::scenario::incursion_mission(
+            5, squad, 1, 1, 2, crate::scenario::Biome::Temperate, MissionSpec::Evacuate,
+        );
+        b.turn = 15; // past the limit
+        let events = b.perform(Action::EndTurn).unwrap();
+        let events2 = if b.winner.is_none() {
+            b.perform(Action::EndTurn).unwrap()
+        } else {
+            events.clone()
+        };
+        assert!(
+            events.iter().chain(events2.iter()).any(|e| matches!(e, Event::TimeExpired)),
+            "{events:?} {events2:?}"
+        );
+        assert_eq!(b.winner, Some(Side::Demons));
+    }
+
+    #[test]
+    fn snatch_wins_on_the_subdue_and_dies_with_the_mark() {
+        use crate::scenario::MissionSpec;
+        let squad = vec![Unit::soldier(0, "S", IVec3::ZERO)];
+        let mut b = crate::scenario::incursion_mission(
+            7, squad, 3, 2, 0, crate::scenario::Biome::Temperate, MissionSpec::Snatch,
+        );
+        let MissionRule::Snatch { target } = b.rule else { panic!("snatch rule") };
+        assert_eq!(b.unit(target).species, Species::Overseer, "the mark leads the pack");
+
+        // Subdue the mark: instant win.
+        {
+            let t = b.unit_mut(target);
+            t.stun = t.health + 5;
+            t.conscious = false;
+        }
+        let mut events = Vec::new();
+        b.check_victory(&mut events);
+        assert_eq!(b.winner, Some(Side::Order));
+
+        // Fresh field: kill the mark instead — mission dead.
+        let squad = vec![Unit::soldier(0, "S", IVec3::ZERO)];
+        let mut b = crate::scenario::incursion_mission(
+            7, squad, 3, 2, 0, crate::scenario::Biome::Temperate, MissionSpec::Snatch,
+        );
+        let MissionRule::Snatch { target } = b.rule else { panic!() };
+        let mut events = Vec::new();
+        let overkill = b.unit(target).health + 2;
+        b.apply_damage(target, overkill, None, &mut events);
+        assert_eq!(b.winner, Some(Side::Demons), "{events:?}");
+    }
+
+    #[test]
+    fn the_chapel_loft_stands_and_collapses() {
+        // The loft is reachable: stairwell ramp at (10,9), floor above.
+        let b = crate::scenario::incursion(3, vec![Unit::soldier(0, "S", IVec3::ZERO)], 0, 1);
+        assert!(b.tiles.is_ramp(IVec3::new(10, 9, 0)), "the stair climbs");
+        assert!(b.tiles.is_walkable(IVec3::new(12, 11, 1)), "the loft floor holds");
+
+        // Shoot the slab out from under it and it comes down.
+        let mut b = b;
+        let o = IVec3::new(12 * TILE_VOXELS, 11 * TILE_VOXELS, TILE_VOXELS);
+        // Leave a few scraps so the collapse rule (not clean demolition) fires.
+        b.world.fill_box(
+            o + IVec3::new(0, 0, 0),
+            o + IVec3::new(TILE_VOXELS, TILE_VOXELS - 1, crate::scenario::GROUND_TOP),
+            ods_voxel::Voxel::EMPTY,
+        );
+        b.tiles.rederive_region(
+            &b.world,
+            o - IVec3::new(16, 16, 16),
+            o + IVec3::splat(2 * TILE_VOXELS),
+        );
+        let mut events = Vec::new();
+        b.check_collapse(&mut events);
+        assert!(
+            events.iter().any(|e| matches!(e, Event::FloorCollapsed { .. })),
+            "{events:?}"
+        );
+        assert!(!b.tiles.is_walkable(IVec3::new(12, 11, 1)), "the loft is gone");
+    }
+
+    #[test]
+    fn weather_changes_the_field() {
+        // Snowfall: steps cost more, demons leave tracks.
+        let mut b = open_field(duelists(), 41);
+        b.weather = Weather::Snowfall;
+        let tu = b.unit(UnitId(0)).tu;
+        b.perform(Action::Move { unit: UnitId(0), to: IVec3::new(2, 5, 0) }).unwrap();
+        assert_eq!(tu - b.unit(UnitId(0)).tu, 5, "4 + 1 for the drifts");
+
+        // Rain: fire dies twice as fast.
+        let mut b = open_field(duelists(), 42);
+        b.weather = Weather::Rain;
+        b.add_cloud_for_test(IVec3::new(5, 5, 0), CloudKind::Fire, 4);
+        b.perform(Action::EndTurn).unwrap();
+        let ttl = b
+            .clouds
+            .iter()
+            .find(|(_, k, _)| *k == CloudKind::Fire)
+            .map(|(_, _, t)| *t);
+        assert_eq!(ttl, Some(2), "rain drowns fire double-time");
+    }
+
+    #[test]
+    fn quiet_boots_raise_no_alarm() {
+        let mut b = open_field(duelists(), 43);
+        // Standing tall: the step is heard (no demon can see tile 1,5 area? the
+        // imp CAN see across the open field, so first check the unseen case
+        // behind a wall).
+        let mut units = duelists();
+        units[1].tile = IVec3::new(10, 10, 0);
+        let mut b2 = walled_field(units, 43);
+        b2.perform(Action::Move { unit: UnitId(0), to: IVec3::new(2, 5, 0) }).unwrap();
+        assert!(!b2.alarm.is_empty(), "loud boots carry through walls");
+
+        let mut units = duelists();
+        units[1].tile = IVec3::new(10, 10, 0);
+        let mut b3 = walled_field(units, 44);
+        b3.perform(Action::Kneel { unit: UnitId(0) }).unwrap();
+        b3.perform(Action::Move { unit: UnitId(0), to: IVec3::new(2, 5, 0) }).unwrap();
+        assert!(b3.alarm.is_empty(), "crouched movement is silent");
+        let _ = b;
     }
 }

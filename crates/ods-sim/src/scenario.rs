@@ -190,16 +190,41 @@ pub fn incursion_with_civilians(
     incursion_in_biome(seed, soldiers, demon_count, strength, civilians, Biome::Temperate)
 }
 
+/// What the campaign wants from this field, before the sim details it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MissionSpec {
+    Standard,
+    /// Walk the survivors out before the clock dies.
+    Evacuate,
+    /// The harvest completes on a timer unless the obelisk falls first.
+    Interrupt,
+    /// Take the ringleader ALIVE.
+    Snatch,
+}
+
 /// The full generator: one of three structural layouts (seeded), dressed by
 /// the biome — ground material and a seeded scatter of biome features, so no
 /// two sites in the same country fight the same.
 pub fn incursion_in_biome(
+    seed: u64,
+    soldiers: Vec<Unit>,
+    demon_count: u32,
+    strength: u32,
+    civilians: u32,
+    biome: Biome,
+) -> Battle {
+    incursion_mission(seed, soldiers, demon_count, strength, civilians, biome, MissionSpec::Standard)
+}
+
+/// The generator with a mission rule layered on.
+pub fn incursion_mission(
     seed: u64,
     mut soldiers: Vec<Unit>,
     demon_count: u32,
     strength: u32,
     civilians: u32,
     biome: Biome,
+    spec: MissionSpec,
 ) -> Battle {
     let ground = match biome {
         Biome::Temperate | Biome::Jungle => MAT_GROUND,
@@ -214,7 +239,9 @@ pub fn incursion_in_biome(
     );
     match seed % 3 {
         0 => {
-            // The chapel yard (the original).
+            // The chapel yard (the original) — now with a loft: an upper
+            // floor over the nave, a rubble stair inside, and shuttered
+            // window gaps for whoever holds the high ground.
             for tx in 9..=14 {
                 for ty in 8..=15 {
                     let on_ring = tx == 9 || tx == 14 || ty == 8 || ty == 15;
@@ -226,6 +253,51 @@ pub fn incursion_in_biome(
             }
             for ty in [3, 4, 5, 6, 17, 18, 19, 20] {
                 fill_tile_walls(&mut world, IVec3::new(6, ty, 0), MAT_WALL);
+            }
+            // Loft slab over the interior, except the stairwell at (10, 9).
+            for tx in 10..=13 {
+                for ty in 9..=14 {
+                    if (tx, ty) == (10, 9) {
+                        continue;
+                    }
+                    let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
+                    world.fill_box(
+                        o + IVec3::new(0, 0, TILE_VOXELS),
+                        o + IVec3::new(TILE_VOXELS, TILE_VOXELS, TILE_VOXELS + GROUND_TOP),
+                        MAT_TIMBER,
+                    );
+                }
+            }
+            // The stair: a climbable rubble ramp in the stairwell.
+            let stair = IVec3::new(10, 9, 0) * TILE_VOXELS;
+            world.fill_box(
+                stair + IVec3::new(0, 0, GROUND_TOP),
+                stair + IVec3::new(TILE_VOXELS, TILE_VOXELS, 10),
+                MAT_RUBBLE,
+            );
+            // Upper walls with window gaps on alternating ring tiles.
+            for tx in 9..=14 {
+                for ty in 8..=15 {
+                    let on_ring = tx == 9 || tx == 14 || ty == 8 || ty == 15;
+                    if !on_ring {
+                        continue;
+                    }
+                    let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
+                    let top = TILE_VOXELS + GROUND_TOP;
+                    world.fill_box(
+                        o + IVec3::new(0, 0, top),
+                        o + IVec3::new(TILE_VOXELS, TILE_VOXELS, top + 10),
+                        MAT_WALL,
+                    );
+                    // A shutter gap: waist-to-head open on every other tile.
+                    if (tx + ty) % 2 == 0 {
+                        world.fill_box(
+                            o + IVec3::new(2, 2, top + 5),
+                            o + IVec3::new(14, 14, top + 10),
+                            Voxel::EMPTY,
+                        );
+                    }
+                }
             }
         }
         1 => {
@@ -521,6 +593,41 @@ pub fn incursion_in_biome(
         battle.register_cask(tile);
     }
     battle.set_objective(obelisk_min, obelisk_max);
+    // The mission rule, made concrete.
+    match spec {
+        MissionSpec::Standard => {}
+        MissionSpec::Evacuate => {
+            let pool = battle.units.iter().filter(|u| u.civilian).count() as u32;
+            battle.rule = crate::battle::MissionRule::Evacuate {
+                needed: (pool / 2).max(1),
+                turns: 14,
+            };
+        }
+        MissionSpec::Interrupt => {
+            battle.rule = crate::battle::MissionRule::Interrupt { turns: 14 };
+        }
+        MissionSpec::Snatch => {
+            // The mark: the pack's Overseer, or its first grunt promoted.
+            let target = battle
+                .units
+                .iter()
+                .find(|u| u.species == crate::units::Species::Overseer)
+                .map(|u| u.id)
+                .unwrap_or_else(|| {
+                    let mark = battle
+                        .units
+                        .iter()
+                        .find(|u| u.side == crate::units::Side::Demons && !u.civilian)
+                        .map(|u| u.id)
+                        .expect("an incursion has demons");
+                    let tile = battle.units[mark.0 as usize].tile;
+                    battle.units[mark.0 as usize] =
+                        Unit::overseer(mark.0, "the Infiltrator", tile);
+                    mark
+                });
+            battle.rule = crate::battle::MissionRule::Snatch { target };
+        }
+    }
     // Strong incursions keep the way open behind them: summoning circles
     // scribe themselves in the yard, burning where everyone can see them.
     if strength >= 4 {
@@ -1031,19 +1138,21 @@ mod tests {
         use crate::battle::{Action, Event};
         use crate::units::UnitId;
 
-        // Gargoyle perched beside the chapel flies straight over the wall.
+        // Gargoyle before the freestanding ruin wall flies straight over
+        // it. (The chapel is roofed now — wings don't help indoors.)
         let mut units = vec![Unit::soldier(0, "S", glam::IVec3::ZERO)];
         units[0].tile = glam::IVec3::new(2, 2, 0);
         let mut b = super::incursion(3, units, 0, 1); // chapel variant (3 % 3 == 0)
         let g = b.units.len() as u32;
-        b.units.push(Unit::gargoyle(g, "Gargoyle", glam::IVec3::new(8, 11, 0)));
+        b.units.push(Unit::gargoyle(g, "Gargoyle", glam::IVec3::new(5, 4, 0)));
         b.xp_push_for_test();
         b.perform(Action::EndTurn).unwrap();
-        // Fly INTO the chapel over the wall ring: walkers would need the door.
-        let inside = glam::IVec3::new(11, 11, 0);
-        let ev = b.perform(Action::Move { unit: UnitId(g), to: inside });
+        // The wall at x=6 bars walkers; wings cross it in a straight line.
+        let beyond = glam::IVec3::new(7, 4, 0);
+        assert!(!b.tiles.is_walkable(glam::IVec3::new(6, 4, 0)), "the wall stands");
+        let ev = b.perform(Action::Move { unit: UnitId(g), to: beyond });
         assert!(ev.is_ok(), "wings ignore walls: {ev:?}");
-        assert_eq!(b.units[g as usize].tile, inside);
+        assert_eq!(b.units[g as usize].tile, beyond);
 
         // Behemoth walks THROUGH the chapel wall, leaving a hole.
         let mut units = vec![Unit::soldier(0, "S", glam::IVec3::ZERO)];

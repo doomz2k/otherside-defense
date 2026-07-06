@@ -77,15 +77,17 @@ pub(crate) fn build_assault(
     strength: u32,
     civilians: u32,
     biome: scenario::Biome,
+    spec: scenario::MissionSpec,
     research: &ResearchState,
 ) -> Battle {
-    scenario::incursion_in_biome(
+    scenario::incursion_mission(
         seed,
         make_units(squad, kits, research),
         demon_count,
         strength,
         civilians,
         biome,
+        spec,
     )
 }
 

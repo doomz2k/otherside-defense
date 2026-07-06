@@ -7,6 +7,9 @@ use glam::IVec3;
 use crate::battle::{Action, ActionError, Battle, Event};
 use crate::units::{FireMode, Side, Species, UnitId};
 
+/// Demons (and desperate soldiers) sense anything this close, seen or not.
+const SCENT_TILES: i32 = 10;
+
 /// Play out the demon turn and hand play back to the Order.
 pub fn run_demon_turn(battle: &mut Battle) -> Vec<Event> {
     run_side_turn(battle, Side::Demons)
@@ -121,9 +124,35 @@ fn run_side_turn(battle: &mut Battle, side: Side) -> Vec<Event> {
 
 fn pick_action(battle: &Battle, id: UnitId, side: Side) -> Option<Action> {
     let me = battle.unit(id);
+    // Senses, not omniscience: hunt what the side can SEE, or what is close
+    // enough to smell. The blind investigate noise, then drift toward where
+    // the enemy came from. Crouched, quiet squads exploit exactly this.
+    let seen = battle.visible_enemies(side);
     let prey = battle
         .living(side.enemy())
-        .min_by_key(|u| (dist(me.tile, u.tile), u.id.0))?;
+        .filter(|u| seen.contains(&u.id) || dist(me.tile, u.tile) <= SCENT_TILES)
+        .min_by_key(|u| (dist(me.tile, u.tile), u.id.0));
+    let Some(prey) = prey else {
+        // Nothing seen, nothing smelled: follow the noise, or the sunrise.
+        let goal = if side == Side::Demons {
+            battle
+                .alarm
+                .last()
+                .copied()
+                .or(battle.last_noise)
+                .unwrap_or(IVec3::new(3, 11, 0))
+        } else {
+            battle.last_noise.unwrap_or(IVec3::new(20, 11, 0))
+        };
+        if goal == me.tile {
+            return None;
+        }
+        let step = nearest_open_neighbor(battle, goal, me.tile, me.weapon.arcing)?;
+        if step == me.tile {
+            return None;
+        }
+        return Some(Action::Move { unit: id, to: step });
+    };
     let prey_dist = dist(me.tile, prey.tile);
 
     // Broken creatures run from what broke them (the fearless never do).

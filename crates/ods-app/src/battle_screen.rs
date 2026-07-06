@@ -290,6 +290,50 @@ impl BattleScreen {
                     "Turn {} — {:?} to move",
                     self.battle.turn, self.battle.side_to_move
                 ));
+                use ods_sim::battle::{MissionRule, Weather};
+                match self.battle.rule {
+                    MissionRule::Standard => {}
+                    MissionRule::Evacuate { needed, turns } => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(120, 230, 140),
+                            format!(
+                                "EVACUATE {}/{needed} — {} turns left",
+                                self.battle.evacuated,
+                                turns.saturating_sub(self.battle.turn)
+                            ),
+                        );
+                    }
+                    MissionRule::Interrupt { turns } => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 160, 80),
+                            format!(
+                                "THE RITUAL COMPLETES IN {} — demolish the obelisk",
+                                turns.saturating_sub(self.battle.turn)
+                            ),
+                        );
+                    }
+                    MissionRule::Snatch { target } => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(120, 200, 255),
+                            format!(
+                                "TAKE {} ALIVE — its death fails the mission",
+                                self.battle.unit(target).name
+                            ),
+                        );
+                    }
+                }
+                match self.battle.weather {
+                    Weather::Clear => {}
+                    Weather::Sandstorm => {
+                        ui.colored_label(egui::Color32::from_rgb(220, 190, 120), "SANDSTORM");
+                    }
+                    Weather::Snowfall => {
+                        ui.colored_label(egui::Color32::from_rgb(220, 230, 255), "SNOWFALL");
+                    }
+                    Weather::Rain => {
+                        ui.colored_label(egui::Color32::from_rgb(140, 170, 220), "RAIN");
+                    }
+                }
                 ui.separator();
                 match self.selected {
                     Some(id) => {
@@ -704,6 +748,21 @@ impl BattleScreen {
             Event::Rallied { by } => {
                 self.float(*by, "RALLY", egui::Color32::from_rgb(255, 220, 120));
             }
+            Event::Evacuated { unit } => {
+                self.float(*unit, "AWAY", egui::Color32::from_rgb(120, 230, 140));
+            }
+            Event::FloorCollapsed { at } => {
+                let p = Self::tile_pos(*at, 18.0);
+                self.fx.push(Fx {
+                    kind: FxKind::Blast,
+                    from: p,
+                    to: p,
+                    color: [0.7, 0.6, 0.5, 0.7],
+                    age: 0.0,
+                    life: 0.6,
+                });
+                self.shake += 4.0;
+            }
             Event::Panicked { unit } => {
                 self.float(*unit, "PANIC", egui::Color32::from_rgb(255, 210, 90));
             }
@@ -1024,6 +1083,42 @@ impl BattleScreen {
                 }
             }
         }
+        // Weather: streaks falling around the camera's patch of the field.
+        {
+            use ods_sim::battle::Weather;
+            let (count, color, len, drift) = match self.battle.weather {
+                Weather::Clear => (0, [0.0; 4], 0.0, 0.0),
+                Weather::Sandstorm => (70, [0.82, 0.7, 0.4, 0.35], 2.0, 26.0),
+                Weather::Snowfall => (50, [0.95, 0.96, 1.0, 0.5], 1.2, 4.0),
+                Weather::Rain => (60, [0.6, 0.7, 0.95, 0.4], 5.0, 6.0),
+            };
+            let anchor = self.camera.target;
+            for i in 0..count {
+                // Deterministic scatter, cycling on the clock.
+                let h = (i * 2654435761u32) as f32 / u32::MAX as f32;
+                let h2 = (i * 40503u32 + 977) as f32 / u32::MAX as f32 * 1000.0 % 1.0;
+                let cycle = 40.0;
+                let fall = (self.fx_clock * (18.0 + h * 8.0) + h2 * cycle) % cycle;
+                let p = anchor
+                    + Vec3::new(
+                        (h - 0.5) * 160.0 + self.fx_clock.sin() * drift * h,
+                        (h2 - 0.5) * 160.0,
+                        38.0 - fall,
+                    );
+                push_quad(
+                    &mut verts,
+                    &mut indices,
+                    [
+                        p,
+                        p + Vec3::new(0.4, 0.0, 0.0),
+                        p + Vec3::new(0.4, 0.0, -len),
+                        p + Vec3::new(0.0, 0.0, -len),
+                    ],
+                    color,
+                );
+            }
+        }
+
         // Possession halos: a slow-turning sigil diamond over seized minds.
         for u in &self.battle.units {
             if u.is_active() && u.possessed > 0 {
@@ -1396,6 +1491,13 @@ fn describe(event: &Event, battle: &Battle) -> String {
         }
         Event::Rallied { by } => {
             format!("{} rallies the line — every heart steadies", name(by))
+        }
+        Event::Evacuated { unit } => {
+            format!("*** {} reaches the wagons and is AWAY ***", name(unit))
+        }
+        Event::TimeExpired => "!!! too late. The clock has taken the field".to_string(),
+        Event::FloorCollapsed { at } => {
+            format!("!!! the floor at {at} gives way and comes down")
         }
         Event::AtrocityFound { unit, at } => {
             format!("!!! {} finds what the demons left at {at}. Nobody should see this.", name(unit))

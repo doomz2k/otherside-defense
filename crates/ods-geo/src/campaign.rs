@@ -1460,6 +1460,18 @@ impl Campaign {
                             .map_or(ods_sim::scenario::Biome::Temperate, |r| r.region.biome()),
                         _ => ods_sim::scenario::Biome::Temperate,
                     };
+                    // The rift's business decides what winning means.
+                    let spec = match kind {
+                        MissionKind::Rift(id) => {
+                            match self.rifts.iter().find(|r| r.id == id).map(|r| r.kind) {
+                                Some(RiftKind::Terror) => ods_sim::scenario::MissionSpec::Evacuate,
+                                Some(RiftKind::Harvest) => ods_sim::scenario::MissionSpec::Interrupt,
+                                Some(RiftKind::Infiltration) => ods_sim::scenario::MissionSpec::Snatch,
+                                _ => ods_sim::scenario::MissionSpec::Standard,
+                            }
+                        }
+                        _ => ods_sim::scenario::MissionSpec::Standard,
+                    };
                     missions::build_assault(
                         seed,
                         &squad,
@@ -1468,6 +1480,7 @@ impl Campaign {
                         strength,
                         civilians,
                         biome,
+                        spec,
                         &self.research,
                     )
                 }
@@ -1488,6 +1501,31 @@ impl Campaign {
             MissionKind::Reckoning => 14, // your own halls, lamplit
             MissionKind::FinalAssault | MissionKind::FinalSanctum => 9,
         };
+        // The sky rolls its own dice (rift fields only; halls have roofs).
+        if let MissionKind::Rift(id) = kind {
+            let biome = self
+                .rifts
+                .iter()
+                .find(|r| r.id == id)
+                .map_or(ods_sim::scenario::Biome::Temperate, |r| r.region.biome());
+            use ods_sim::battle::Weather;
+            use ods_sim::scenario::Biome;
+            let roll = self.rng.roll(100);
+            battle.weather = match biome {
+                Biome::Desert if roll < 25 => Weather::Sandstorm,
+                Biome::Tundra if roll < 30 => Weather::Snowfall,
+                Biome::Jungle if roll < 35 => Weather::Rain,
+                Biome::Temperate if roll < 20 => Weather::Rain,
+                _ => Weather::Clear,
+            };
+            if battle.weather == Weather::Sandstorm {
+                battle.vision_tiles = (battle.vision_tiles - 4).max(5);
+                for u in &mut battle.units {
+                    u.accuracy = (u.accuracy - 10).max(20);
+                }
+            }
+        }
+
         // Phobias answer the conditions of THIS field.
         let night = battle.vision_tiles < 14;
         let taken_present = battle
