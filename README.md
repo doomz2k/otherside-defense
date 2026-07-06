@@ -123,6 +123,31 @@ Fly-and-lead holds on arrival for your order; fly-and-auto fights the day
 it lands. If the rift closes mid-flight the sortie turns for home. Founding
 chapterhouses abroad is how you shorten the war.
 
+## The deep war
+
+The armoury runs deeper than the rifle: forge the silent **arbalest**, the
+fire-hosing **censer**, the wall-cracking **ram hammer**, the stunning
+**salt-shot mortar**; issue **consecrated blades** (free ripostes), **warded
+circlets** (shatter to stop one psi assault), plate and **abyssal aegis**
+armor tiers, and named **relics** rolled from the rubble. Missions have
+shapes now — terror rifts are *evacuations* on a clock, harvests are
+*ritual interruptions*, infiltrations are *snatch* jobs where the mark
+must live. Chapels grow lofts; floors collapse when you shoot out what
+holds them; sandstorms, snowfall, and rain each change the fight — and
+demons hunt by sight, scent, and *sound*, so a squad that moves low and
+kills quiet gets close before the pack knows.
+
+Strategically: standing squads with banners answer their own calls,
+gargoyle **sky hunts** maul unescorted zeppelins, corrupted council
+patrons siphon the tithe until you **purge** their manors (half the
+garrison is human), Ward Towers / Kennels / Vaults fortify Reckonings,
+and the drill yard trains the B-team. Soldiers **bond** in the field and
+grieve when it breaks; the first Prince to escape becomes a named
+**nemesis** that grows with every slip; Commanders **rally** the line
+once a battle. When it ends, the game writes the whole war to a markdown
+**chronicle** — and if you won, the **Second Dawn** reopens the veil for
+an endless, harder war with the Ledger as your scoreboard.
+
 ## The campaign arc
 
 Bind demons in battle (`B`), drag them home, and the interrogation chain —

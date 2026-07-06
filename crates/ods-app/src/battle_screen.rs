@@ -256,6 +256,12 @@ impl BattleScreen {
                     self.apply(renderer, audio, result);
                 }
             }
+            KeyCode::KeyY => {
+                if let Some(id) = self.selected {
+                    let result = self.battle.perform(Action::Rally { unit: id });
+                    self.apply(renderer, audio, result);
+                }
+            }
             KeyCode::Tab => {
                 self.select_next_soldier();
                 self.refresh_scene(renderer);
@@ -372,6 +378,20 @@ impl BattleScreen {
                 if ui.button("✚ Dress wounds [H]").clicked() {
                     self.heal_selected(renderer, audio);
                 }
+                let officer = self.selected.is_some_and(|id| {
+                    let u = self.battle.unit(id);
+                    u.can_rally && !u.rally_spent
+                });
+                if officer
+                    && ui
+                        .button(egui::RichText::new("📣 Rally [Y]").color(egui::Color32::from_rgb(255, 220, 120)))
+                        .on_hover_text("once a battle: +30 morale to everyone within 8 tiles")
+                        .clicked()
+                    && let Some(id) = self.selected
+                {
+                    let result = self.battle.perform(Action::Rally { unit: id });
+                    self.apply(renderer, audio, result);
+                }
                 let rot_near = self.selected.is_some_and(|id| {
                     let me = self.battle.unit(id).tile;
                     self.battle.units.iter().any(|u| {
@@ -444,7 +464,7 @@ impl BattleScreen {
                     }
                 }
                 ui.separator();
-                ui.weak("[F] floor cutaway  [O] door  [V] smoke  [B] bind  [K] kneel  [X] amputate  [R] ward");
+                ui.weak("[F] floor cutaway  [O] door  [V] smoke  [B] bind  [K] kneel  [X] amputate  [R] ward  [Y] rally");
             });
         });
 

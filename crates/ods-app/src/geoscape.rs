@@ -1120,6 +1120,7 @@ impl Core {
         }
 
         // -------------------------------------------------- game over/won
+        let (mut wants_chronicle, mut wants_dawn, mut wants_menu) = (false, false, false);
         if let Some(outcome) = c.over {
             let (title, body) = match outcome {
                 ods_geo::CampaignOutcome::Victory => (
@@ -1138,11 +1139,42 @@ impl Core {
                 .show(ctx, |ui| {
                     ui.label(egui::RichText::new(format!("{outcome:?}")).size(20.0).strong());
                     ui.label(body);
+                    if ui
+                        .button("📜 Write the chronicle")
+                        .on_hover_text("the whole war, month by month, as a document")
+                        .clicked()
+                    {
+                        wants_chronicle = true;
+                    }
+                    if outcome == ods_geo::CampaignOutcome::Victory
+                        && ui
+                            .button(egui::RichText::new("🌅 THE SECOND DAWN").strong())
+                            .on_hover_text(
+                                "keep fighting: the veil stays cracked, hell comes harder, \
+                                 and the Ledger becomes the scoreboard",
+                            )
+                            .clicked()
+                    {
+                        wants_dawn = true;
+                    }
                     if ui.button("Back to menu").clicked() {
-                        self.screen = Screen::Menu;
-                        self.campaign = None;
+                        wants_menu = true;
                     }
                 });
+            if wants_chronicle {
+                let path = format!("chronicle-m{}.md", c.month);
+                match std::fs::write(&path, write_chronicle(c, &self.log)) {
+                    Ok(()) => self.log.push(format!("The chronicle is written: {path}")),
+                    Err(e) => self.log.push(format!("cannot write chronicle: {e}")),
+                }
+            }
+            if wants_dawn && c.second_dawn().is_ok() {
+                self.log.push("The Second Dawn. The war goes on, harder.".to_string());
+            }
+            if wants_menu {
+                self.screen = Screen::Menu;
+                self.campaign = None;
+            }
         }
 
         action
@@ -1191,6 +1223,56 @@ fn bestiary_lore(species: ods_sim::units::Species) -> &'static str {
              own masonry becomes its rubble. Bring the lances or bring nothing."
         }
     }
+}
+
+/// Assemble the war's written history from the campaign and the log:
+/// the record an ironman run leaves behind.
+fn write_chronicle(c: &Campaign, log: &[String]) -> String {
+    let mut out = String::new();
+    out.push_str("# The Chronicle of the War of the Otherside\n\n");
+    out.push_str(&format!(
+        "*{} months under arms — difficulty {}{}.*\n\n",
+        c.month,
+        c.difficulty.name(),
+        if c.ironman { ", ironman" } else { "" }
+    ));
+    let s = c.stats;
+    out.push_str("## The Ledger\n\n");
+    out.push_str(&format!(
+        "- Missions won / lost: {} / {}\n- Rifts banished: {}\n- Nests razed: {}\n         - Reckonings repelled: {}\n- Demons slain / bound: {} / {}\n         - Soldiers lost / hired: {} / {}\n- Civilians saved / lost: {} / {}\n\n",
+        s.missions_won,
+        s.missions_lost,
+        s.rifts_banished,
+        s.nests_razed,
+        s.reckonings_repelled,
+        s.demons_slain,
+        s.demons_captured,
+        s.soldiers_lost,
+        s.soldiers_hired,
+        s.civilians_saved,
+        s.civilians_dead,
+    ));
+    if let Some(n) = &c.nemesis {
+        out.push_str(&format!(
+            "**{} still walks**, {} escapes to its name.\n\n",
+            n.name, n.escapes
+        ));
+    }
+    if !c.memorial.is_empty() {
+        out.push_str("## The Wall of the Fallen\n\n");
+        for f in &c.memorial {
+            out.push_str(&format!(
+                "- {} {}, month {}: {} missions, {} kills — fell at {}\n",
+                f.rank, f.name, f.month, f.missions, f.kills, f.cause
+            ));
+        }
+        out.push('\n');
+    }
+    out.push_str("## The Record, Day by Day\n\n");
+    for line in log {
+        out.push_str(&format!("{line}\n\n"));
+    }
+    out
 }
 
 fn report_line(what: &str, r: ods_geo::BattleReport) -> String {

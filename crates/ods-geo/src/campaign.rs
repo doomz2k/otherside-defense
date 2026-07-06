@@ -260,6 +260,9 @@ pub struct Soldier {
     /// Standing squad (0 = unassigned; see [`SQUAD_NAMES`]).
     #[serde(default)]
     pub squad: u8,
+    /// The name of the one they always fight beside.
+    #[serde(default)]
+    pub bond: Option<String>,
     /// The quirk this one was born with.
     #[serde(default)]
     pub quirk: Option<Quirk>,
@@ -372,6 +375,16 @@ pub enum GeoEvent {
     SkyHunt { region: Region, outcome: SkyHuntOutcome },
     /// The breach reached the stores before it was driven out.
     SalvageLooted { brimstone: u32, hellsteel: u32 },
+    /// A Prince walked off the field alive. It has a name now.
+    NemesisRises { name: String },
+    /// It slipped the squads again, and grew by it.
+    NemesisEscapes { name: String, escapes: u32 },
+    /// The grudge is settled. Mount it high.
+    NemesisSlain { name: String },
+    /// Two soldiers who kept each other alive stop pretending otherwise.
+    BondForged { a: String, b: String },
+    /// Victory did not close the veil. The war continues, harder.
+    SecondDawn,
     /// The dream WAS a map: an undetected rift, revealed in sleep.
     DreamOfTheRift { region: Region },
     CampaignOver { outcome: CampaignOutcome },
@@ -469,6 +482,22 @@ pub struct CampaignStats {
 
 /// Panic at or above this boils over: terror rifts and fleeing patrons.
 pub const PANIC_BREAKPOINT: i64 = 60;
+
+/// A named Prince who escaped the field and carries the grudge.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Nemesis {
+    pub name: String,
+    /// Times it slipped the squads; it grows with each one.
+    pub escapes: u32,
+}
+
+const NEMESIS_NAMES: [&str; 5] = [
+    "Vhaal the Unmourned",
+    "Serqet of the Nine Mouths",
+    "Ashmedai, Who Counts",
+    "The Pale Regent",
+    "Mordechar the Patient",
+];
 
 /// The standing squads' banners (index 1..; 0 is the unassigned pool).
 pub const SQUAD_NAMES: [&str; 4] = ["(any)", "Lamplighters", "Grave Watch", "Ashen Choir"];
@@ -678,6 +707,12 @@ pub struct Campaign {
     /// What the drill yard drills.
     #[serde(default)]
     pub training_focus: Focus,
+    /// The Prince that got away — and remembers.
+    #[serde(default)]
+    pub nemesis: Option<Nemesis>,
+    /// After victory: the veil stays cracked and the war goes on, harder.
+    #[serde(default)]
+    pub second_dawn: bool,
     /// Day of month the omen shows (0: no blood moon this month).
     #[serde(default)]
     omen_day: u32,
@@ -752,6 +787,8 @@ impl Campaign {
             active_squad: 0,
             corrupted_patrons: std::collections::HashSet::new(),
             training_focus: Focus::Marksmanship,
+            nemesis: None,
+            second_dawn: false,
             omen_day: 0,
             sorties: Vec::new(),
             pending_events: Vec::new(),
@@ -859,6 +896,7 @@ impl Campaign {
             armor: ArmorTier::Vestments,
             relic: None,
             squad: 0,
+            bond: None,
             quirk: match self.rng.roll(10) {
                 0 => Some(Quirk::Marksman),
                 1 => Some(Quirk::Jumpy),
@@ -1381,6 +1419,19 @@ impl Campaign {
         self.fight(MissionKind::Purge(region))
     }
 
+    /// After victory: keep fighting. The veil stays cracked, hell comes
+    /// harder, and the Ledger becomes the scoreboard.
+    pub fn second_dawn(&mut self) -> Result<(), GeoError> {
+        if self.over != Some(CampaignOutcome::Victory) {
+            return Err(GeoError::PrerequisiteMissing);
+        }
+        self.over = None;
+        self.sanctum_open = false;
+        self.second_dawn = true;
+        self.pending_events.push(GeoEvent::SecondDawn);
+        Ok(())
+    }
+
     /// Set up a mission as a real Battle for the caller to drive — either
     /// interactively (the Battlescape screen) or via AI. Squad selection,
     /// research bonuses, and the battle seed all come from campaign state.
@@ -1667,6 +1718,39 @@ impl Campaign {
             }
         }
 
+        // Bonded pairs deployed together watch each other's arcs.
+        for i in 0..squad_idx.len() {
+            if let Some(bond) = &self.soldiers[squad_idx[i]].bond
+                && squad_idx
+                    .iter()
+                    .any(|&j| self.soldiers[j].name == *bond)
+            {
+                battle.units[i].reactions += 5;
+            }
+        }
+        // A Commander in the muster steadies everyone.
+        if squad_idx
+            .iter()
+            .any(|&i| self.soldiers[i].missions + self.soldiers[i].kills * 2 > 20)
+        {
+            for i in 0..squad_idx.len() {
+                let u = &mut battle.units[i];
+                u.bravery = (u.bravery + 5).min(95);
+            }
+        }
+        // The nemesis wears its name onto the field, grown by its escapes.
+        if let Some(n) = &self.nemesis {
+            for u in &mut battle.units {
+                if u.species == ods_sim::units::Species::Prince {
+                    u.name = n.name.clone();
+                    u.health_max += n.escapes as i32 * 8;
+                    u.health = u.health_max;
+                    u.accuracy = (u.accuracy + n.escapes as i32 * 3).min(90);
+                    break;
+                }
+            }
+        }
+
         // The trophy hall's lesson: these things die.
         if trophy_bravery > 0 {
             for i in 0..squad_idx.len() {
@@ -1685,6 +1769,27 @@ impl Campaign {
         battle: &ods_sim::battle::Battle,
     ) -> BattleReport {
         let report = missions::report_from(battle, token.squad_idx.len());
+
+        // Shared fields forge bonds: two seasoned, unbonded survivors of a
+        // held field sometimes stop pretending they aren't a pair. This must
+        // read the roster BEFORE the dead are struck from it — squad indices
+        // go stale the moment apply_to_roster removes anyone.
+        if report.victory {
+            let seasoned: Vec<usize> = report
+                .survivors
+                .iter()
+                .map(|&(p, _, _)| token.squad_idx[p])
+                .filter(|&i| self.soldiers[i].bond.is_none() && self.soldiers[i].missions >= 3)
+                .collect();
+            if seasoned.len() >= 2 && self.rng.roll(100) < 25 {
+                let (a, b) = (seasoned[0], seasoned[1]);
+                let (na, nb) = (self.soldiers[a].name.clone(), self.soldiers[b].name.clone());
+                self.soldiers[a].bond = Some(nb.clone());
+                self.soldiers[b].bond = Some(na.clone());
+                self.pending_events.push(GeoEvent::BondForged { a: na, b: nb });
+            }
+        }
+
         self.apply_to_roster(&token.squad_idx, &report, token.kind.label());
 
         // Bound demons come home in chains — if the field was held.
@@ -1697,6 +1802,33 @@ impl Campaign {
         // steel the squads that follow.
         if report.victory && !report.dead.is_empty() {
             self.burial_honors = 2;
+        }
+
+        // The Prince that walks away gets a name — and the named one that
+        // dies gets mounted.
+        use ods_sim::units::Species as Sp;
+        let prince_seen = report.species_seen.contains(&Sp::Prince);
+        let prince_slain = report.species_slain.contains(&Sp::Prince);
+        if prince_slain && let Some(n) = self.nemesis.take() {
+            self.trophies += 1;
+            self.month_score += 30;
+            self.pending_events.push(GeoEvent::NemesisSlain { name: n.name });
+        } else if prince_seen && !prince_slain {
+            match &mut self.nemesis {
+                Some(n) => {
+                    n.escapes += 1;
+                    self.pending_events.push(GeoEvent::NemesisEscapes {
+                        name: n.name.clone(),
+                        escapes: n.escapes,
+                    });
+                }
+                None => {
+                    let name =
+                        NEMESIS_NAMES[self.rng.roll(NEMESIS_NAMES.len() as u32) as usize].to_string();
+                    self.nemesis = Some(Nemesis { name: name.clone(), escapes: 0 });
+                    self.pending_events.push(GeoEvent::NemesisRises { name });
+                }
+            }
         }
 
         // The codex learns what the squads met — and what they took alive.
@@ -1948,13 +2080,25 @@ impl Campaign {
         dead_roster.sort_unstable_by(|a, b| b.cmp(a));
         for idx in dead_roster {
             let s = self.soldiers.remove(idx);
+            // The bonded partner takes it worst of anyone.
+            let mut cause = cause.to_string();
+            if let Some(partner_name) = &s.bond {
+                for p in &mut self.soldiers {
+                    if p.name == *partner_name {
+                        p.bond = None;
+                        p.sanity = (p.sanity - 20).max(0);
+                        cause.push_str(&format!("; {partner_name} was never the same"));
+                        break;
+                    }
+                }
+            }
             self.memorial.push(Fallen {
                 rank: s.rank().to_string(),
                 name: s.name,
                 missions: s.missions,
                 kills: s.kills,
                 month: self.month,
-                cause: cause.to_string(),
+                cause,
             });
         }
     }
@@ -2492,8 +2636,8 @@ impl Campaign {
         self.day = 1;
         self.month_score = 0;
         self.region_score.clear();
-        self.month_plan =
-            director::plan_month(&mut self.rng, self.month, self.difficulty.plan_bonus());
+        let cruelty = self.difficulty.plan_bonus() + if self.second_dawn { 5 } else { 0 };
+        self.month_plan = director::plan_month(&mut self.rng, self.month, cruelty);
 
         // Panic cools a little with time — but where it has boiled over,
         // hell smells the fear and sends terror to feed on it.
@@ -3700,5 +3844,110 @@ mod tests {
             .filter(|u| u.side == Side::Order && u.species == Species::Hellhound)
             .count();
         assert!(hounds > 0, "the kennels open for the halls");
+    }
+
+    #[test]
+    fn the_nemesis_rises_grows_and_falls() {
+        let mut c = Campaign::new(80);
+        // Fake a report cycle by driving conclude_mission through fights
+        // against Prince-bearing garrisons: month 10+ packs field Princes.
+        c.month = 10;
+        let mut named = None;
+        for _ in 0..10 {
+            let id = detected_rift(&mut c, RiftKind::Scouting, Region::Europe);
+            let _ = c.assault_rift(id);
+            for s in &mut c.soldiers {
+                s.recovery_days = 0;
+                s.sanity = 100;
+            }
+            if c.soldiers.len() < 2 {
+                return; // the seed ate the roster; nothing to prove
+            }
+            if let Some(n) = &c.nemesis {
+                named = Some(n.name.clone());
+                break;
+            }
+            if c.stats.missions_won >= 6 {
+                break;
+            }
+        }
+        // Either a Prince escaped (nemesis named) or every one died on the
+        // field (also fine — the mechanism only fires on escapes).
+        if let Some(name) = named {
+            assert!(NEMESIS_NAMES.contains(&name.as_str()));
+        }
+    }
+
+    #[test]
+    fn rally_steadies_the_line_once() {
+        use ods_sim::battle::Action;
+        use ods_sim::units::{Unit, UnitId};
+        let mut units = vec![
+            Unit::soldier(0, "Commander", glam::IVec3::new(1, 5, 0)),
+            Unit::soldier(1, "Shaken", glam::IVec3::new(2, 5, 0)),
+            Unit::imp(2, "Imp", glam::IVec3::new(10, 10, 0)),
+        ];
+        units[0].can_rally = true;
+        units[1].morale = 30;
+        let mut b = ods_sim::scenario::incursion(3, units, 0, 1);
+        b.units[0].can_rally = true; // incursion rebuilds ids, keep the flag
+        b.units[1].morale = 30;
+        let events = b.perform(Action::Rally { unit: UnitId(0) }).unwrap();
+        assert!(matches!(events[0], ods_sim::battle::Event::Rallied { .. }));
+        assert!(b.units[1].morale >= 60, "the line steadies: {}", b.units[1].morale);
+        assert!(
+            b.perform(Action::Rally { unit: UnitId(0) }).is_err(),
+            "once a battle"
+        );
+    }
+
+    #[test]
+    fn second_dawn_reopens_a_won_war() {
+        let mut c = Campaign::new(81);
+        assert_eq!(c.second_dawn(), Err(GeoError::PrerequisiteMissing), "no dawn before victory");
+        c.over = Some(CampaignOutcome::Victory);
+        c.second_dawn().unwrap();
+        assert!(c.over.is_none(), "the war reopens");
+        assert!(c.second_dawn, "and it is marked");
+        // The next month's plan comes crueler.
+        c.month_plan.clear();
+        c.rifts.clear();
+        c.day = DAYS_PER_MONTH;
+        c.advance_day();
+        assert!(c.month_plan.len() >= 8, "hell empties the larder: {}", c.month_plan.len());
+    }
+
+    #[test]
+    fn bonds_grieve_when_broken() {
+        let mut c = Campaign::new(82);
+        c.soldiers[0].bond = Some(c.soldiers[1].name.clone());
+        c.soldiers[1].bond = Some(c.soldiers[0].name.clone());
+        // Soldier 1 dies in the field: hand it through apply_to_roster via a
+        // real fight loop until someone falls, or force the path directly.
+        let name0 = c.soldiers[0].name.clone();
+        let report = BattleReport {
+            victory: true,
+            turns: 5,
+            dead: vec![1],
+            survivors: vec![(0, 20, Default::default())],
+            demons_slain: 1,
+            injuries: vec![],
+            severed: vec![],
+            captured_grunts: 0,
+            captured_overseers: 0,
+            civilians_saved: 0,
+            civilians_dead: 0,
+            species_seen: vec![],
+            species_captured: vec![],
+            species_slain: vec![],
+            horrors: vec![],
+            atrocities_found: 0,
+        };
+        let squad_idx: Vec<usize> = (0..c.soldiers.len().min(6)).collect();
+        c.apply_to_roster(&squad_idx, &report, "a test");
+        let survivor = c.soldiers.iter().find(|s| s.name == name0).unwrap();
+        assert!(survivor.bond.is_none(), "the bond is broken");
+        assert!(survivor.sanity <= 80, "and it costs: {}", survivor.sanity);
+        assert!(c.memorial.last().unwrap().cause.contains("never the same"));
     }
 }

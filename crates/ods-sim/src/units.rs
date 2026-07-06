@@ -229,6 +229,8 @@ pub struct Unit {
     pub circlet: bool,
     /// Officers rally once per battle (set by the campaign from rank).
     pub can_rally: bool,
+    /// The rally has been spent.
+    pub rally_spent: bool,
     /// Non-combatant caught in the massacre (soldier-shaped, unarmed).
     pub civilian: bool,
     /// True flight: ignores floors, ramps, and drops.
@@ -286,6 +288,7 @@ impl Unit {
             blade: false,
             circlet: false,
             can_rally: false,
+            rally_spent: false,
             civilian: false,
             flies: false,
             smasher: false,

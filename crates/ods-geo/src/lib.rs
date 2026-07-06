@@ -19,7 +19,7 @@ pub use campaign::{
     CHAPTERHOUSE_COST, Difficulty,
     Fallen, FINAL_ASSAULT_BRIMSTONE, GeoError, GeoEvent, MissionKind, MissionToken,
     OCCULTIST_HIRE_COST, PANIC_BREAKPOINT, Phobia, Prisoners, Quirk, SOLDIER_HIRE_COST, Soldier,
-    Relic, Focus, SQUAD_NAMES, SkyHuntOutcome, SoldierStats, Sortie,
+    Relic, Focus, Nemesis, SQUAD_NAMES, SkyHuntOutcome, SoldierStats, Sortie,
 };
 pub use director::{Nest, Rift, RiftKind};
 pub use geography::Region;

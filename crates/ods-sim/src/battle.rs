@@ -28,6 +28,8 @@ pub(crate) const DEVOUR_TU: i32 = 20;
 pub(crate) const DEFILE_TU: i32 = 25;
 const AMPUTATE_TU: i32 = 25;
 const WARD_TU: i32 = 20;
+const RALLY_TU: i32 = 20;
+const RALLY_RANGE_TILES: i32 = 8;
 /// How far the censer throws its burning arc.
 const CENSER_RANGE_TILES: i32 = 5;
 /// The consecrated blade's riposte damage base.
@@ -189,6 +191,8 @@ pub enum Action {
     Amputate { medic: UnitId, target: UnitId },
     /// Chalk a burning ward on the unit's own tile (consumes a ward kit).
     InscribeWard { unit: UnitId },
+    /// An officer's voice cuts the dread: morale restored in earshot.
+    Rally { unit: UnitId },
     /// Face a direction (1 TU per 45°) — sets the reaction-fire arc.
     Turn { unit: UnitId, toward: IVec3 },
     /// Prime a charge and drop it at your feet; it detonates after `timer`
@@ -683,6 +687,7 @@ impl Battle {
             Action::Defile { unit, corpse } => self.do_defile(unit, corpse),
             Action::Amputate { medic, target } => self.do_amputate(medic, target),
             Action::InscribeWard { unit } => self.do_inscribe_ward(unit),
+            Action::Rally { unit } => self.do_rally(unit),
             Action::Kneel { unit } => self.do_kneel(unit),
             Action::SetReserve { unit, on } => self.do_set_reserve(unit, on),
             Action::Bind { unit, target } => self.do_bind(unit, target),
@@ -967,6 +972,29 @@ impl Battle {
             self.check_victory(&mut events);
         }
         Ok(events)
+    }
+
+    /// The officer's voice: once a battle, every heart in earshot remembers
+    /// what it came here to do.
+    fn do_rally(&mut self, id: UnitId) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        let u = self.unit(id);
+        if !u.can_rally || u.rally_spent || u.civilian {
+            return Err(ActionError::BadTarget);
+        }
+        if u.tu < RALLY_TU {
+            return Err(ActionError::NotEnoughTu);
+        }
+        let (side, from) = (u.side, u.tile);
+        self.unit_mut(id).tu -= RALLY_TU;
+        self.unit_mut(id).rally_spent = true;
+        for u in &mut self.units {
+            if u.is_active() && u.side == side && cheb(u.tile, from) <= RALLY_RANGE_TILES {
+                u.morale = (u.morale + 30).min(100);
+                u.suppression = 0;
+            }
+        }
+        Ok(vec![Event::Rallied { by: id }])
     }
 
     /// Chalk and salt and a psalm: the ground itself takes a side.

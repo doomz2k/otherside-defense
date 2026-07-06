@@ -126,6 +126,21 @@ pub fn narrate(c: &Campaign, event: &GeoEvent) -> String {
             "{stamp} ...but the dream was a MAP: an unseen rift in {}, revealed in sleep",
             region.name()
         ),
+        E::NemesisRises { name } => format!(
+            "{stamp} ### a Prince walked off the field alive. The augurs give it a name: {name} ###"
+        ),
+        E::NemesisEscapes { name, escapes } => format!(
+            "{stamp} !!! {name} slips the squads again ({escapes} escapes) — and grows by it"
+        ),
+        E::NemesisSlain { name } => format!(
+            "{stamp} ### {name} IS SLAIN. The grudge is settled; mount it high ###"
+        ),
+        E::BondForged { a, b } => {
+            format!("{stamp} {a} and {b} stop pretending they aren't a pair")
+        }
+        E::SecondDawn => format!(
+            "{stamp} ### THE SECOND DAWN: victory did not close the veil. The war goes on, harder ###"
+        ),
         E::CampaignOver { outcome } => match outcome {
             ods_geo::CampaignOutcome::Victory => {
                 format!("{stamp} ### THE NAME IS BROKEN — THE ORDER PREVAILS ###")
