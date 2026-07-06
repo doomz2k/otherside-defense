@@ -55,8 +55,12 @@ otherside-defense/
   docs/
 ```
 
-Geoscape comes much later and gets its own crate when it exists; it will be
-ordinary 2D/UI rendering, not voxels.
+`ods-geo` is the Geoscape: the campaign clock, regions/funding, the rift
+director, chapterhouse building, roster and research. It is headless and
+deterministic like `ods-sim`, and resolves assaults by running real
+`ods-sim` battles with AI on both sides — the strategic layer never rolls
+abstract dice for combat. Its UI (globe/map rendering) is future work; the
+`--campaign` mode in `ods-app` narrates it as text meanwhile.
 
 ## Key crates
 

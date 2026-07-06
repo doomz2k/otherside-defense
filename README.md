@@ -18,9 +18,10 @@ hell's own weapons back against it.
 Rust stable (1.85+ for edition 2024). Custom voxel engine on wgpu.
 
 ```sh
-cargo test --workspace              # headless: voxel core + sim tests
-cargo run -p ods-app                # the skirmish (needs a display + GPU)
-cargo run -p ods-app -- --headless  # sim-only smoke test (CI / cloud)
+cargo test --workspace                # headless: voxel core + sim + campaign tests
+cargo run -p ods-app                  # the skirmish (needs a display + GPU)
+cargo run -p ods-app -- --headless    # sim-only smoke test (CI / cloud)
+cargo run -p ods-app -- --campaign 6  # 6-month Geoscape chronicle, fully headless
 ```
 
 ## The first skirmish
@@ -46,5 +47,18 @@ and pathing.
 |---|---|
 | `crates/ods-voxel` | voxel storage, greedy meshing, raycasts, destruction |
 | `crates/ods-sim` | headless deterministic Battlescape rules |
+| `crates/ods-geo` | headless deterministic Geoscape: campaign, bases, rift director |
 | `crates/ods-render` | wgpu renderer |
 | `crates/ods-app` | binary: window, input, UI shell |
+
+## The Geoscape (v1, headless)
+
+Eight world regions fund the Order monthly. Hell's director schedules an
+escalating plan of rifts each month — scouting, soul harvests, massacres,
+cult infiltrations (permanent funding damage), and nest foundings (a standing
+nest bleeds score daily until razed). Augur arrays detect rifts; assaulting
+one runs a **real Battlescape battle** (AI on both sides, deterministic) —
+deaths are permanent, the wounded convalesce, and survivors log missions.
+Chapterhouse facilities build on a 6×6 grid; occultists grind through the
+Forbidden Codex (blessed arms, hellsteel plate, rift augury). Two badly-losing
+months or deep debt ends the campaign — the classic slow defeat is fully in.

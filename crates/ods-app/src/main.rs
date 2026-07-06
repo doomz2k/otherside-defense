@@ -29,13 +29,133 @@ const MAT_SOLDIER: u8 = 6;
 const MAT_IMP: u8 = 7;
 
 fn main() -> anyhow::Result<()> {
-    if std::env::args().any(|a| a == "--headless") {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--headless") {
         return headless_smoke_test();
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--campaign") {
+        let months: u32 = args.get(pos + 1).and_then(|m| m.parse().ok()).unwrap_or(6);
+        return campaign_chronicle(months);
     }
     let event_loop = EventLoop::new()?;
     let mut app = App { game: None };
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// Headless campaign: a simple commander policy plays N months and narrates.
+/// Every assault is a real auto-resolved Battlescape fight.
+fn campaign_chronicle(months: u32) -> anyhow::Result<()> {
+    use ods_geo::{Campaign, GeoEvent, Project};
+
+    let mut c = Campaign::new(1999);
+    let mut research_queue =
+        vec![Project::RiftAugury, Project::BlessedArms, Project::HellsteelPlate];
+
+    println!("== The Order convenes. {} soldiers sworn in. ==", c.soldiers.len());
+    for _day in 0..months * 30 {
+        if c.over.is_some() {
+            break;
+        }
+        // Commander policy: keep research running, keep the roster manned,
+        // storm everything we can see.
+        if c.research.active.is_none()
+            && let Some(&next) = research_queue.first()
+            && c.start_research(next).is_ok()
+        {
+            research_queue.remove(0);
+            println!("[m{} d{}] research begins: {}", c.month, c.day, next.name());
+        }
+        if c.soldiers.len() < 8 && c.funds > 500 {
+            let (m, d) = (c.month, c.day);
+            if let Ok(s) = c.hire_soldier() {
+                println!("[m{m} d{d}] recruited {}", s.name);
+            }
+        }
+
+        for event in c.advance_day() {
+            narrate(&c, &event);
+            if let GeoEvent::RiftDetected { id, kind, region, .. } = event {
+                // Don't feed lone survivors to the rift: wait for a real squad.
+                if c.soldiers.iter().filter(|s| s.is_fit()).count() < 4 {
+                    println!("    >> too few fit soldiers to assault — holding");
+                    continue;
+                }
+                match c.assault_rift(id) {
+                    Ok(r) if r.victory => println!(
+                        "    >> BANISHED the {} in {} ({} demons slain, {} lost, {} turns)",
+                        kind.name(),
+                        region.name(),
+                        r.demons_slain,
+                        r.dead.len(),
+                        r.turns
+                    ),
+                    Ok(r) => println!(
+                        "    >> REPELLED at the {} in {} ({} lost) — the rift holds",
+                        kind.name(),
+                        region.name(),
+                        r.dead.len()
+                    ),
+                    Err(e) => println!("    >> cannot assault: {e:?}"),
+                }
+            }
+        }
+        // Raze any nest as soon as the squad is on its feet.
+        if let Some(nest_id) = c.nests.first().map(|n| n.id)
+            && let Ok(r) = c.raze_nest(nest_id)
+            && r.victory
+        {
+            println!("    >> nest RAZED ({} demons slain)", r.demons_slain);
+        }
+    }
+
+    println!(
+        "\n== Chronicle ends: month {}, funds {}k, {} soldiers, {} nests standing, outcome: {} ==",
+        c.month,
+        c.funds,
+        c.soldiers.len(),
+        c.nests.len(),
+        match c.over {
+            None => "the Order fights on".to_string(),
+            Some(o) => format!("{o:?}"),
+        }
+    );
+    Ok(())
+}
+
+fn narrate(c: &ods_geo::Campaign, event: &ods_geo::GeoEvent) {
+    use ods_geo::GeoEvent as E;
+    let stamp = format!("[m{} d{}]", c.month, c.day);
+    match event {
+        E::FacilityComplete { facility } => {
+            println!("{stamp} construction complete: {}", facility.name());
+        }
+        E::ResearchComplete { project } => {
+            println!("{stamp} the Codex yields: {}", project.name());
+        }
+        E::SoldierRecovered { name } => println!("{stamp} {name} returns to duty"),
+        E::RiftDetected { kind, region, days_left, .. } => println!(
+            "{stamp} augurs scream: {} in {} ({days_left} days to act)",
+            kind.name(),
+            region.name()
+        ),
+        E::RiftExpired { kind, region, penalty, .. } => println!(
+            "{stamp} the {} in {} runs its course unopposed (-{penalty})",
+            kind.name(),
+            region.name()
+        ),
+        E::NestFounded { region, .. } => {
+            println!("{stamp} !!! a nest takes root in {}", region.name());
+        }
+        E::RegionInfiltrated { region } => {
+            println!("{stamp} !!! cultists seize power in {}", region.name());
+        }
+        E::MonthlyReport { month, score, income, expenses, funds } => println!(
+            "{stamp} === month {month} report: score {score}, income {income}k, \
+             expenses {expenses}k, treasury {funds}k ==="
+        ),
+        E::CampaignOver { outcome } => println!("{stamp} ### THE ORDER FALLS: {outcome:?} ###"),
+    }
 }
 
 /// The old smoke test, kept for CI and cloud sessions with no display.

@@ -1140,10 +1140,19 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "glam",
+ "ods-geo",
  "ods-render",
  "ods-sim",
  "ods-voxel",
  "winit",
+]
+
+[[package]]
+name = "ods-geo"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "ods-sim",
 ]
 
 [[package]]

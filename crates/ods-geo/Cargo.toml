@@ -1,0 +1,8 @@
+[package]
+name = "ods-geo"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ods-sim = { workspace = true }
+glam = { workspace = true }

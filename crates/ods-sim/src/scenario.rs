@@ -74,6 +74,56 @@ pub fn skirmish(seed: u64) -> Battle {
     Battle::new(world, IVec3::ZERO, MAP_TILES, units, seed)
 }
 
+/// West-side deployment tiles and east-side incursion tiles, in fill order.
+const ORDER_SPAWNS: [(i32, i32); 8] =
+    [(2, 9), (2, 11), (2, 13), (3, 15), (2, 7), (3, 17), (2, 5), (3, 19)];
+const DEMON_SPAWNS: [(i32, i32); 8] =
+    [(21, 8), (21, 11), (21, 14), (20, 16), (21, 5), (20, 18), (21, 20), (20, 3)];
+
+/// Build a battle on the standard map from campaign-supplied soldiers and a
+/// demon head-count. Unit ids are reassigned to match battle indexing; squad
+/// order is preserved so the caller can map results back to its roster.
+pub fn incursion(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32) -> Battle {
+    let mut world = VoxelWorld::new();
+    world.fill_box(
+        IVec3::ZERO,
+        IVec3::new(MAP_TILES.x * TILE_VOXELS, MAP_TILES.y * TILE_VOXELS, GROUND_TOP),
+        MAT_GROUND,
+    );
+    for tx in 9..=14 {
+        for ty in 8..=15 {
+            let on_ring = tx == 9 || tx == 14 || ty == 8 || ty == 15;
+            let doorway = (tx == 9 && ty == 11) || (tx == 14 && ty == 12);
+            if on_ring && !doorway {
+                fill_tile_walls(&mut world, IVec3::new(tx, ty, 0), MAT_WALL);
+            }
+        }
+    }
+    for ty in [3, 4, 5, 6, 17, 18, 19, 20] {
+        fill_tile_walls(&mut world, IVec3::new(6, ty, 0), MAT_WALL);
+    }
+
+    soldiers.truncate(ORDER_SPAWNS.len());
+    let mut units = Vec::new();
+    for (i, mut s) in soldiers.into_iter().enumerate() {
+        s.id = crate::units::UnitId(units.len() as u32);
+        let (x, y) = ORDER_SPAWNS[i];
+        s.tile = IVec3::new(x, y, 0);
+        units.push(s);
+    }
+    let demon_names = ["Wrath", "Envy", "Gluttony", "Sloth", "Pride", "Greed", "Lust", "Despair"];
+    for i in 0..demon_count.min(DEMON_SPAWNS.len() as u32) as usize {
+        let (x, y) = DEMON_SPAWNS[i];
+        units.push(Unit::imp(
+            units.len() as u32,
+            &format!("Imp of {}", demon_names[i]),
+            IVec3::new(x, y, 0),
+        ));
+    }
+
+    Battle::new(world, IVec3::ZERO, MAP_TILES, units, seed)
+}
+
 /// Fill a tile's footprint with wall from the ground to `WALL_TOP`.
 fn fill_tile_walls(world: &mut VoxelWorld, tile: IVec3, material: Voxel) {
     let o = tile * TILE_VOXELS;

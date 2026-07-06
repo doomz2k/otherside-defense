@@ -1,29 +1,37 @@
-//! Demon-side AI for the first skirmish: greedy but honest — it plays by the
-//! same action rules and TU budget as the player.
+//! Simple side AIs: greedy but honest — they play by the same action rules
+//! and TU budgets as a human player. Used by the demon side in interactive
+//! play and by both sides when the campaign layer auto-resolves a battle.
 
 use glam::IVec3;
 
 use crate::battle::{Action, ActionError, Battle, Event};
 use crate::units::{FireMode, Side, UnitId};
 
-/// Play out the demon turn and hand play back to the Order. Must be called
-/// when it is the demons' turn; returns every event that occurred, ending
-/// with the Order's `TurnStarted`.
+/// Play out the demon turn and hand play back to the Order.
 pub fn run_demon_turn(battle: &mut Battle) -> Vec<Event> {
+    run_side_turn(battle, Side::Demons)
+}
+
+/// Play out the Order turn (campaign auto-resolve only) and hand play back.
+pub fn run_order_turn(battle: &mut Battle) -> Vec<Event> {
+    run_side_turn(battle, Side::Order)
+}
+
+fn run_side_turn(battle: &mut Battle, side: Side) -> Vec<Event> {
     let mut events = Vec::new();
-    if battle.side_to_move != Side::Demons || battle.winner.is_some() {
+    if battle.side_to_move != side || battle.winner.is_some() {
         return events;
     }
 
-    let demons: Vec<UnitId> = battle.living(Side::Demons).map(|u| u.id).collect();
-    for id in demons {
+    let troops: Vec<UnitId> = battle.living(side).map(|u| u.id).collect();
+    for id in troops {
         // Each iteration must spend TU or break, so this always terminates;
         // the cap is a backstop.
         for _ in 0..32 {
             if battle.winner.is_some() || !battle.unit(id).alive {
                 break;
             }
-            match pick_action(battle, id) {
+            match pick_action(battle, id, side) {
                 Some(action) => match battle.perform(action) {
                     Ok(ev) if ev.is_empty() => break,
                     Ok(ev) => events.extend(ev),
@@ -41,12 +49,12 @@ pub fn run_demon_turn(battle: &mut Battle) -> Vec<Event> {
     events
 }
 
-fn pick_action(battle: &Battle, id: UnitId) -> Option<Action> {
+fn pick_action(battle: &Battle, id: UnitId, side: Side) -> Option<Action> {
     let me = battle.unit(id);
 
-    // Shoot the nearest visible soldier while we can afford it.
+    // Shoot the nearest visible enemy while we can afford it.
     let mut visible: Vec<UnitId> = battle
-        .visible_enemies(Side::Demons)
+        .visible_enemies(side)
         .into_iter()
         .filter(|&t| battle.can_see(id, t))
         .collect();
@@ -59,11 +67,12 @@ fn pick_action(battle: &Battle, id: UnitId) -> Option<Action> {
         return None; // in contact but dry — hold position
     }
 
-    // Nothing visible: advance toward the nearest living soldier. The AI is
-    // map-omniscient for now; scent-of-prey works fine for imps.
+    // Nothing visible: advance toward the nearest living enemy. The AI is
+    // map-omniscient for now; scent-of-prey works fine for imps, and the
+    // auto-resolver needs battles to conclude.
     let prey = battle
-        .living(Side::Order)
-        .min_by_key(|u| dist(me.tile, u.tile))?;
+        .living(side.enemy())
+        .min_by_key(|u| (dist(me.tile, u.tile), u.id.0))?;
     let goal = nearest_open_neighbor(battle, prey.tile, me.tile)?;
     if goal == me.tile {
         return None;
@@ -113,6 +122,19 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Event::Moved { .. } | Event::Fired { .. })),
             "imps must do something on their turn: {events:?}"
+        );
+    }
+
+    #[test]
+    fn order_turn_acts_and_returns_play() {
+        let mut b = scenario::skirmish(11);
+        let events = run_order_turn(&mut b);
+        assert_eq!(b.side_to_move, Side::Demons, "play passes to the demons");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Moved { .. } | Event::Fired { .. })),
+            "soldiers must do something on their turn: {events:?}"
         );
     }
 
