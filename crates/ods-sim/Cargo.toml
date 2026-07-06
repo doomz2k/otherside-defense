@@ -1,0 +1,9 @@
+[package]
+name = "ods-sim"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glam = { workspace = true }
+rand = { workspace = true }
+rand_pcg = { workspace = true }

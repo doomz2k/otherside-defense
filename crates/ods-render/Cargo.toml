@@ -1,0 +1,9 @@
+[package]
+name = "ods-render"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ods-voxel = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }

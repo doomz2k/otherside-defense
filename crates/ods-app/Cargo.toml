@@ -1,0 +1,9 @@
+[package]
+name = "ods-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ods-voxel = { workspace = true }
+ods-sim = { workspace = true }
+glam = { workspace = true }

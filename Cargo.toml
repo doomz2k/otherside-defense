@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ods-voxel",
+    "crates/ods-sim",
+    "crates/ods-render",
+    "crates/ods-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+glam = "0.30"
+rand = "0.9"
+rand_pcg = "0.9"
+bytemuck = { version = "1", features = ["derive"] }
+wgpu = "26"
+
+ods-voxel = { path = "crates/ods-voxel" }
+ods-sim = { path = "crates/ods-sim" }
+ods-render = { path = "crates/ods-render" }
+
+[profile.dev]
+# Voxel meshing is unusably slow at opt-level 0 once maps get real.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
