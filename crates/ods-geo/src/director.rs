@@ -79,6 +79,9 @@ pub struct Rift {
     pub id: u32,
     pub kind: RiftKind,
     pub region: Region,
+    /// Where on the globe reality tore (degrees).
+    pub lat: f32,
+    pub lon: f32,
     pub days_left: u32,
     /// Days since the rift opened. It stabilizes after two days.
     pub days_open: u32,
@@ -107,6 +110,8 @@ impl Rift {
 pub struct Nest {
     pub id: u32,
     pub region: Region,
+    pub lat: f32,
+    pub lon: f32,
 }
 
 /// Demons defending an established nest (tougher than any rift).
@@ -122,9 +127,10 @@ pub struct PlannedRift {
     pub region: Region,
 }
 
-/// Draw up hell's plan for a month. Escalates with the campaign month.
-pub fn plan_month(rng: &mut ods_sim::SimRng, month: u32) -> Vec<PlannedRift> {
-    let count = (3 + month).min(12);
+/// Draw up hell's plan for a month. Escalates with the campaign month;
+/// `extra` is the difficulty's cruelty bonus.
+pub fn plan_month(rng: &mut ods_sim::SimRng, month: u32, extra: u32) -> Vec<PlannedRift> {
+    let count = (3 + month + extra).min(14);
     let mut plan: Vec<PlannedRift> = (0..count)
         .map(|_| {
             let kind = match rng.roll(100) {

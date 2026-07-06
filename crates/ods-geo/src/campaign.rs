@@ -11,18 +11,84 @@ use crate::director::{
 };
 use crate::geography::Region;
 use crate::missions::{self, BattleReport};
-use crate::research::{Project, ResearchState};
+use crate::research::{ManufactureItem, Project, ResearchState};
 
 pub const DAYS_PER_MONTH: u32 = 30;
-pub const STARTING_FUNDS: i64 = 2000;
 pub const SOLDIER_HIRE_COST: i64 = 40;
 pub const SOLDIER_SALARY: i64 = 20;
 pub const OCCULTIST_HIRE_COST: i64 = 60;
 pub const OCCULTIST_SALARY: i64 = 30;
+pub const ARTIFICER_HIRE_COST: i64 = 50;
+pub const ARTIFICER_SALARY: i64 = 25;
 pub const SQUAD_SIZE: usize = 6;
 /// A month at or below this score is a "losing badly" month.
 pub const BAD_MONTH_SCORE: i64 = -100;
 pub const DEBT_LIMIT: i64 = -500;
+/// Founding a new chapterhouse in another region.
+pub const CHAPTERHOUSE_COST: i64 = 800;
+/// Brimstone burned to force open the way to the Otherside.
+pub const FINAL_ASSAULT_BRIMSTONE: u32 = 50;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub enum Difficulty {
+    Novice,
+    Veteran,
+    Legend,
+}
+
+impl Difficulty {
+    pub const ALL: [Difficulty; 3] = [Difficulty::Novice, Difficulty::Veteran, Difficulty::Legend];
+
+    pub fn starting_funds(self) -> i64 {
+        match self {
+            Difficulty::Novice => 2400,
+            Difficulty::Veteran => 2000,
+            Difficulty::Legend => 1600,
+        }
+    }
+
+    pub fn garrison_bonus(self) -> u32 {
+        match self {
+            Difficulty::Novice => 0,
+            Difficulty::Veteran => 1,
+            Difficulty::Legend => 2,
+        }
+    }
+
+    pub fn plan_bonus(self) -> u32 {
+        match self {
+            Difficulty::Novice => 0,
+            Difficulty::Veteran => 1,
+            Difficulty::Legend => 3,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Difficulty::Novice => "Novice",
+            Difficulty::Veteran => "Veteran",
+            Difficulty::Legend => "Legend",
+        }
+    }
+}
+
+/// Demons held in the warded cells, by rank.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Prisoners {
+    pub grunts: u32,
+    pub overseers: u32,
+}
+
+/// An entry on the memorial wall.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Fallen {
+    pub name: String,
+    pub rank: String,
+    pub missions: u32,
+    pub kills: u32,
+    pub month: u32,
+    pub cause: String,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SoldierStats {
@@ -41,11 +107,36 @@ pub struct Soldier {
     pub recovery_days: u32,
     pub missions: u32,
     pub kills: u32,
+    /// Loadout: hellfire charges and dressings carried (drawn from stock).
+    pub grenades_loadout: u32,
+    pub dressings_loadout: u32,
 }
 
 impl Soldier {
     pub fn is_fit(&self) -> bool {
         self.recovery_days == 0
+    }
+
+    /// Rank grows from deeds; higher ranks steady the squad's nerves.
+    pub fn rank(&self) -> &'static str {
+        match self.missions + self.kills * 2 {
+            0..=2 => "Novice",
+            3..=6 => "Adept",
+            7..=12 => "Veteran",
+            13..=20 => "Champion",
+            _ => "Commander",
+        }
+    }
+
+    /// Bravery bonus a rank confers in battle.
+    pub fn rank_bravery(&self) -> i32 {
+        match self.missions + self.kills * 2 {
+            0..=2 => 0,
+            3..=6 => 4,
+            7..=12 => 8,
+            13..=20 => 12,
+            _ => 16,
+        }
     }
 }
 
@@ -71,6 +162,8 @@ pub enum CampaignOutcome {
     Bankrupt,
     /// A Reckoning overran the chapterhouse.
     ChapterhouseFallen,
+    /// The arch-demon is destroyed in its own realm. The Order wins.
+    Victory,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -85,6 +178,7 @@ pub enum GeoEvent {
     MonthlyReport { month: u32, score: i64, income: i64, expenses: i64, funds: i64 },
     /// Demons assaulted the chapterhouse and were driven out.
     ReckoningRepelled { demons_slain: u32, dead: usize },
+    ManufactureComplete { item: ManufactureItem },
     CampaignOver { outcome: CampaignOutcome },
 }
 
@@ -104,6 +198,12 @@ pub enum GeoError {
     NoMaterials,
     /// A required project is not yet complete.
     PrerequisiteMissing,
+    /// Not enough bound demons in the cells.
+    NoPrisoners,
+    UnknownBase,
+    WorkshopBusy,
+    /// Production requires at least one active Workshop.
+    NoWorkshop,
 }
 
 /// A ground mission the campaign can stage.
@@ -112,6 +212,19 @@ pub enum MissionKind {
     Rift(u32),
     Nest(u32),
     Reckoning,
+    /// Through the opened way, into the Otherside. Winning wins everything.
+    FinalAssault,
+}
+
+impl MissionKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            MissionKind::Rift(_) => "rift assault",
+            MissionKind::Nest(_) => "nest razing",
+            MissionKind::Reckoning => "the Reckoning",
+            MissionKind::FinalAssault => "the final assault",
+        }
+    }
 }
 
 /// Receipt from [`Campaign::begin_mission`]; hand it back to
@@ -130,12 +243,15 @@ const RECRUIT_NAMES: [&str; 16] = [
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Campaign {
     pub funds: i64,
+    pub difficulty: Difficulty,
     pub month: u32,
     /// Day of month, 1..=DAYS_PER_MONTH.
     pub day: u32,
-    pub base: Chapterhouse,
+    /// Chapterhouses; index 0 is the founding base.
+    pub bases: Vec<Chapterhouse>,
     pub soldiers: Vec<Soldier>,
     pub occultists: u32,
+    pub artificers: u32,
     pub region_funding: HashMap<Region, i64>,
     pub rifts: Vec<Rift>,
     pub nests: Vec<Nest>,
@@ -143,6 +259,15 @@ pub struct Campaign {
     /// Salvage stockpiles from banished incursions.
     pub brimstone: u32,
     pub hellsteel: u32,
+    /// Armoury stores that loadouts draw from.
+    pub grenade_stock: u32,
+    pub dressing_stock: u32,
+    /// The workshop's active job.
+    pub manufacture: Option<(ManufactureItem, u32)>,
+    /// Demons in the warded cells.
+    pub prisoners: Prisoners,
+    /// The wall of the fallen.
+    pub memorial: Vec<Fallen>,
     pub month_score: i64,
     pub bad_months: u32,
     pub over: Option<CampaignOutcome>,
@@ -158,26 +283,37 @@ pub struct Campaign {
 
 impl Campaign {
     pub fn new(seed: u64) -> Self {
+        Self::new_with(seed, Difficulty::Veteran)
+    }
+
+    pub fn new_with(seed: u64, difficulty: Difficulty) -> Self {
         let mut rng = SimRng::from_seed(seed);
         let mut c = Self {
-            funds: STARTING_FUNDS,
+            funds: difficulty.starting_funds(),
+            difficulty,
             month: 1,
             day: 1,
-            base: Chapterhouse::founding(Region::Europe),
+            bases: vec![Chapterhouse::founding(Region::Europe)],
             soldiers: Vec::new(),
             occultists: 4,
+            artificers: 2,
             region_funding: Region::ALL.iter().map(|&r| (r, 150)).collect(),
             rifts: Vec::new(),
             nests: Vec::new(),
             research: ResearchState::default(),
             brimstone: 0,
             hellsteel: 0,
+            grenade_stock: 12,
+            dressing_stock: 12,
+            manufacture: None,
+            prisoners: Prisoners::default(),
+            memorial: Vec::new(),
             month_score: 0,
             bad_months: 0,
             over: None,
             reckoning_heat: 0,
             reckoning_day: None,
-            month_plan: director::plan_month(&mut rng, 1),
+            month_plan: director::plan_month(&mut rng, 1, difficulty.plan_bonus()),
             region_score: HashMap::new(),
             rng,
             next_id: 0,
@@ -188,6 +324,33 @@ impl Campaign {
             c.soldiers.push(s);
         }
         c
+    }
+
+    // ------------------------------------------------------------------
+    // Cross-base capacities
+
+    pub fn quarters_capacity(&self) -> usize {
+        self.bases.iter().map(|b| b.quarters_capacity()).sum()
+    }
+
+    pub fn library_capacity(&self) -> usize {
+        self.bases.iter().map(|b| b.library_capacity()).sum()
+    }
+
+    pub fn workshop_capacity(&self) -> usize {
+        self.bases.iter().map(|b| b.workshop_capacity()).sum()
+    }
+
+    pub fn personnel(&self) -> usize {
+        self.soldiers.len() + self.occultists as usize + self.artificers as usize
+    }
+
+    fn augurs_in(&self, region: Region) -> usize {
+        self.bases
+            .iter()
+            .filter(|b| b.region == region)
+            .map(|b| b.count_active(Facility::AugurArray))
+            .sum()
     }
 
     fn roll_recruit(&mut self) -> Soldier {
@@ -212,6 +375,8 @@ impl Campaign {
             recovery_days: 0,
             missions: 0,
             kills: 0,
+            grenades_loadout: 2,
+            dressings_loadout: 2,
         }
     }
 
@@ -244,7 +409,7 @@ impl Campaign {
         if self.funds < SOLDIER_HIRE_COST {
             return Err(GeoError::NoFunds);
         }
-        if self.soldiers.len() + self.occultists as usize >= self.base.quarters_capacity() {
+        if self.personnel() >= self.quarters_capacity() {
             return Err(GeoError::QuartersFull);
         }
         self.funds -= SOLDIER_HIRE_COST;
@@ -258,7 +423,7 @@ impl Campaign {
         if self.funds < OCCULTIST_HIRE_COST {
             return Err(GeoError::NoFunds);
         }
-        if self.soldiers.len() + self.occultists as usize >= self.base.quarters_capacity() {
+        if self.personnel() >= self.quarters_capacity() {
             return Err(GeoError::QuartersFull);
         }
         self.funds -= OCCULTIST_HIRE_COST;
@@ -266,15 +431,70 @@ impl Campaign {
         Ok(())
     }
 
-    pub fn start_build(&mut self, facility: Facility, x: usize, y: usize) -> Result<(), GeoError> {
+    pub fn hire_artificer(&mut self) -> Result<(), GeoError> {
         self.guard_over()?;
+        if self.funds < ARTIFICER_HIRE_COST {
+            return Err(GeoError::NoFunds);
+        }
+        if self.personnel() >= self.quarters_capacity() {
+            return Err(GeoError::QuartersFull);
+        }
+        self.funds -= ARTIFICER_HIRE_COST;
+        self.artificers += 1;
+        Ok(())
+    }
+
+    pub fn start_build(
+        &mut self,
+        base: usize,
+        facility: Facility,
+        x: usize,
+        y: usize,
+    ) -> Result<(), GeoError> {
+        self.guard_over()?;
+        if base >= self.bases.len() {
+            return Err(GeoError::UnknownBase);
+        }
         if self.funds < facility.cost() {
             return Err(GeoError::NoFunds);
         }
-        if !self.base.start_build(facility, x, y) {
+        if !self.bases[base].start_build(facility, x, y) {
             return Err(GeoError::Occupied);
         }
         self.funds -= facility.cost();
+        Ok(())
+    }
+
+    /// Found a second (third...) chapterhouse in a region without one.
+    pub fn found_chapterhouse(&mut self, region: Region) -> Result<(), GeoError> {
+        self.guard_over()?;
+        if self.funds < CHAPTERHOUSE_COST {
+            return Err(GeoError::NoFunds);
+        }
+        if self.bases.iter().any(|b| b.region == region) {
+            return Err(GeoError::Occupied);
+        }
+        self.funds -= CHAPTERHOUSE_COST;
+        self.bases.push(Chapterhouse::founding(region));
+        Ok(())
+    }
+
+    /// Put the artificers on a production job.
+    pub fn start_manufacture(&mut self, item: ManufactureItem) -> Result<(), GeoError> {
+        self.guard_over()?;
+        if self.manufacture.is_some() {
+            return Err(GeoError::WorkshopBusy);
+        }
+        if self.workshop_capacity() == 0 {
+            return Err(GeoError::NoWorkshop);
+        }
+        let (brim, steel) = item.materials();
+        if self.brimstone < brim || self.hellsteel < steel {
+            return Err(GeoError::NoMaterials);
+        }
+        self.brimstone -= brim;
+        self.hellsteel -= steel;
+        self.manufacture = Some((item, item.cost()));
         Ok(())
     }
 
@@ -295,8 +515,14 @@ impl Campaign {
         if self.brimstone < brim || self.hellsteel < steel {
             return Err(GeoError::NoMaterials);
         }
+        let (grunts, overseers) = project.prisoners();
+        if self.prisoners.grunts < grunts || self.prisoners.overseers < overseers {
+            return Err(GeoError::NoPrisoners);
+        }
         self.brimstone -= brim;
         self.hellsteel -= steel;
+        self.prisoners.grunts -= grunts;
+        self.prisoners.overseers -= overseers;
         self.research.active = Some((project, project.cost()));
         Ok(())
     }
@@ -357,7 +583,8 @@ impl Campaign {
         kind: MissionKind,
     ) -> Result<(ods_sim::battle::Battle, MissionToken), GeoError> {
         self.guard_over()?;
-        let (garrison, defense) = match kind {
+        let bonus = self.difficulty.garrison_bonus();
+        let (garrison, strength, defense) = match kind {
             MissionKind::Rift(id) => {
                 let rift = self
                     .rifts
@@ -367,16 +594,25 @@ impl Campaign {
                 if !rift.detected {
                     return Err(GeoError::NotDetected);
                 }
-                (rift.effective_garrison(), false)
+                (rift.effective_garrison() + bonus, self.month, false)
             }
             MissionKind::Nest(id) => {
                 self.nests
                     .iter()
                     .find(|n| n.id == id)
                     .ok_or(GeoError::UnknownNest)?;
-                (NEST_GARRISON, false)
+                (NEST_GARRISON + bonus, self.month, false)
             }
-            MissionKind::Reckoning => ((5 + self.month / 2).min(8), true),
+            MissionKind::Reckoning => ((5 + self.month / 2).min(8) + bonus, self.month, true),
+            MissionKind::FinalAssault => {
+                if !self.research.is_complete(Project::NameOfTheEnemy) {
+                    return Err(GeoError::PrerequisiteMissing);
+                }
+                if self.brimstone < FINAL_ASSAULT_BRIMSTONE {
+                    return Err(GeoError::NoMaterials);
+                }
+                (8, 9, false)
+            }
         };
 
         let squad_idx: Vec<usize> = self
@@ -390,19 +626,36 @@ impl Campaign {
         if squad_idx.is_empty() {
             return Err(GeoError::NoSquadFit);
         }
+        // The rite that opens the way consumes its brimstone either way.
+        if kind == MissionKind::FinalAssault {
+            self.brimstone -= FINAL_ASSAULT_BRIMSTONE;
+        }
+
+        // Kit up from the armoury stores: loadouts draw down real stock.
+        let mut kits: Vec<(u32, u32)> = Vec::new();
+        for &i in &squad_idx {
+            let s = &self.soldiers[i];
+            let grenades = s.grenades_loadout.min(self.grenade_stock);
+            let dressings = s.dressings_loadout.min(self.dressing_stock);
+            self.grenade_stock -= grenades;
+            self.dressing_stock -= dressings;
+            kits.push((grenades, dressings));
+        }
+
         let squad: Vec<&Soldier> = squad_idx.iter().map(|&i| &self.soldiers[i]).collect();
         let seed = (self.rng.roll(1 << 30) as u64) << 30 | self.rng.roll(1 << 30) as u64;
         let battle = if defense {
             missions::build_defense(
                 seed,
                 &squad,
+                &kits,
                 garrison,
                 &self.research,
-                &self.base.occupied_cells(),
-                self.base.gate(),
+                &self.bases[0].occupied_cells(),
+                self.bases[0].gate(),
             )
         } else {
-            missions::build_assault(seed, &squad, garrison, self.month, &self.research)
+            missions::build_assault(seed, &squad, &kits, garrison, strength, &self.research)
         };
         Ok((battle, MissionToken { kind, squad_idx }))
     }
@@ -415,7 +668,13 @@ impl Campaign {
         battle: &ods_sim::battle::Battle,
     ) -> BattleReport {
         let report = missions::report_from(battle, token.squad_idx.len());
-        self.apply_to_roster(&token.squad_idx, &report);
+        self.apply_to_roster(&token.squad_idx, &report, token.kind.label());
+
+        // Bound demons come home in chains — if the field was held.
+        if report.victory {
+            self.prisoners.grunts += report.captured_grunts;
+            self.prisoners.overseers += report.captured_overseers;
+        }
 
         match token.kind {
             MissionKind::Rift(id) => {
@@ -448,9 +707,17 @@ impl Campaign {
             }
             MissionKind::Reckoning => {
                 if report.victory {
-                    self.score(self.base.region, 30);
+                    self.score(self.bases[0].region, 30);
                 } else {
                     self.over = Some(CampaignOutcome::ChapterhouseFallen);
+                }
+            }
+            MissionKind::FinalAssault => {
+                if report.victory {
+                    self.over = Some(CampaignOutcome::Victory);
+                } else {
+                    // The way slams shut; the survivors crawl home.
+                    self.month_score -= 30;
                 }
             }
         }
@@ -463,10 +730,14 @@ impl Campaign {
         Ok(self.conclude_mission(token, &battle))
     }
 
-    /// Casualties are removed, the wounded convalesce roughly a day per
-    /// missing hit point, and survivors grow by what they did out there.
-    fn apply_to_roster(&mut self, squad_idx: &[usize], report: &BattleReport) {
-        let infirmary = self.base.count_active(Facility::Infirmary) > 0;
+    /// Casualties are removed (and remembered), the wounded convalesce
+    /// roughly a day per missing hit point, and survivors grow by what they
+    /// did out there.
+    fn apply_to_roster(&mut self, squad_idx: &[usize], report: &BattleReport, cause: &str) {
+        let infirmary = self
+            .bases
+            .iter()
+            .any(|b| b.count_active(Facility::Infirmary) > 0);
         for &(squad_pos, health, xp) in &report.survivors {
             let s = &mut self.soldiers[squad_idx[squad_pos]];
             let missing = (s.stats.health - health).max(0) as u32;
@@ -478,7 +749,15 @@ impl Campaign {
         let mut dead_roster: Vec<usize> = report.dead.iter().map(|&p| squad_idx[p]).collect();
         dead_roster.sort_unstable_by(|a, b| b.cmp(a));
         for idx in dead_roster {
-            self.soldiers.remove(idx);
+            let s = self.soldiers.remove(idx);
+            self.memorial.push(Fallen {
+                rank: s.rank().to_string(),
+                name: s.name,
+                missions: s.missions,
+                kills: s.kills,
+                month: self.month,
+                cause: cause.to_string(),
+            });
         }
     }
 
@@ -522,15 +801,33 @@ impl Campaign {
             return events;
         }
 
-        // Construction.
-        for facility in self.base.advance_day() {
-            events.push(GeoEvent::FacilityComplete { facility });
+        // Construction, at every chapterhouse.
+        for base in &mut self.bases {
+            for facility in base.advance_day() {
+                events.push(GeoEvent::FacilityComplete { facility });
+            }
         }
 
         // Research, throttled by library space.
-        let effective = self.occultists.min(self.base.library_capacity() as u32);
+        let effective = self.occultists.min(self.library_capacity() as u32);
         if let Some(project) = self.research.advance_day(effective) {
             events.push(GeoEvent::ResearchComplete { project });
+        }
+
+        // The workshop grinds on.
+        let output = self.artificers.min(self.workshop_capacity() as u32);
+        if let Some((item, left)) = &mut self.manufacture {
+            *left = left.saturating_sub(output);
+            if *left == 0 {
+                let done = *item;
+                self.manufacture = None;
+                match done {
+                    ManufactureItem::HellfireCharges => self.grenade_stock += 4,
+                    ManufactureItem::FieldDressings => self.dressing_stock += 4,
+                    ManufactureItem::TradeArms => self.funds += 45,
+                }
+                events.push(GeoEvent::ManufactureComplete { item: done });
+            }
         }
 
         // Convalescence.
@@ -551,10 +848,15 @@ impl Campaign {
             .copied()
             .collect();
         for plan in due {
+            let (lat0, lat1, lon0, lon1) = plan.region.bounds();
+            let lat = lat0 + (lat1 - lat0) * self.rng.roll(1000) as f32 / 1000.0;
+            let lon = lon0 + (lon1 - lon0) * self.rng.roll(1000) as f32 / 1000.0;
             self.rifts.push(Rift {
                 id: self.next_id,
                 kind: plan.kind,
                 region: plan.region,
+                lat,
+                lon,
                 days_left: plan.kind.lifetime(),
                 days_open: 0,
                 detected: false,
@@ -562,19 +864,20 @@ impl Campaign {
             self.next_id += 1;
         }
 
-        // Detection sweeps.
-        let augury_bonus = if self.research.is_complete(Project::RiftAugury) { 15 } else { 0 };
-        let home_chance =
-            (25 + 25 * self.base.count_active(Facility::AugurArray) as u32 + augury_bonus).min(90);
-        let away_chance = (10 + augury_bonus).min(90);
+        // Detection sweeps. Interrogated demons give the augurs a scent.
+        let mut augury_bonus = if self.research.is_complete(Project::RiftAugury) { 15 } else { 0 };
+        if self.research.is_complete(Project::Interrogation) {
+            augury_bonus += 10;
+        }
         for i in 0..self.rifts.len() {
             if self.rifts[i].detected {
                 continue;
             }
-            let chance = if self.rifts[i].region == self.base.region {
-                home_chance
+            let augurs = self.augurs_in(self.rifts[i].region) as u32;
+            let chance = if augurs > 0 {
+                (25 + 25 * augurs + augury_bonus).min(90)
             } else {
-                away_chance
+                (10 + augury_bonus).min(90)
             };
             if self.rng.roll(100) < chance {
                 let r = &mut self.rifts[i];
@@ -603,17 +906,17 @@ impl Campaign {
             r.days_open += 1;
             r.days_left -= 1;
             if r.days_left == 0 {
-                expired.push((r.id, r.kind, r.region));
+                expired.push((r.id, r.kind, r.region, r.lat, r.lon));
             }
         }
         self.rifts.retain(|r| r.days_left > 0);
-        for (id, kind, region) in expired {
+        for (id, kind, region, lat, lon) in expired {
             let penalty = kind.expire_penalty();
             self.score(region, -penalty);
             events.push(GeoEvent::RiftExpired { id, kind, region, penalty });
             match kind {
                 RiftKind::NestBuilding => {
-                    self.nests.push(Nest { id: self.next_id, region });
+                    self.nests.push(Nest { id: self.next_id, region, lat, lon });
                     events.push(GeoEvent::NestFounded { id: self.next_id, region });
                     self.next_id += 1;
                 }
@@ -660,7 +963,8 @@ impl Campaign {
             .sum();
         let expenses = self.soldiers.len() as i64 * SOLDIER_SALARY
             + self.occultists as i64 * OCCULTIST_SALARY
-            + self.base.maintenance();
+            + self.artificers as i64 * ARTIFICER_SALARY
+            + self.bases.iter().map(|b| b.maintenance()).sum::<i64>();
         self.funds += income - expenses;
 
         events.push(GeoEvent::MonthlyReport {
@@ -691,7 +995,8 @@ impl Campaign {
         self.day = 1;
         self.month_score = 0;
         self.region_score.clear();
-        self.month_plan = director::plan_month(&mut self.rng, self.month);
+        self.month_plan =
+            director::plan_month(&mut self.rng, self.month, self.difficulty.plan_bonus());
         // Enough banishments and hell comes looking for the source.
         if self.reckoning_heat >= 5 {
             self.reckoning_heat = 0;
@@ -712,6 +1017,8 @@ mod tests {
             id,
             kind,
             region,
+            lat: 0.0,
+            lon: 0.0,
             days_left: kind.lifetime(),
             days_open: 0,
             detected: true,
@@ -722,11 +1029,11 @@ mod tests {
     #[test]
     fn founding_state_is_sane() {
         let c = Campaign::new(1);
-        assert_eq!(c.funds, STARTING_FUNDS);
+        assert_eq!(c.funds, Difficulty::Veteran.starting_funds());
         assert_eq!(c.soldiers.len(), 6);
         assert!(c.soldiers.iter().all(|s| s.is_fit()));
-        assert_eq!(c.base.count_active(Facility::AugurArray), 1);
-        assert!(c.base.quarters_capacity() >= 10);
+        assert_eq!(c.bases[0].count_active(Facility::AugurArray), 1);
+        assert!(c.quarters_capacity() >= 10);
         // Different recruits get different stats from the seeded roll.
         assert_ne!(c.soldiers[0].stats, c.soldiers[1].stats);
     }
@@ -735,9 +1042,9 @@ mod tests {
     fn construction_takes_days_and_money() {
         let mut c = Campaign::new(2);
         let before = c.funds;
-        c.start_build(Facility::Quarters, 0, 0).unwrap();
+        c.start_build(0, Facility::Quarters, 0, 0).unwrap();
         assert_eq!(c.funds, before - Facility::Quarters.cost());
-        assert_eq!(c.start_build(Facility::Quarters, 0, 0), Err(GeoError::Occupied));
+        assert_eq!(c.start_build(0, Facility::Quarters, 0, 0), Err(GeoError::Occupied));
 
         let mut completed = false;
         for _ in 0..Facility::Quarters.build_days() {
@@ -747,14 +1054,14 @@ mod tests {
                 .any(|e| matches!(e, GeoEvent::FacilityComplete { facility: Facility::Quarters }));
         }
         assert!(completed, "quarters must finish in {} days", Facility::Quarters.build_days());
-        assert_eq!(c.base.count_active(Facility::Quarters), 2);
+        assert_eq!(c.bases[0].count_active(Facility::Quarters), 2);
     }
 
     #[test]
     fn hiring_respects_funds_and_beds() {
         let mut c = Campaign::new(3);
-        let capacity = c.base.quarters_capacity();
-        while c.soldiers.len() + (c.occultists as usize) < capacity {
+        let capacity = c.quarters_capacity();
+        while c.personnel() < capacity {
             c.hire_soldier().unwrap();
         }
         assert_eq!(c.hire_soldier().err(), Some(GeoError::QuartersFull));
@@ -798,6 +1105,8 @@ mod tests {
             id,
             kind: RiftKind::Harvest,
             region: Region::Europe,
+            lat: 50.0,
+            lon: 10.0,
             days_left: 30,
             days_open: 0,
             detected: false,
@@ -865,6 +1174,8 @@ mod tests {
             id: 900,
             kind: RiftKind::Infiltration,
             region: Region::Asia,
+            lat: 20.0,
+            lon: 100.0,
             days_left: 1,
             days_open: 0,
             detected: false,
@@ -880,7 +1191,7 @@ mod tests {
     fn nests_bleed_score_until_razed() {
         let mut c = Campaign::new(9);
         c.month_plan.clear();
-        c.nests.push(Nest { id: 1, region: Region::Africa });
+        c.nests.push(Nest { id: 1, region: Region::Africa, lat: 5.0, lon: 20.0 });
         let before = c.month_score;
         c.advance_day();
         assert_eq!(c.month_score, before - NEST_DAILY_PENALTY);
@@ -910,7 +1221,7 @@ mod tests {
         let (income, expenses, funds) = report.expect("a month has passed");
         assert_eq!(income, 8 * 150);
         assert!(expenses > 0);
-        assert_eq!(funds, STARTING_FUNDS + income - expenses);
+        assert_eq!(funds, Difficulty::Veteran.starting_funds() + income - expenses);
         assert_eq!(c.month, 2);
         assert_eq!(c.day, 1);
     }
@@ -937,6 +1248,8 @@ mod tests {
             id: 0,
             kind: RiftKind::Terror,
             region: Region::Asia,
+            lat: 30.0,
+            lon: 90.0,
             days_left: 4,
             days_open: 0,
             detected: true,
@@ -1045,7 +1358,7 @@ mod tests {
     fn save_load_roundtrip_preserves_fate() {
         let mut original = Campaign::new(404);
         // Muddy the state first: build, research, take a fight.
-        original.start_build(Facility::Quarters, 0, 0).unwrap();
+        original.start_build(0, Facility::Quarters, 0, 0).unwrap();
         original.start_research(Project::RiftAugury).unwrap();
         let id = detected_rift(&mut original, RiftKind::Scouting, Region::Africa);
         original.assault_rift(id).unwrap();
@@ -1099,6 +1412,149 @@ mod tests {
             c.begin_mission(MissionKind::Rift(4242)).err(),
             Some(GeoError::UnknownRift)
         );
+    }
+
+    #[test]
+    fn difficulty_scales_the_war() {
+        let novice = Campaign::new_with(50, Difficulty::Novice);
+        let legend = Campaign::new_with(50, Difficulty::Legend);
+        assert!(novice.funds > legend.funds);
+        assert!(legend.difficulty.garrison_bonus() > novice.difficulty.garrison_bonus());
+        assert!(legend.difficulty.plan_bonus() > novice.difficulty.plan_bonus());
+    }
+
+    #[test]
+    fn interrogation_chain_demands_prisoners() {
+        let mut c = Campaign::new(51);
+        assert_eq!(c.start_research(Project::Interrogation), Err(GeoError::NoPrisoners));
+        c.prisoners.grunts = 1;
+        c.start_research(Project::Interrogation).unwrap();
+        assert_eq!(c.prisoners.grunts, 0, "the questioning consumes the questioned");
+
+        // The chain gates all the way to the Name.
+        c.research.active = None;
+        c.research.completed.insert(Project::Interrogation);
+        assert_eq!(
+            c.start_research(Project::NameOfTheEnemy),
+            Err(GeoError::PrerequisiteMissing)
+        );
+        c.research.completed.insert(Project::HeraldsConfession);
+        assert_eq!(c.start_research(Project::NameOfTheEnemy), Err(GeoError::NoPrisoners));
+        c.prisoners.overseers = 2;
+        c.start_research(Project::NameOfTheEnemy).unwrap();
+        assert_eq!(c.prisoners.overseers, 0);
+    }
+
+    #[test]
+    fn final_assault_needs_the_name_and_brimstone_and_can_win_everything() {
+        let mut c = Campaign::new(52);
+        assert_eq!(
+            c.begin_mission(MissionKind::FinalAssault).err(),
+            Some(GeoError::PrerequisiteMissing)
+        );
+        c.research.completed.insert(Project::NameOfTheEnemy);
+        assert_eq!(
+            c.begin_mission(MissionKind::FinalAssault).err(),
+            Some(GeoError::NoMaterials)
+        );
+        c.brimstone = FINAL_ASSAULT_BRIMSTONE;
+        let (mut battle, token) = c.begin_mission(MissionKind::FinalAssault).unwrap();
+        assert_eq!(c.brimstone, 0, "the rite consumes its brimstone");
+
+        // Cheat the arch-demon's guard dead so victory is certain.
+        for u in battle.units.iter_mut().skip(token_len(&token)) {
+            u.alive = false;
+        }
+        battle.winner = Some(ods_sim::units::Side::Order);
+        c.conclude_mission(token, &battle);
+        assert_eq!(c.over, Some(CampaignOutcome::Victory));
+    }
+
+    fn token_len(token: &MissionToken) -> usize {
+        token.squad_idx.len()
+    }
+
+    #[test]
+    fn manufacturing_needs_a_workshop_and_produces() {
+        let mut c = Campaign::new(53);
+        assert_eq!(
+            c.start_manufacture(ManufactureItem::FieldDressings),
+            Err(GeoError::NoWorkshop)
+        );
+        c.start_build(0, Facility::Workshop, 0, 0).unwrap();
+        for _ in 0..Facility::Workshop.build_days() {
+            c.advance_day();
+        }
+        c.month_plan.clear();
+        c.rifts.clear();
+        let stock_before = c.dressing_stock;
+        c.start_manufacture(ManufactureItem::FieldDressings).unwrap();
+        assert_eq!(
+            c.start_manufacture(ManufactureItem::TradeArms),
+            Err(GeoError::WorkshopBusy)
+        );
+        // 2 artificers, cost 30 -> 15 days.
+        let mut done = false;
+        for _ in 0..20 {
+            if c.advance_day().iter().any(|e| matches!(e, GeoEvent::ManufactureComplete { .. })) {
+                done = true;
+                break;
+            }
+        }
+        assert!(done, "dressings must finish within 20 days");
+        assert_eq!(c.dressing_stock, stock_before + 4);
+    }
+
+    #[test]
+    fn loadouts_draw_down_real_stock() {
+        let mut c = Campaign::new(54);
+        c.grenade_stock = 3; // scarcity: six soldiers want 2 each
+        let id = detected_rift(&mut c, RiftKind::Scouting, Region::Europe);
+        let (battle, token) = c.begin_mission(MissionKind::Rift(id)).unwrap();
+        assert_eq!(c.grenade_stock, 0, "the armoury empties in kit order");
+        let issued: u32 = battle.units.iter().take(token_len(&token)).map(|u| u.grenades).sum();
+        assert_eq!(issued, 3);
+        // Conclude cleanly so the campaign is consistent.
+        c.conclude_mission(token, &battle);
+    }
+
+    #[test]
+    fn founding_a_second_chapterhouse() {
+        let mut c = Campaign::new(55);
+        c.funds = CHAPTERHOUSE_COST + 100;
+        assert_eq!(
+            c.found_chapterhouse(Region::Europe),
+            Err(GeoError::Occupied),
+            "one per region"
+        );
+        c.found_chapterhouse(Region::Asia).unwrap();
+        assert_eq!(c.bases.len(), 2);
+        assert_eq!(c.funds, 100);
+        // The new base extends beds and detection reach.
+        assert!(c.quarters_capacity() > c.bases[0].quarters_capacity());
+        assert_eq!(c.augurs_in(Region::Asia), 1);
+    }
+
+    #[test]
+    fn the_fallen_are_remembered() {
+        let mut c = Campaign::new(56);
+        let roster_before = c.soldiers.len();
+        // Grind assaults until someone dies (or prove nobody ever does).
+        for i in 0..12 {
+            let id = detected_rift(&mut c, RiftKind::Terror, Region::Europe);
+            let _ = c.assault_rift(id);
+            if c.soldiers.len() < roster_before {
+                break;
+            }
+            let _ = i;
+        }
+        if c.soldiers.len() < roster_before {
+            let fallen = c.memorial.last().expect("a name on the wall");
+            assert!(!fallen.name.is_empty());
+            assert_eq!(fallen.cause, "rift assault");
+        } else {
+            assert!(c.memorial.is_empty());
+        }
     }
 
     #[test]

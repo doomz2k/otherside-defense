@@ -163,17 +163,17 @@ pub fn build_markers(campaign: &Campaign) -> (Vec<LitVertex>, Vec<u32>) {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
 
-    let mut push = |region: Region, salt: u32, size: f32, color: [f32; 4]| {
-        let (lat, lon) = centroid(region);
-        let lat = lat + ((salt % 5) as f32 - 2.0) * 3.0;
-        let lon = lon + ((salt / 5 % 5) as f32 - 2.0) * 4.0;
+    let mut push = |lat: f32, lon: f32, size: f32, color: [f32; 4]| {
         let center = latlon_to_pos(lat, lon, GLOBE_RADIUS + size);
         push_cube(&mut vertices, &mut indices, center, size, color);
     };
 
-    push(campaign.base.region, 2, 7.0, [1.0, 0.85, 0.25, 1.0]);
+    for base in &campaign.bases {
+        let (lat, lon) = centroid(base.region);
+        push(lat, lon, 7.0, [1.0, 0.85, 0.25, 1.0]);
+    }
     for nest in &campaign.nests {
-        push(nest.region, 100 + nest.id, 6.0, [0.45, 0.1, 0.55, 1.0]);
+        push(nest.lat, nest.lon, 6.0, [0.45, 0.1, 0.55, 1.0]);
     }
     for rift in campaign.rifts.iter().filter(|r| r.detected) {
         let color = if rift.is_stabilized() {
@@ -181,7 +181,7 @@ pub fn build_markers(campaign: &Campaign) -> (Vec<LitVertex>, Vec<u32>) {
         } else {
             [1.0, 0.35, 0.15, 1.0]
         };
-        push(rift.region, rift.id, 5.0, color);
+        push(rift.lat, rift.lon, 5.0, color);
     }
 
     (vertices, indices)

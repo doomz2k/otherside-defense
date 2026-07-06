@@ -68,6 +68,8 @@ pub struct Core {
     pub log: Vec<String>,
     pub status: Option<String>,
     pub build_choice: Facility,
+    pub selected_base: usize,
+    pub difficulty_choice: ods_geo::Difficulty,
     /// The big spinning world.
     geo_camera: OrbitCamera,
     geo_drag: bool,
@@ -131,6 +133,8 @@ impl Core {
             log: Vec::new(),
             status: None,
             build_choice: Facility::Quarters,
+            selected_base: 0,
+            difficulty_choice: ods_geo::Difficulty::Veteran,
             geo_camera,
             geo_drag: false,
             selected_region: None,

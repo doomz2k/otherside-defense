@@ -25,6 +25,21 @@ impl Region {
         Region::Arctic,
     ];
 
+    /// Rough bounding box (lat_min, lat_max, lon_min, lon_max) for placing
+    /// rifts inside the region on the globe.
+    pub fn bounds(self) -> (f32, f32, f32, f32) {
+        match self {
+            Region::NorthAmerica => (18.0, 60.0, -125.0, -70.0),
+            Region::SouthAmerica => (-45.0, 5.0, -75.0, -40.0),
+            Region::Europe => (38.0, 62.0, -8.0, 35.0),
+            Region::Africa => (-30.0, 28.0, -12.0, 45.0),
+            Region::MiddleEast => (14.0, 40.0, 28.0, 60.0),
+            Region::Asia => (10.0, 60.0, 45.0, 140.0),
+            Region::Oceania => (-42.0, -12.0, 115.0, 175.0),
+            Region::Arctic => (68.0, 80.0, -50.0, 50.0),
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Region::NorthAmerica => "North America",

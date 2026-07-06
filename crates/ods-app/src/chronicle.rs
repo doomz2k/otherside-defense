@@ -42,7 +42,15 @@ pub fn narrate(c: &Campaign, event: &GeoEvent) -> String {
              expenses {expenses}k, treasury {funds}k | salvage: {} brimstone {} hellsteel ===",
             c.brimstone, c.hellsteel
         ),
-        E::CampaignOver { outcome } => format!("{stamp} ### THE ORDER FALLS: {outcome:?} ###"),
+        E::ManufactureComplete { item } => {
+            format!("{stamp} the workshop delivers: {}", item.name())
+        }
+        E::CampaignOver { outcome } => match outcome {
+            ods_geo::CampaignOutcome::Victory => {
+                format!("{stamp} ### THE NAME IS BROKEN — THE ORDER PREVAILS ###")
+            }
+            _ => format!("{stamp} ### THE ORDER FALLS: {outcome:?} ###"),
+        },
     }
 }
 

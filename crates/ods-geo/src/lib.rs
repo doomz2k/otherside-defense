@@ -15,10 +15,11 @@ mod research;
 
 pub use base::{Chapterhouse, Facility, GRID};
 pub use campaign::{
-    Campaign, CampaignOutcome, GeoError, GeoEvent, MissionKind, MissionToken, OCCULTIST_HIRE_COST,
-    SOLDIER_HIRE_COST, Soldier, SoldierStats,
+    ARTIFICER_HIRE_COST, Campaign, CampaignOutcome, CHAPTERHOUSE_COST, Difficulty, Fallen,
+    FINAL_ASSAULT_BRIMSTONE, GeoError, GeoEvent, MissionKind, MissionToken, OCCULTIST_HIRE_COST,
+    Prisoners, SOLDIER_HIRE_COST, Soldier, SoldierStats,
 };
 pub use director::{Nest, Rift, RiftKind};
 pub use geography::Region;
 pub use missions::BattleReport;
-pub use research::Project;
+pub use research::{ManufactureItem, Project, ResearchState};

@@ -18,9 +18,19 @@ pub enum Facility {
     Library,
     /// Doubles the pace of wound recovery (any number, effect is flat).
     Infirmary,
+    /// Hosts 5 artificers' production each.
+    Workshop,
 }
 
 impl Facility {
+    pub const BUILDABLE: [Facility; 5] = [
+        Facility::Quarters,
+        Facility::AugurArray,
+        Facility::Library,
+        Facility::Infirmary,
+        Facility::Workshop,
+    ];
+
     pub fn cost(self) -> i64 {
         match self {
             Facility::Gatehouse => 0,
@@ -28,6 +38,7 @@ impl Facility {
             Facility::AugurArray => 150,
             Facility::Library => 150,
             Facility::Infirmary => 200,
+            Facility::Workshop => 150,
         }
     }
 
@@ -38,6 +49,7 @@ impl Facility {
             Facility::AugurArray => 10,
             Facility::Library => 10,
             Facility::Infirmary => 12,
+            Facility::Workshop => 10,
         }
     }
 
@@ -48,6 +60,7 @@ impl Facility {
             Facility::AugurArray => 10,
             Facility::Library => 10,
             Facility::Infirmary => 15,
+            Facility::Workshop => 10,
         }
     }
 
@@ -58,6 +71,7 @@ impl Facility {
             Facility::AugurArray => "Augur Array",
             Facility::Library => "Library",
             Facility::Infirmary => "Infirmary",
+            Facility::Workshop => "Workshop",
         }
     }
 }
@@ -146,6 +160,10 @@ impl Chapterhouse {
 
     pub fn library_capacity(&self) -> usize {
         5 * self.count_active(Facility::Library)
+    }
+
+    pub fn workshop_capacity(&self) -> usize {
+        5 * self.count_active(Facility::Workshop)
     }
 
     /// Grid coordinates of every built (or building) facility cell — the

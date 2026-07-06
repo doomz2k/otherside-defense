@@ -16,11 +16,15 @@ use crate::research::{Project, ResearchState};
 pub struct BattleReport {
     pub victory: bool,
     pub turns: u32,
-    /// Indexes into the squad passed in, for the fallen.
+    /// Indexes into the squad passed in, for the fallen (including the
+    /// Taken — a soldier walking around as a Husk is not coming home).
     pub dead: Vec<usize>,
     /// (squad index, health remaining, experience) for survivors.
     pub survivors: Vec<(usize, i32, Experience)>,
     pub demons_slain: u32,
+    /// Unconscious demons on a held field: bound and dragged home.
+    pub captured_grunts: u32,
+    pub captured_overseers: u32,
 }
 
 const MAX_AUTO_TURNS: u32 = 40;
@@ -29,11 +33,12 @@ const MAX_AUTO_TURNS: u32 = 40;
 pub(crate) fn build_assault(
     seed: u64,
     squad: &[&Soldier],
+    kits: &[(u32, u32)],
     demon_count: u32,
     strength: u32,
     research: &ResearchState,
 ) -> Battle {
-    scenario::incursion(seed, make_units(squad, research), demon_count, strength)
+    scenario::incursion(seed, make_units(squad, kits, research), demon_count, strength)
 }
 
 /// Build a Reckoning: demons breaching the chapterhouse itself, on a map
@@ -41,12 +46,13 @@ pub(crate) fn build_assault(
 pub(crate) fn build_defense(
     seed: u64,
     squad: &[&Soldier],
+    kits: &[(u32, u32)],
     demon_count: u32,
     research: &ResearchState,
     cells: &[(usize, usize)],
     gate: (usize, usize),
 ) -> Battle {
-    scenario::base_defense(seed, make_units(squad, research), demon_count, cells, gate)
+    scenario::base_defense(seed, make_units(squad, kits, research), demon_count, cells, gate)
 }
 
 /// Drive a battle to its end with AI on both sides.
@@ -65,44 +71,62 @@ pub(crate) fn run_auto(battle: &mut Battle) -> u32 {
 /// Read a finished (or abandoned) battle back into a campaign-level report.
 /// A battle with no winner counts as a withdrawal: the demons hold the field.
 pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
+    use ods_sim::units::Species;
+
     let demons_total = (battle.units.len() - squad_len) as u32;
+    let victory = battle.winner == Some(Side::Order);
 
     let mut dead = Vec::new();
     let mut survivors = Vec::new();
     for i in 0..squad_len {
         let u = &battle.units[i];
-        if u.alive {
+        // A Taken soldier is alive, walking, and lost forever.
+        if u.alive && u.side == Side::Order {
             survivors.push((i, u.health, battle.experience(UnitId(i as u32))));
         } else {
             dead.push(i);
         }
     }
 
+    let (mut captured_grunts, mut captured_overseers) = (0, 0);
+    if victory {
+        for u in battle.units.iter().skip(squad_len) {
+            if u.alive && !u.conscious && u.side == Side::Demons {
+                match u.species {
+                    Species::Overseer => captured_overseers += 1,
+                    _ => captured_grunts += 1,
+                }
+            }
+        }
+    }
+
     BattleReport {
-        victory: battle.winner == Some(Side::Order),
+        victory,
         turns: battle.turn,
         dead,
         survivors,
-        demons_slain: demons_total - battle.living(Side::Demons).count() as u32,
+        demons_slain: demons_total.saturating_sub(battle.living(Side::Demons).count() as u32),
+        captured_grunts,
+        captured_overseers,
     }
 }
 
-fn make_units(squad: &[&Soldier], research: &ResearchState) -> Vec<Unit> {
+fn make_units(squad: &[&Soldier], kits: &[(u32, u32)], research: &ResearchState) -> Vec<Unit> {
     squad
         .iter()
+        .zip(kits)
         .enumerate()
-        .map(|(i, s)| make_unit(i as u32, s, research))
+        .map(|(i, (s, &kit))| make_unit(i as u32, s, kit, research))
         .collect()
 }
 
-fn make_unit(id: u32, s: &Soldier, research: &ResearchState) -> Unit {
+fn make_unit(id: u32, s: &Soldier, kit: (u32, u32), research: &ResearchState) -> Unit {
     // Placeholder tile; the scenario builders assign the real deployment.
     let mut u = Unit::soldier(id, &s.name, glam::IVec3::ZERO);
     u.tu_max = s.stats.tu;
-    u.tu = s.stats.tu;
     u.reactions = s.stats.reactions;
     u.accuracy = s.stats.accuracy;
-    u.bravery = s.stats.bravery;
+    u.bravery = (s.stats.bravery + s.rank_bravery()).min(95);
     u.health_max = s.stats.health;
     if research.is_complete(Project::HellsteelPlate) {
         u.health_max += 8;
@@ -113,5 +137,13 @@ fn make_unit(id: u32, s: &Soldier, research: &ResearchState) -> Unit {
     } else if research.is_complete(Project::BlessedArms) {
         u.weapon.power += 8;
     }
+    let (grenades, dressings) = kit;
+    u.grenades = grenades;
+    u.heal_charges = dressings;
+    // An overloaded pack slows the hand.
+    if grenades + dressings > 5 {
+        u.tu_max -= 4;
+    }
+    u.tu = u.tu_max;
     u
 }
