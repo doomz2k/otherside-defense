@@ -21,6 +21,14 @@ pub const MAT_WALL: Voxel = Voxel(2);
 pub const MAT_RUBBLE: Voxel = Voxel(3);
 /// Door leaf: a thin blocking slab until opened (or blown apart).
 pub const MAT_DOOR: Voxel = Voxel(5);
+/// Fuel cask: detonates when its shell is breached.
+pub const MAT_CASK: Voxel = Voxel(6);
+/// Brimstone pool: ignites at a spark.
+pub const MAT_POOL: Voxel = Voxel(7);
+/// Nest flesh: the living walls of a demon warren.
+pub const MAT_FLESH: Voxel = Voxel(8);
+/// Otherside obsidian.
+pub const MAT_OBSIDIAN: Voxel = Voxel(9);
 /// The rift obelisk: hell's anchor into the world. Demolish it to win.
 pub const MAT_OBELISK: Voxel = Voxel(4);
 
@@ -103,10 +111,13 @@ pub fn demon_pack(count: u32, strength: u32, first_id: u32, spawns: &[(i32, i32)
             Unit::taker(id, "The Taker", tile)
         } else if strength >= 10 && i == 2 {
             Unit::overseer(id, &format!("Overseer of {name}"), tile)
+        } else if strength >= 8 && i == 2 {
+            Unit::behemoth(id, &format!("Behemoth of {name}"), tile)
         } else if strength >= 3 {
-            match i % 4 {
+            match i % 5 {
                 2 => Unit::hellhound(id, &format!("Hound of {name}"), tile),
                 3 => Unit::bile_wisp(id, &format!("Wisp of {name}"), tile),
+                4 if strength >= 4 => Unit::gargoyle(id, &format!("Gargoyle of {name}"), tile),
                 _ => Unit::imp(id, &format!("Imp of {name}"), tile),
             }
         } else {
@@ -139,17 +150,67 @@ pub fn incursion_with_civilians(
         IVec3::new(MAP_TILES.x * TILE_VOXELS, MAP_TILES.y * TILE_VOXELS, GROUND_TOP),
         MAT_GROUND,
     );
-    for tx in 9..=14 {
-        for ty in 8..=15 {
-            let on_ring = tx == 9 || tx == 14 || ty == 8 || ty == 15;
-            let doorway = (tx == 9 && ty == 11) || (tx == 14 && ty == 12);
-            if on_ring && !doorway {
-                fill_tile_walls(&mut world, IVec3::new(tx, ty, 0), MAT_WALL);
+    match seed % 3 {
+        0 => {
+            // The chapel yard (the original).
+            for tx in 9..=14 {
+                for ty in 8..=15 {
+                    let on_ring = tx == 9 || tx == 14 || ty == 8 || ty == 15;
+                    let doorway = (tx == 9 && ty == 11) || (tx == 14 && ty == 12);
+                    if on_ring && !doorway {
+                        fill_tile_walls(&mut world, IVec3::new(tx, ty, 0), MAT_WALL);
+                    }
+                }
+            }
+            for ty in [3, 4, 5, 6, 17, 18, 19, 20] {
+                fill_tile_walls(&mut world, IVec3::new(6, ty, 0), MAT_WALL);
+            }
+        }
+        1 => {
+            // Twin ruins: two gutted farmhouses on the approach.
+            for (bx, by) in [(7, 4), (10, 14)] {
+                for tx in bx..bx + 4 {
+                    for ty in by..by + 5 {
+                        let ring = tx == bx || tx == bx + 3 || ty == by || ty == by + 4;
+                        let doorway = tx == bx && ty == by + 2;
+                        if ring && !doorway {
+                            fill_tile_walls(&mut world, IVec3::new(tx, ty, 0), MAT_WALL);
+                        }
+                    }
+                }
+            }
+            for ty in [8, 9, 10, 11] {
+                fill_tile_walls(&mut world, IVec3::new(15, ty, 0), MAT_WALL);
+            }
+        }
+        _ => {
+            // The shattered street: rubble rows and abandoned fuel casks.
+            for ty in [5, 11, 17] {
+                for tx in [7, 8, 10, 11, 13, 14] {
+                    let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
+                    world.fill_box(
+                        o + IVec3::new(2, 2, GROUND_TOP),
+                        o + IVec3::new(14, 14, 10),
+                        MAT_RUBBLE,
+                    );
+                }
+            }
+            for tx in 9..=12 {
+                fill_tile_walls(&mut world, IVec3::new(tx, 8, 0), MAT_WALL);
+                fill_tile_walls(&mut world, IVec3::new(tx, 14, 0), MAT_WALL);
             }
         }
     }
-    for ty in [3, 4, 5, 6, 17, 18, 19, 20] {
-        fill_tile_walls(&mut world, IVec3::new(6, ty, 0), MAT_WALL);
+    // Fuel casks wait wherever men once worked.
+    let mut hazard_casks = Vec::new();
+    for (tx, ty) in [(8, 7), (13, 16)] {
+        let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
+        world.fill_box(
+            o + IVec3::new(5, 5, GROUND_TOP),
+            o + IVec3::new(11, 11, GROUND_TOP + 7),
+            MAT_CASK,
+        );
+        hazard_casks.push(IVec3::new(tx, ty, 0));
     }
 
     // A gutted watchtower: raised floor reached over a rubble mound. High
@@ -217,7 +278,135 @@ pub fn incursion_with_civilians(
     for tile in door_tiles {
         battle.doors.push((tile, false));
     }
+    for tile in hazard_casks {
+        battle.register_cask(tile);
+    }
     battle.set_objective(obelisk_min, obelisk_max);
+    battle
+}
+
+/// A demon warren: tunnels gnawed through living flesh, with the nest-heart
+/// pulsing at the deep end. Demolish the heart or kill everything.
+pub fn nest_map(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32, strength: u32) -> Battle {
+    let mut world = VoxelWorld::new();
+    let span = IVec3::new(MAP_TILES.x * TILE_VOXELS, MAP_TILES.y * TILE_VOXELS, GROUND_TOP);
+    world.fill_box(IVec3::ZERO, span, MAT_GROUND);
+    // Solid flesh, then gnaw the warren out of it.
+    world.fill_box(
+        IVec3::new(0, 0, GROUND_TOP),
+        IVec3::new(MAP_TILES.x * TILE_VOXELS, MAP_TILES.y * TILE_VOXELS, 14),
+        MAT_FLESH,
+    );
+    let carve_tile = |world: &mut VoxelWorld, tx: i32, ty: i32| {
+        let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
+        world.fill_box(
+            o + IVec3::new(0, 0, GROUND_TOP),
+            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, 14),
+            Voxel::EMPTY,
+        );
+    };
+    // Main gullet, winding east, with side chambers.
+    let mut rng = crate::SimRng::from_seed(seed);
+    let mut y = 11i32;
+    for x in 1..22 {
+        carve_tile(&mut world, x, y);
+        carve_tile(&mut world, x, y + 1);
+        if x % 3 == 0 {
+            y = (y + rng.roll(3) as i32 - 1).clamp(3, 19);
+        }
+        if x % 6 == 2 {
+            for cy in (y - 2)..=(y + 3) {
+                carve_tile(&mut world, x, cy.clamp(1, 22));
+            }
+        }
+    }
+    for (cx, cy) in [(5, 5), (12, 18), (19, 6)] {
+        for tx in cx - 1..=cx + 1 {
+            for ty in cy - 1..=cy + 1 {
+                carve_tile(&mut world, tx, ty);
+            }
+        }
+        // A tunnel back to the gullet.
+        for ty in cy.min(y)..=cy.max(y) {
+            carve_tile(&mut world, cx, ty);
+        }
+    }
+    // The nest-heart, deep east.
+    let heart_min = IVec3::new(21 * TILE_VOXELS, 11 * TILE_VOXELS, GROUND_TOP);
+    let heart_max = IVec3::new(22 * TILE_VOXELS, 13 * TILE_VOXELS, 20);
+    for tx in 20..=22 {
+        for ty in 10..=13 {
+            carve_tile(&mut world, tx, ty);
+        }
+    }
+    world.fill_box(heart_min, heart_max, MAT_FLESH);
+
+    soldiers.truncate(4);
+    let mut units = Vec::new();
+    for (i, mut s) in soldiers.into_iter().enumerate() {
+        s.id = crate::units::UnitId(units.len() as u32);
+        s.tile = IVec3::new(1, 11 + (i as i32 % 2), 0);
+        units.push(s);
+    }
+    let spawns: [(i32, i32); 8] =
+        [(5, 5), (12, 18), (19, 6), (20, 10), (20, 13), (12, 19), (5, 4), (19, 7)];
+    units.extend(demon_pack(demon_count, strength, units.len() as u32, &spawns));
+
+    let mut battle = Battle::new(world, IVec3::ZERO, MAP_TILES, units, seed);
+    battle.set_objective(heart_min, heart_max);
+    battle
+}
+
+/// The Otherside: obsidian, ash, and burning ground under no sun.
+pub fn otherside(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32, strength: u32) -> Battle {
+    let mut world = VoxelWorld::new();
+    world.fill_box(
+        IVec3::ZERO,
+        IVec3::new(MAP_TILES.x * TILE_VOXELS, MAP_TILES.y * TILE_VOXELS, GROUND_TOP),
+        MAT_OBSIDIAN,
+    );
+    // Obsidian spires and ash drifts.
+    for (tx, ty) in [(6, 5), (9, 12), (14, 7), (16, 16), (11, 19), (18, 3), (7, 18)] {
+        fill_tile_walls(&mut world, IVec3::new(tx, ty, 0), MAT_OBSIDIAN);
+    }
+    for (tx, ty) in [(5, 10), (12, 4), (15, 12), (10, 16), (18, 9)] {
+        let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
+        world.fill_box(
+            o + IVec3::new(2, 2, GROUND_TOP),
+            o + IVec3::new(14, 14, 10),
+            MAT_RUBBLE,
+        );
+    }
+    // Brimstone seeps everywhere here.
+    let pool_tiles = [(8, 8), (13, 14), (17, 6), (6, 14), (15, 18), (19, 12)];
+    for &(tx, ty) in &pool_tiles {
+        let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
+        world.fill_box(
+            o + IVec3::new(1, 1, GROUND_TOP - 1),
+            o + IVec3::new(15, 15, GROUND_TOP),
+            MAT_POOL,
+        );
+    }
+    // The throne of the Name.
+    let throne_min = IVec3::new(22 * TILE_VOXELS, 11 * TILE_VOXELS, GROUND_TOP);
+    let throne_max = IVec3::new(23 * TILE_VOXELS, 13 * TILE_VOXELS, 26);
+    world.fill_box(throne_min, throne_max, MAT_FLESH);
+
+    soldiers.truncate(ORDER_SPAWNS.len());
+    let mut units = Vec::new();
+    for (i, mut s) in soldiers.into_iter().enumerate() {
+        s.id = crate::units::UnitId(units.len() as u32);
+        let (x, y) = ORDER_SPAWNS[i];
+        s.tile = IVec3::new(x, y, 0);
+        units.push(s);
+    }
+    units.extend(demon_pack(demon_count, strength, units.len() as u32, &DEMON_SPAWNS));
+
+    let mut battle = Battle::new(world, IVec3::ZERO, MAP_TILES, units, seed);
+    for &(tx, ty) in &pool_tiles {
+        battle.register_pool(IVec3::new(tx, ty, 0));
+    }
+    battle.set_objective(throne_min, throne_max);
     battle
 }
 
@@ -536,6 +725,84 @@ mod tests {
     }
 
     #[test]
+    fn gargoyles_fly_and_behemoths_smash() {
+        use crate::battle::{Action, Event};
+        use crate::units::UnitId;
+
+        // Gargoyle perched beside the chapel flies straight over the wall.
+        let mut units = vec![Unit::soldier(0, "S", glam::IVec3::ZERO)];
+        units[0].tile = glam::IVec3::new(2, 2, 0);
+        let mut b = super::incursion(3, units, 0, 1); // chapel variant (3 % 3 == 0)
+        let g = b.units.len() as u32;
+        b.units.push(Unit::gargoyle(g, "Gargoyle", glam::IVec3::new(8, 11, 0)));
+        b.xp_push_for_test();
+        b.perform(Action::EndTurn).unwrap();
+        // Fly INTO the chapel over the wall ring: walkers would need the door.
+        let inside = glam::IVec3::new(11, 11, 0);
+        let ev = b.perform(Action::Move { unit: UnitId(g), to: inside });
+        assert!(ev.is_ok(), "wings ignore walls: {ev:?}");
+        assert_eq!(b.units[g as usize].tile, inside);
+
+        // Behemoth walks THROUGH the chapel wall, leaving a hole.
+        let mut units = vec![Unit::soldier(0, "S", glam::IVec3::ZERO)];
+        units[0].tile = glam::IVec3::new(2, 2, 0);
+        let mut b = super::incursion(3, units, 0, 1);
+        let m = b.units.len() as u32;
+        b.units.push(Unit::behemoth(m, "Behemoth", glam::IVec3::new(8, 9, 0)));
+        b.xp_push_for_test();
+        b.perform(Action::EndTurn).unwrap();
+        let wall = glam::IVec3::new(9, 9, 0);
+        assert!(!b.tiles.is_walkable(wall));
+        let ev = b
+            .perform(Action::Move { unit: UnitId(m), to: wall })
+            .unwrap();
+        assert!(
+            ev.iter().any(|e| matches!(e, Event::WallSmashed { .. })),
+            "{ev:?}"
+        );
+        assert!(b.tiles.is_walkable(wall), "the wall is a doorway now");
+    }
+
+    #[test]
+    fn casks_detonate_when_breached() {
+        use crate::battle::{Action, Event};
+        use crate::units::UnitId;
+
+        let mut soldiers = vec![Unit::soldier(0, "S", glam::IVec3::ZERO)];
+        soldiers[0].grenades = 2;
+        let mut b = super::incursion(3, soldiers, 0, 1);
+        let cask = glam::IVec3::new(8, 7, 0); // placed by the generator
+        b.units[0].tile = glam::IVec3::new(5, 7, 0);
+        let events = b
+            .perform(Action::Throw { unit: UnitId(0), at: cask })
+            .unwrap();
+        let blasts = events
+            .iter()
+            .filter(|e| matches!(e, Event::Exploded { .. }))
+            .count();
+        assert!(blasts >= 2, "the grenade and the cask both go up: {events:?}");
+    }
+
+    #[test]
+    fn nest_and_otherside_maps_deploy_sanely() {
+        let squad = |n: u32| -> Vec<Unit> {
+            (0..n).map(|i| Unit::soldier(i, &format!("S{i}"), glam::IVec3::ZERO)).collect()
+        };
+        let b = super::nest_map(11, squad(4), 5, 6);
+        assert!(b.objective.is_some(), "the heart is the objective");
+        for u in &b.units {
+            let ok = if u.flies { b.tiles.is_open_air(u.tile) } else { b.tiles.is_walkable(u.tile) };
+            assert!(ok, "{} stuck in flesh at {}", u.name, u.tile);
+        }
+        let b = super::otherside(13, squad(6), 7, 10);
+        assert!(b.units.iter().any(|u| u.species == crate::units::Species::Prince));
+        assert!(!b.pools.is_empty(), "brimstone seeps everywhere there");
+        for u in &b.units {
+            assert!(b.tiles.is_walkable(u.tile), "{} in obsidian", u.name);
+        }
+    }
+
+    #[test]
     fn full_ai_battle_runs_to_completion_or_stalemate_guard() {
         use crate::ai::run_demon_turn;
         use crate::battle::Action;
@@ -544,7 +811,7 @@ mod tests {
         // Order AI stand-in: every soldier shoots the nearest visible imp or
         // advances east; then the demon AI plays. The battle must resolve
         // (someone wins) well within 40 turns.
-        let mut b = skirmish(2024);
+        let mut b = skirmish(2025);
         for _turn in 0..40 {
             if b.winner.is_some() {
                 break;

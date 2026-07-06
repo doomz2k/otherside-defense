@@ -60,6 +60,10 @@ const PRINCE_DARK: [f32; 4] = [0.08, 0.03, 0.10, 1.0];
 const GOLD: [f32; 4] = [0.95, 0.78, 0.25, 1.0];
 const ASH: [f32; 4] = [0.70, 0.65, 0.72, 1.0];
 const CIVVY: [f32; 4] = [0.55, 0.42, 0.28, 1.0];
+const GARG: [f32; 4] = [0.42, 0.42, 0.48, 1.0];
+const GARG_DARK: [f32; 4] = [0.28, 0.28, 0.34, 1.0];
+const BEHE: [f32; 4] = [0.42, 0.20, 0.12, 1.0];
+const BEHE_DARK: [f32; 4] = [0.28, 0.13, 0.08, 1.0];
 
 /// The anatomy-tagged geometry of each species.
 pub fn blueprint(species: Species) -> &'static [PartBox] {
@@ -150,6 +154,31 @@ pub fn blueprint(species: Species) -> &'static [PartBox] {
             pb(Horns, (1.5, -0.5, 12.0), (2.8, 0.5, 14.8), GOLD),
             pb(Wings, (-6.5, -2.6, 6.0), (-3.2, -1.8, 12.5), PRINCE_DARK),
             pb(Wings, (3.2, -2.6, 6.0), (6.5, -1.8, 12.5), PRINCE_DARK),
+        ];
+            P
+        }
+        Species::Gargoyle => {
+            const P: &[PartBox] = &[
+            pb(Torso, (-2.0, -1.5, 3.0), (2.0, 1.5, 6.5), GARG),
+            pb(Head, (-1.4, 1.0, 6.0), (1.4, 2.8, 8.2), GARG),
+            pb(LeftArm, (-3.0, -0.8, 2.0), (-2.0, 0.8, 6.0), GARG_DARK),
+            pb(RightArm, (2.0, -0.8, 2.0), (3.0, 0.8, 6.0), GARG_DARK),
+            pb(Wings, (-5.5, -1.8, 4.0), (-2.0, -1.0, 9.5), GARG_DARK),
+            pb(Wings, (2.0, -1.8, 4.0), (5.5, -1.0, 9.5), GARG_DARK),
+            pb(Tail, (-0.4, -4.5, 3.0), (0.4, -1.5, 4.0), GARG_DARK),
+        ];
+            P
+        }
+        Species::Behemoth => {
+            const P: &[PartBox] = &[
+            pb(LeftLeg, (-5.0, -2.0, 0.0), (-2.0, 2.0, 5.0), BEHE_DARK),
+            pb(RightLeg, (2.0, -2.0, 0.0), (5.0, 2.0, 5.0), BEHE_DARK),
+            pb(Torso, (-6.0, -3.0, 5.0), (6.0, 3.0, 12.0), BEHE),
+            pb(LeftArm, (-7.8, -2.0, 3.0), (-6.0, 2.0, 11.0), BEHE_DARK),
+            pb(RightArm, (6.0, -2.0, 3.0), (7.8, 2.0, 11.0), BEHE_DARK),
+            pb(Head, (-2.2, 3.0, 9.0), (2.2, 5.5, 13.0), BEHE),
+            pb(Horns, (-3.4, 3.2, 12.0), (-2.2, 4.2, 14.8), HORN),
+            pb(Horns, (2.2, 3.2, 12.0), (3.4, 4.2, 14.8), HORN),
         ];
             P
         }

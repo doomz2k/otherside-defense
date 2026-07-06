@@ -17,15 +17,17 @@ const VOXEL_SHADER: &str = r#"
 struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
-var<private> PALETTE: array<vec3<f32>, 8> = array<vec3<f32>, 8>(
+var<private> PALETTE: array<vec3<f32>, 10> = array<vec3<f32>, 10>(
     vec3<f32>(1.0, 0.0, 1.0),    // 0: unused (empty)
     vec3<f32>(0.42, 0.41, 0.38), // 1: ground stone
     vec3<f32>(0.45, 0.27, 0.22), // 2: chapel brick
     vec3<f32>(0.33, 0.31, 0.27), // 3: rubble
-    vec3<f32>(0.30, 0.45, 0.30), // 4: reserved
-    vec3<f32>(0.50, 0.45, 0.20), // 5: reserved
-    vec3<f32>(0.25, 0.42, 0.68), // 6: Order soldier
-    vec3<f32>(0.78, 0.20, 0.16)  // 7: imp
+    vec3<f32>(0.30, 0.45, 0.30), // 4: rift obelisk
+    vec3<f32>(0.35, 0.22, 0.12), // 5: door timber
+    vec3<f32>(0.55, 0.15, 0.12), // 6: fuel cask
+    vec3<f32>(0.85, 0.55, 0.10), // 7: brimstone pool
+    vec3<f32>(0.48, 0.16, 0.28), // 8: nest flesh
+    vec3<f32>(0.10, 0.09, 0.13)  // 9: obsidian
 );
 
 struct VsIn {
@@ -51,7 +53,7 @@ fn vs_main(in: VsIn) -> VsOut {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ndl = max(dot(normalize(in.normal), camera.sun.xyz), 0.0);
-    let base = PALETTE[min(in.material, 7u)];
+    let base = PALETTE[min(in.material, 9u)];
     let lit = base * (0.35 + 0.65 * ndl);
     return vec4<f32>(lit, 1.0);
 }

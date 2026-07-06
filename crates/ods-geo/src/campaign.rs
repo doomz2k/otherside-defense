@@ -79,6 +79,44 @@ pub struct Prisoners {
     pub overseers: u32,
 }
 
+/// Born tendencies: every recruit is somebody.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Quirk {
+    /// +8 accuracy.
+    Marksman,
+    /// -10 bravery, +8 reactions: scared people notice things.
+    Jumpy,
+    /// +15 bravery.
+    IronNerves,
+    /// Heavy packs cost nothing.
+    PackMule,
+    /// +5 TU.
+    Swift,
+}
+
+impl Quirk {
+    pub fn name(self) -> &'static str {
+        match self {
+            Quirk::Marksman => "Marksman",
+            Quirk::Jumpy => "Jumpy",
+            Quirk::IronNerves => "Iron Nerves",
+            Quirk::PackMule => "Pack Mule",
+            Quirk::Swift => "Swift",
+        }
+    }
+}
+
+/// A lasting scar's permanent cost.
+fn apply_scar(stats: &mut SoldierStats, part: ods_sim::body::BodyPart) {
+    use ods_sim::body::BodyPart as P;
+    match part {
+        P::LeftArm | P::RightArm | P::Weapon => stats.accuracy = (stats.accuracy - 8).max(20),
+        P::LeftLeg | P::RightLeg => stats.tu = (stats.tu - 5).max(35),
+        P::Head => stats.bravery = (stats.bravery - 6).max(5),
+        _ => stats.health = (stats.health - 3).max(15),
+    }
+}
+
 /// A funding nation's demand: banish rifts in their region this month.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouncilRequest {
@@ -128,6 +166,12 @@ pub struct Soldier {
     /// Rift id this soldier is warding (unavailable for squads).
     #[serde(default)]
     pub warding: Option<u32>,
+    /// Wounds that never healed right (permanent until grafted).
+    #[serde(default)]
+    pub scars: Vec<ods_sim::body::BodyPart>,
+    /// The quirk this one was born with.
+    #[serde(default)]
+    pub quirk: Option<Quirk>,
 }
 
 impl Soldier {
@@ -453,6 +497,15 @@ impl Campaign {
             has_lance: false,
             home: 0,
             warding: None,
+            scars: Vec::new(),
+            quirk: match self.rng.roll(10) {
+                0 => Some(Quirk::Marksman),
+                1 => Some(Quirk::Jumpy),
+                2 => Some(Quirk::IronNerves),
+                3 => Some(Quirk::PackMule),
+                4 => Some(Quirk::Swift),
+                _ => None,
+            },
         }
     }
 
@@ -797,17 +850,40 @@ impl Campaign {
                 self.bases[0].gate(),
             )
         } else {
-            let civilians = match kind {
-                MissionKind::Rift(id) => {
-                    let terror = self
-                        .rifts
-                        .iter()
-                        .any(|r| r.id == id && r.kind == RiftKind::Terror);
-                    if terror { 4 } else { 0 }
+            match kind {
+                MissionKind::Nest(_) => {
+                    missions::build_nest(seed, &squad, &kits, garrison, strength, &self.research)
                 }
-                _ => 0,
-            };
-            missions::build_assault(seed, &squad, &kits, garrison, strength, civilians, &self.research)
+                MissionKind::FinalAssault | MissionKind::FinalSanctum => missions::build_otherside(
+                    seed,
+                    &squad,
+                    &kits,
+                    garrison,
+                    strength,
+                    &self.research,
+                ),
+                _ => {
+                    let civilians = match kind {
+                        MissionKind::Rift(id) => {
+                            let terror = self
+                                .rifts
+                                .iter()
+                                .any(|r| r.id == id && r.kind == RiftKind::Terror);
+                            if terror { 4 } else { 0 }
+                        }
+                        _ => 0,
+                    };
+                    missions::build_assault(
+                        seed,
+                        &squad,
+                        &kits,
+                        garrison,
+                        strength,
+                        civilians,
+                        &self.research,
+                    )
+                }
+            }
         };
 
         // Vision: assaults on the night side of the world are fought at
@@ -943,6 +1019,26 @@ impl Campaign {
             s.missions += 1;
             s.kills += xp.kills;
             apply_growth(&mut s.stats, xp);
+        }
+        // Crippled parts may never heal right: lasting scars.
+        for (squad_pos, parts) in &report.injuries {
+            for part in parts {
+                let idx = squad_idx[*squad_pos];
+                let s = &mut self.soldiers[idx];
+                s.recovery_days += 3;
+                if self.rng.roll(100) < 50 && !s.scars.contains(part) {
+                    s.scars.push(*part);
+                    apply_scar(&mut self.soldiers[idx].stats, *part);
+                }
+            }
+        }
+        // The field is held: recover the lances of the fallen.
+        if report.victory {
+            for &p in &report.dead {
+                if self.soldiers[squad_idx[p]].has_lance {
+                    self.lance_stock += 1;
+                }
+            }
         }
         let mut dead_roster: Vec<usize> = report.dead.iter().map(|&p| squad_idx[p]).collect();
         dead_roster.sort_unstable_by(|a, b| b.cmp(a));

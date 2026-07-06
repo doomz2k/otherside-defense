@@ -40,6 +40,10 @@ pub enum Species {
     Husk,
     /// A lord of the Otherside: psi mastery up to full possession.
     Prince,
+    /// Winged skirmisher: true flight, perches where it pleases.
+    Gargoyle,
+    /// A siege-beast that walks through walls and leaves rubble.
+    Behemoth,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -187,6 +191,12 @@ pub struct Unit {
     pub smoke_grenades: u32,
     /// Non-combatant caught in the massacre (soldier-shaped, unarmed).
     pub civilian: bool,
+    /// True flight: ignores floors, ramps, and drops.
+    pub flies: bool,
+    /// Walks through walls, demolishing them (Behemoths).
+    pub smasher: bool,
+    /// Unconscious ally being hauled (their tile follows the carrier).
+    pub carrying: Option<UnitId>,
     pub weapon: Weapon,
     /// Open fatal wounds; each bleeds 1 health at the unit's turn start.
     pub wounds: i32,
@@ -228,6 +238,9 @@ impl Unit {
             possessed: 0,
             smoke_grenades: 0,
             civilian: false,
+            flies: false,
+            smasher: false,
+            carrying: None,
             weapon: hellspit(),
             wounds: 0,
             grenades: 0,
@@ -293,6 +306,42 @@ impl Unit {
             armor_side: 1,
             armor_rear: 1,
             ..Self::base(id, Side::Demons, Species::Overseer, name, tile)
+        }
+    }
+
+    pub fn gargoyle(id: u32, name: &str, tile: IVec3) -> Self {
+        Self {
+            tu_max: 60,
+            tu: 60,
+            health_max: 22,
+            health: 22,
+            reactions: 50,
+            accuracy: 55,
+            bravery: 65,
+            weapon: claw("stone talons", 20),
+            flies: true,
+            armor_front: 3,
+            armor_side: 2,
+            armor_rear: 2,
+            ..Self::base(id, Side::Demons, Species::Gargoyle, name, tile)
+        }
+    }
+
+    pub fn behemoth(id: u32, name: &str, tile: IVec3) -> Self {
+        Self {
+            tu_max: 50,
+            tu: 50,
+            health_max: 70,
+            health: 70,
+            reactions: 25,
+            accuracy: 55,
+            bravery: 100,
+            weapon: claw("crushing fists", 40),
+            smasher: true,
+            armor_front: 8,
+            armor_side: 6,
+            armor_rear: 4,
+            ..Self::base(id, Side::Demons, Species::Behemoth, name, tile)
         }
     }
 

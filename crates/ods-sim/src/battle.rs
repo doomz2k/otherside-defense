@@ -7,7 +7,7 @@ use glam::{IVec3, Vec3};
 use ods_voxel::VoxelWorld;
 
 use crate::body::BodyPart;
-use crate::tiles::{TileMap, step_cost};
+use crate::tiles::{PathMode, TileMap, step_cost};
 use crate::units::{FireMode, Side, Species, Unit, UnitId};
 use crate::{SimRng, TILE_VOXELS};
 
@@ -78,6 +78,17 @@ pub enum Event {
     Taken { unit: UnitId },
     /// A destroyed Husk splits open: a fresh Taker is born.
     Hatched { unit: UnitId },
+    /// A Behemoth shoulders straight through masonry.
+    WallSmashed { at: IVec3, voxels: usize },
+    /// The floor went out from under someone.
+    Fell { unit: UnitId, to: IVec3 },
+    /// Hauling a downed comrade.
+    CarriedUp { unit: UnitId, carried: UnitId },
+    SetDown { unit: UnitId, carried: UnitId },
+    /// Recovered a weapon from the fallen.
+    Scavenged { unit: UnitId },
+    /// Something moved out there, unseen. Rough bearing only.
+    NoiseInDark { near: IVec3 },
     /// The rift obelisk is demolished; the incursion collapses.
     ObjectiveDestroyed,
     /// A body part is crippled by a heavy hit.
@@ -122,6 +133,12 @@ pub enum Action {
     OpenDoor { unit: UnitId, at: IVec3 },
     /// Seize an enemy mind outright (Princes): it acts for you next turn.
     Possess { unit: UnitId, target: UnitId },
+    /// Haul an adjacent unconscious ally onto your shoulders.
+    PickUp { unit: UnitId, target: UnitId },
+    /// Set the carried body down on an adjacent open tile.
+    PutDown { unit: UnitId, at: IVec3 },
+    /// Take a weapon from a fallen soldier on or beside your tile (8 TU).
+    Scavenge { unit: UnitId },
     EndTurn,
 }
 
@@ -185,6 +202,7 @@ fn cheb(a: IVec3, b: IVec3) -> i32 {
 /// stat growth (applied by the campaign layer, not here).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Experience {
+    pub shots_fired: u32,
     pub shots_hit: u32,
     pub reaction_shots: u32,
     pub kills: u32,
@@ -217,6 +235,14 @@ pub struct Battle {
     pub clouds: Vec<(IVec3, CloudKind, u32)>,
     /// Door tiles: (tile, opened).
     pub doors: Vec<(IVec3, bool)>,
+    /// Fuel casks: (tile, initial shell voxels, still live).
+    pub casks: Vec<(IVec3, usize, bool)>,
+    /// Brimstone pools: (tile, ignited).
+    pub pools: Vec<(IVec3, bool)>,
+    /// The loudest recent violence (demons investigate it).
+    pub last_noise: Option<IVec3>,
+    /// Unseen demon movement this enemy turn (flushed as cues).
+    heard: Vec<IVec3>,
     xp: Vec<Experience>,
     rng: SimRng,
 }
@@ -243,6 +269,10 @@ impl Battle {
             charges: Vec::new(),
             clouds: Vec::new(),
             doors: Vec::new(),
+            casks: Vec::new(),
+            pools: Vec::new(),
+            last_noise: None,
+            heard: Vec::new(),
             xp,
             rng: SimRng::from_seed(seed),
         }
@@ -307,6 +337,18 @@ impl Battle {
             }
         }
         count
+    }
+
+    #[cfg(test)]
+    pub fn settle_units_for_test(&mut self, events: &mut Vec<Event>) {
+        self.settle_units(events);
+    }
+
+    #[cfg(test)]
+    pub fn xp_push_for_test(&mut self) {
+        while self.xp.len() < self.units.len() {
+            self.xp.push(Experience::default());
+        }
     }
 
     #[cfg(test)]
@@ -441,6 +483,9 @@ impl Battle {
             Action::ThrowSmoke { unit, at } => self.do_throw_smoke(unit, at),
             Action::OpenDoor { unit, at } => self.do_open_door(unit, at),
             Action::Possess { unit, target } => self.do_possess(unit, target),
+            Action::PickUp { unit, target } => self.do_pick_up(unit, target),
+            Action::PutDown { unit, at } => self.do_put_down(unit, at),
+            Action::Scavenge { unit } => self.do_scavenge(unit),
             Action::EndTurn => Ok(self.end_turn()),
         }
     }
@@ -542,6 +587,148 @@ impl Battle {
         self.tiles
             .rederive_region(&self.world, o, o + IVec3::splat(TILE_VOXELS));
         Ok(vec![Event::DoorOpened { at }])
+    }
+
+    fn do_pick_up(&mut self, id: UnitId, target: UnitId) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        if self.unit(id).carrying.is_some() {
+            return Err(ActionError::BadTarget);
+        }
+        let t = self.unit(target);
+        if !t.alive || t.conscious || t.side != self.unit(id).side {
+            return Err(ActionError::BadTarget);
+        }
+        if cheb(self.unit(id).tile, t.tile) > 1 {
+            return Err(ActionError::NotAdjacent);
+        }
+        if self.unit(id).tu < 8 {
+            return Err(ActionError::NotEnoughTu);
+        }
+        self.unit_mut(id).tu -= 8;
+        self.unit_mut(id).carrying = Some(target);
+        let tile = self.unit(id).tile;
+        self.unit_mut(target).tile = tile;
+        Ok(vec![Event::CarriedUp { unit: id, carried: target }])
+    }
+
+    fn do_put_down(&mut self, id: UnitId, at: IVec3) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        let Some(carried) = self.unit(id).carrying else {
+            return Err(ActionError::BadTarget);
+        };
+        if cheb(self.unit(id).tile, at) > 1
+            || !self.tiles.is_walkable(at)
+            || self.unit_at(at).is_some()
+        {
+            return Err(ActionError::BadTarget);
+        }
+        if self.unit(id).tu < 4 {
+            return Err(ActionError::NotEnoughTu);
+        }
+        self.unit_mut(id).tu -= 4;
+        self.unit_mut(id).carrying = None;
+        self.unit_mut(carried).tile = at;
+        Ok(vec![Event::SetDown { unit: id, carried }])
+    }
+
+    fn do_scavenge(&mut self, id: UnitId) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        if self.unit(id).tu < 8 {
+            return Err(ActionError::NotEnoughTu);
+        }
+        let me = self.unit(id).tile;
+        let weapon = self
+            .units
+            .iter()
+            .find(|u| {
+                !u.alive
+                    && !u.civilian
+                    && u.species == Species::Soldier
+                    && cheb(u.tile, me) <= 1
+                    && u.weapon.power > self.unit(id).weapon.power
+            })
+            .map(|u| u.weapon.clone());
+        let Some(weapon) = weapon else {
+            return Err(ActionError::BadTarget);
+        };
+        self.unit_mut(id).tu -= 8;
+        self.unit_mut(id).weapon = weapon;
+        Ok(vec![Event::Scavenged { unit: id }])
+    }
+
+    /// Register a fuel cask hazard (counts its shell voxels).
+    pub fn register_cask(&mut self, tile: IVec3) {
+        let o = tile * TILE_VOXELS;
+        let n = self.count_objective_voxels(o, o + IVec3::splat(TILE_VOXELS));
+        self.casks.push((tile, n, true));
+    }
+
+    /// Register a brimstone pool hazard.
+    pub fn register_pool(&mut self, tile: IVec3) {
+        self.pools.push((tile, false));
+    }
+
+    /// Breached casks detonate; sparks near brimstone ignite it.
+    fn check_hazards(&mut self, events: &mut Vec<Event>) {
+        // Casks first (they may chain).
+        for i in 0..self.casks.len() {
+            let (tile, initial, live) = self.casks[i];
+            if !live {
+                continue;
+            }
+            let o = tile * TILE_VOXELS;
+            let left = self.count_objective_voxels(o, o + IVec3::splat(TILE_VOXELS));
+            if left < initial {
+                self.casks[i].2 = false;
+                self.explode(tile, 35, None, events);
+                if self.winner.is_some() {
+                    return;
+                }
+            }
+        }
+        // Pools ignite from adjacent fire.
+        for i in 0..self.pools.len() {
+            let (tile, lit) = self.pools[i];
+            if lit {
+                continue;
+            }
+            let sparked = self
+                .clouds
+                .iter()
+                .any(|(t, k, _)| *k == CloudKind::Fire && cheb(*t, tile) <= 1);
+            if sparked {
+                self.pools[i].1 = true;
+                self.add_cloud(tile, CloudKind::Fire, 6);
+                events.push(Event::FireStarted { at: tile });
+            }
+        }
+    }
+
+    /// Gravity settles what destruction leaves unsupported.
+    fn settle_units(&mut self, events: &mut Vec<Event>) {
+        for i in 0..self.units.len() {
+            let id = UnitId(i as u32);
+            if !self.unit(id).alive || self.unit(id).flies {
+                continue;
+            }
+            let mut fell = false;
+            while self.unit(id).tile.z > 0 && !self.tiles.is_walkable(self.unit(id).tile) {
+                let below = self.unit(id).tile - IVec3::new(0, 0, 1);
+                if !self.tiles.in_bounds(below) {
+                    break;
+                }
+                self.unit_mut(id).tile = below;
+                fell = true;
+            }
+            if fell {
+                let to = self.unit(id).tile;
+                events.push(Event::Fell { unit: id, to });
+                self.apply_damage(id, 8, None, events);
+                if self.winner.is_some() {
+                    return;
+                }
+            }
+        }
     }
 
     fn add_cloud(&mut self, tile: IVec3, kind: CloudKind, ttl: u32) {
@@ -710,7 +897,17 @@ impl Battle {
         self.check_actor(id)?;
         let from = self.unit(id).tile;
         let blocked = self.blocked_for(id);
-        let path = self.tiles.path(from, to, &blocked).ok_or(ActionError::NoPath)?;
+        let mode = if self.unit(id).flies {
+            PathMode::Fly
+        } else if self.unit(id).smasher {
+            PathMode::Smash
+        } else {
+            PathMode::Walk
+        };
+        let path = self
+            .tiles
+            .path_mode(from, to, &blocked, mode)
+            .ok_or(ActionError::NoPath)?;
 
         // A reserving unit keeps a snap shot's worth of TUs banked.
         let reserve = if self.unit(id).reserve_snap {
@@ -728,9 +925,39 @@ impl Battle {
         let mut events = Vec::new();
         let mut here = from;
         for next in path {
-            let cost = step_cost(here, next) * self.unit(id).move_cost_mult();
+            let mut cost = step_cost(here, next) * self.unit(id).move_cost_mult();
+            if self.unit(id).carrying.is_some() {
+                cost += 2; // a body over the shoulder
+            }
+            let smashing = mode == PathMode::Smash && !self.tiles.is_walkable(next);
+            if smashing {
+                cost += 8;
+            }
             if budget(self.unit(id)) < cost {
                 break;
+            }
+            if smashing {
+                // Masonry gives way before the Behemoth.
+                let o = next * TILE_VOXELS;
+                let mut smashed = 0;
+                for z in 4..TILE_VOXELS {
+                    for y in 0..TILE_VOXELS {
+                        for x in 0..TILE_VOXELS {
+                            let p = o + IVec3::new(x, y, z);
+                            if self.world.voxel(p).is_solid() {
+                                self.world.set_voxel(p, ods_voxel::Voxel::EMPTY);
+                                smashed += 1;
+                            }
+                        }
+                    }
+                }
+                self.tiles
+                    .rederive_region(&self.world, o, o + IVec3::splat(TILE_VOXELS));
+                events.push(Event::WallSmashed { at: next, voxels: smashed });
+                self.check_objective(&mut events);
+                if self.winner.is_some() {
+                    return Ok(events);
+                }
             }
             {
                 let u = self.unit_mut(id);
@@ -740,6 +967,21 @@ impl Battle {
                     u.facing = IVec3::new(step.x.signum(), step.y.signum(), 0);
                 }
                 u.tile = next;
+            }
+            // The carried ride along.
+            if let Some(carried) = self.unit(id).carrying {
+                self.unit_mut(carried).tile = next;
+            }
+            // Unseen demon movement registers only as sound.
+            if self.unit(id).side == Side::Demons {
+                let seen = self
+                    .units
+                    .iter()
+                    .filter(|u| u.is_active() && u.side == Side::Order && !u.civilian)
+                    .any(|u| self.can_see(u.id, id));
+                if !seen {
+                    self.heard.push(next);
+                }
             }
             events.push(Event::Moved {
                 unit: id,
@@ -869,10 +1111,19 @@ impl Battle {
             }
         }
 
+        // High ground steadies the shot.
+        let chance = if self.unit(shooter).tile.z > self.unit(target).tile.z {
+            (chance + 10).min(95)
+        } else {
+            chance
+        };
+        self.last_noise = Some(self.unit(shooter).tile);
+
         for _ in 0..rounds {
             if !self.unit(target).is_active() || self.winner.is_some() {
                 break; // remaining rounds of the burst go wide, harmlessly
             }
+            self.xp[shooter.0 as usize].shots_fired += 1;
             let hit = (self.rng.roll(100) as i32) < chance;
             events.push(Event::Fired { unit: shooter, target, mode, reaction, hit });
             self.unit_mut(target).suppression += 1;
@@ -936,6 +1187,9 @@ impl Battle {
         self.tiles
             .rederive_region(&self.world, c - IVec3::splat(r), c + IVec3::splat(r));
         events.push(Event::Exploded { at, voxels: destroyed });
+        self.last_noise = Some(at);
+        self.settle_units(events);
+        self.check_hazards(events);
         // Hellfire lingers: the blast site burns.
         if self.tiles.is_walkable(at) {
             self.add_cloud(at, CloudKind::Fire, 4);
@@ -1027,6 +1281,7 @@ impl Battle {
                     voxels: destroyed,
                 });
                 self.check_objective(events);
+                self.check_hazards(events);
             }
         }
     }
@@ -1120,6 +1375,16 @@ impl Battle {
     }
 
     fn kill_unit(&mut self, target: UnitId, events: &mut Vec<Event>) {
+        // A carried body tumbles free; a carrier's burden is dropped.
+        if let Some(carried) = self.unit(target).carrying {
+            let tile = self.unit(target).tile;
+            self.unit_mut(carried).tile = tile;
+        }
+        for u in &mut self.units {
+            if u.carrying == Some(target) {
+                u.carrying = None;
+            }
+        }
         let (dead_side, dead_species, tile) = {
             let t = self.unit(target);
             (t.side, t.species, t.tile)
@@ -1161,6 +1426,20 @@ impl Battle {
             self.turn += 1;
         }
         let mut events = vec![Event::TurnStarted { side: self.side_to_move, turn: self.turn }];
+
+        // The dark reports what the eyes missed — vaguely.
+        if self.side_to_move == Side::Order && !self.heard.is_empty() {
+            let picks: Vec<IVec3> = self.heard.iter().step_by(4).copied().collect();
+            for at in picks {
+                let fuzz = IVec3::new(
+                    self.rng.roll(5) as i32 - 2,
+                    self.rng.roll(5) as i32 - 2,
+                    0,
+                );
+                events.push(Event::NoiseInDark { near: at + fuzz });
+            }
+            self.heard.clear();
+        }
 
         // Primed charges burn down — and go off.
         let mut exploding = Vec::new();
@@ -1210,6 +1489,11 @@ impl Battle {
                 }
             }
         }
+        self.check_hazards(&mut events);
+        if self.winner.is_some() {
+            return events;
+        }
+
         // Anyone standing in flame burns.
         let burning: Vec<UnitId> = self
             .units
@@ -2107,6 +2391,42 @@ mod tests {
             "with the soldier dead, a cowering civilian holds nothing"
         );
         assert!(b.unit(UnitId(2)).alive, "but she may yet live");
+    }
+
+    #[test]
+    fn the_wounded_are_carried_home() {
+        let mut units = vec![
+            Unit::soldier(0, "Carrier", IVec3::new(2, 5, 0)),
+            Unit::soldier(1, "Down", IVec3::new(3, 5, 0)),
+            Unit::imp(2, "Imp", IVec3::new(10, 5, 0)),
+        ];
+        units[1].conscious = false; // already out cold
+        let mut b = open_field(units, 3);
+        b.perform(Action::PickUp { unit: UnitId(0), target: UnitId(1) }).unwrap();
+        b.perform(Action::Move { unit: UnitId(0), to: IVec3::new(5, 7, 0) }).unwrap();
+        assert_eq!(
+            b.unit(UnitId(1)).tile,
+            b.unit(UnitId(0)).tile,
+            "the burden rides along"
+        );
+        b.perform(Action::PutDown { unit: UnitId(0), at: IVec3::new(5, 8, 0) }).unwrap();
+        assert_eq!(b.unit(UnitId(1)).tile, IVec3::new(5, 8, 0));
+        assert!(b.unit(UnitId(0)).carrying.is_none());
+    }
+
+    #[test]
+    fn high_ground_and_falls() {
+        // Elevation bonus is arithmetic on the chance; test the fall.
+        let mut units = duelists();
+        units[0].tile = IVec3::new(5, 5, 1); // somehow upstairs in a flat field
+        let mut b = open_field(units, 3);
+        let mut events = Vec::new();
+        b.settle_units_for_test(&mut events);
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Fell { unit, .. } if *unit == UnitId(0))),
+            "no floor upstairs in an open field: {events:?}"
+        );
+        assert_eq!(b.unit(UnitId(0)).tile.z, 0);
     }
 
     #[test]

@@ -304,13 +304,19 @@ impl Core {
                         let mut lance_toggle: Option<(usize, bool)> = None;
                         let mut transfer: Option<usize> = None;
                         egui::Grid::new("roster").striped(true).show(ui, |ui| {
-                            for h in ["Name", "Rank", "TU", "HP", "Acc", "K", "🧨", "✚", "Lance", "Status"] {
+                            for h in ["Name", "Rank", "Quirk", "TU", "HP", "Acc", "K", "🧨", "✚", "Lance", "Status"] {
                                 ui.strong(h);
                             }
                             ui.end_row();
                             for (si, s) in c.soldiers.iter_mut().enumerate() {
-                                ui.label(&s.name);
+                                if s.scars.is_empty() {
+                                    ui.label(&s.name);
+                                } else {
+                                    ui.label(format!("{}*", s.name))
+                                        .on_hover_text(format!("{} lasting scar(s)", s.scars.len()));
+                                }
                                 ui.label(s.rank());
+                                ui.label(s.quirk.map_or("–", |q| q.name()));
                                 ui.label(s.stats.tu.to_string());
                                 ui.label(s.stats.health.to_string());
                                 ui.label(s.stats.accuracy.to_string());

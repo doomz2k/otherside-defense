@@ -58,6 +58,8 @@ impl Species {
             Species::Taker => &[Head, Torso, LeftArm, RightArm, LeftLeg, RightLeg],
             Species::Husk => &[Head, Torso, LeftArm, RightArm, LeftLeg, RightLeg],
             Species::Prince => &[Head, Torso, LeftArm, RightArm, Horns, Wings],
+            Species::Gargoyle => &[Head, Torso, LeftArm, RightArm, Wings, Tail],
+            Species::Behemoth => &[Head, Torso, LeftArm, RightArm, LeftLeg, RightLeg, Horns],
         }
     }
 }

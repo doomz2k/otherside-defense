@@ -33,10 +33,21 @@ enum TileKind {
     Ramp,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PathMode {
+    Walk,
+    /// Flight: any tile with clear head-space, regardless of floors.
+    Fly,
+    /// Behemoths: blocked tiles are just slower (they won't be blocked long).
+    Smash,
+}
+
 pub struct TileMap {
     min: IVec3,
     size: IVec3,
     kinds: Vec<TileKind>,
+    /// Head-space is clear (floor or none): where the winged may pass.
+    air: Vec<bool>,
 }
 
 impl TileMap {
@@ -46,13 +57,16 @@ impl TileMap {
             min,
             size,
             kinds: vec![TileKind::Blocked; (size.x * size.y * size.z) as usize],
+            air: vec![false; (size.x * size.y * size.z) as usize],
         };
         for z in 0..size.z {
             for y in 0..size.y {
                 for x in 0..size.x {
                     let tile = min + IVec3::new(x, y, z);
                     let idx = map.index(tile).expect("in bounds by construction");
-                    map.kinds[idx] = derive_tile(world, tile);
+                    let (kind, air) = derive_tile(world, tile);
+                    map.kinds[idx] = kind;
+                    map.air[idx] = air;
                 }
             }
         }
@@ -85,6 +99,24 @@ impl TileMap {
         self.index(tile).is_some_and(|i| self.kinds[i] == TileKind::Ramp)
     }
 
+    /// Clear head-space: passable to the winged (no floor needed).
+    pub fn is_open_air(&self, tile: IVec3) -> bool {
+        self.index(tile).is_some_and(|i| self.air[i])
+    }
+
+    /// In-bounds at all (Smash mode may enter anything inside the map).
+    pub fn in_bounds(&self, tile: IVec3) -> bool {
+        self.index(tile).is_some()
+    }
+
+    fn passable(&self, tile: IVec3, mode: PathMode) -> bool {
+        match mode {
+            PathMode::Walk => self.is_walkable(tile),
+            PathMode::Fly => self.is_open_air(tile),
+            PathMode::Smash => tile.z == 0 && self.in_bounds(tile),
+        }
+    }
+
     /// Re-derive all tiles overlapping the voxel-space AABB `[vmin, vmax]`.
     /// Call after destruction; the AABB is the affected voxel region.
     pub fn rederive_region(&mut self, world: &VoxelWorld, vmin: IVec3, vmax: IVec3) {
@@ -95,7 +127,9 @@ impl TileMap {
                 for x in tmin.x..=tmax.x {
                     let tile = IVec3::new(x, y, z);
                     if let Some(idx) = self.index(tile) {
-                        self.kinds[idx] = derive_tile(world, tile);
+                        let (kind, air) = derive_tile(world, tile);
+                        self.kinds[idx] = kind;
+                        self.air[idx] = air;
                     }
                 }
             }
@@ -106,7 +140,17 @@ impl TileMap {
     /// (typically tiles occupied by living units). Returns the sequence of
     /// tiles stepped onto (excluding `from`, including `to`), or None.
     pub fn path(&self, from: IVec3, to: IVec3, blocked: &HashSet<IVec3>) -> Option<Vec<IVec3>> {
-        if from == to || !self.is_walkable(to) || blocked.contains(&to) {
+        self.path_mode(from, to, blocked, PathMode::Walk)
+    }
+
+    pub fn path_mode(
+        &self,
+        from: IVec3,
+        to: IVec3,
+        blocked: &HashSet<IVec3>,
+        mode: PathMode,
+    ) -> Option<Vec<IVec3>> {
+        if from == to || !self.passable(to, mode) || blocked.contains(&to) {
             return None;
         }
         let h = |t: IVec3| {
@@ -148,15 +192,19 @@ impl TileMap {
                             continue; // no purely vertical hops
                         }
                         let next = current + IVec3::new(dx, dy, dz);
-                        if !self.is_walkable(next) || blocked.contains(&next) {
+                        if !self.passable(next, mode) || blocked.contains(&next) {
                             continue;
                         }
-                        // Level changes only happen over climbable mass.
-                        if dz != 0 && !(self.is_ramp(current) || self.is_ramp(next)) {
+                        // Level changes: climbable mass for walkers; free air
+                        // for the winged; Behemoths keep to the ground.
+                        if dz != 0
+                            && mode == PathMode::Walk
+                            && !(self.is_ramp(current) || self.is_ramp(next))
+                        {
                             continue;
                         }
                         // No cutting corners diagonally past a blocked tile.
-                        if dx != 0 && dy != 0 && dz == 0 {
+                        if mode == PathMode::Walk && dx != 0 && dy != 0 && dz == 0 {
                             let a = current + IVec3::new(dx, 0, 0);
                             let b = current + IVec3::new(0, dy, 0);
                             if !self.is_walkable(a)
@@ -167,7 +215,10 @@ impl TileMap {
                                 continue;
                             }
                         }
-                        let cost = step_cost(current, next);
+                        let mut cost = step_cost(current, next);
+                        if mode == PathMode::Smash && !self.is_walkable(next) {
+                            cost += 8; // shouldering through the wall
+                        }
                         let next_g = current_g + cost;
                         if g.get(&next).is_none_or(|&old| next_g < old) {
                             g.insert(next, next_g);
@@ -254,7 +305,7 @@ pub fn step_cost(a: IVec3, b: IVec3) -> i32 {
     flat + CLIMB_COST * d.z
 }
 
-fn derive_tile(world: &VoxelWorld, tile: IVec3) -> TileKind {
+fn derive_tile(world: &VoxelWorld, tile: IVec3) -> (TileKind, bool) {
     let origin = crate::tile_to_voxel_min(tile);
 
     // Count solid voxels per vertical band: head (top half), waist (quarter
@@ -274,8 +325,9 @@ fn derive_tile(world: &VoxelWorld, tile: IVec3) -> TileKind {
     };
 
     let head = band(TILE_VOXELS * 5 / 8, TILE_VOXELS);
+    let air = head == 0;
     if head > 0 {
-        return TileKind::Blocked;
+        return (TileKind::Blocked, air);
     }
 
     // Floor support: solid voxels in this tile's foot band, or the top band
@@ -292,19 +344,20 @@ fn derive_tile(world: &VoxelWorld, tile: IVec3) -> TileKind {
         }
     }
     if support < FLOOR_SUPPORT_MIN {
-        return TileKind::Blocked;
+        return (TileKind::Blocked, air);
     }
 
     // Waist band: empty = open ground; substantial mass = climbable ramp.
     let waist = band(HEADROOM_Z, TILE_VOXELS * 5 / 8);
-    if waist == 0 {
+    let kind = if waist == 0 {
         TileKind::Open
     } else if waist >= TILE_VOXELS * TILE_VOXELS {
         // At least a full layer's worth of mass to clamber on.
         TileKind::Ramp
     } else {
         TileKind::Blocked
-    }
+    };
+    (kind, air)
 }
 
 #[cfg(test)]

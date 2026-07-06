@@ -17,7 +17,7 @@ pub use base::{Chapterhouse, Facility, GRID};
 pub use campaign::{
     ARTIFICER_HIRE_COST, Campaign, CampaignOutcome, CHAPTERHOUSE_COST, Difficulty, Fallen,
     FINAL_ASSAULT_BRIMSTONE, GeoError, GeoEvent, MissionKind, MissionToken, OCCULTIST_HIRE_COST,
-    Prisoners, SOLDIER_HIRE_COST, Soldier, SoldierStats,
+    Prisoners, Quirk, SOLDIER_HIRE_COST, Soldier, SoldierStats,
 };
 pub use director::{Nest, Rift, RiftKind};
 pub use geography::Region;

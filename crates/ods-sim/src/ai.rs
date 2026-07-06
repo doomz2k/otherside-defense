@@ -198,9 +198,11 @@ fn pick_action(battle: &Battle, id: UnitId, side: Side) -> Option<Action> {
         return None; // in contact but dry — hold position
     }
 
-    // Nothing visible: advance toward the nearest living enemy, preferring
-    // tiles that hug cover. The AI is map-omniscient for now.
-    let goal = nearest_open_neighbor(battle, prey.tile, me.tile, true)?;
+    // Nothing visible: hunt the last violence heard; failing that, the AI
+    // falls back to omniscient pursuit so auto-battles always conclude.
+    let hunt = battle.last_noise.unwrap_or(prey.tile);
+    let goal = nearest_open_neighbor(battle, hunt, me.tile, true)
+        .or_else(|| nearest_open_neighbor(battle, prey.tile, me.tile, true))?;
     if goal == me.tile {
         return None;
     }

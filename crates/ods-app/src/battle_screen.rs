@@ -201,6 +201,41 @@ impl BattleScreen {
                     }
                 }
             }
+            KeyCode::KeyU => {
+                // Pick up / put down a fallen comrade.
+                if let Some(id) = self.selected {
+                    if self.battle.unit(id).carrying.is_some() {
+                        let at = self.battle.unit(id).tile + self.battle.unit(id).facing;
+                        let result = self.battle.perform(Action::PutDown { unit: id, at });
+                        self.apply(renderer, audio, result);
+                    } else {
+                        let me = self.battle.unit(id).tile;
+                        let body = self
+                            .battle
+                            .units
+                            .iter()
+                            .find(|u| {
+                                u.alive
+                                    && !u.conscious
+                                    && u.side == Side::Order
+                                    && (u.tile - me).abs().max_element() <= 1
+                            })
+                            .map(|u| u.id);
+                        if let Some(target) = body {
+                            let result = self.battle.perform(Action::PickUp { unit: id, target });
+                            self.apply(renderer, audio, result);
+                        } else {
+                            self.log.push("nobody down within reach".to_string());
+                        }
+                    }
+                }
+            }
+            KeyCode::KeyJ => {
+                if let Some(id) = self.selected {
+                    let result = self.battle.perform(Action::Scavenge { unit: id });
+                    self.apply(renderer, audio, result);
+                }
+            }
             KeyCode::KeyH => self.heal_selected(renderer, audio),
             KeyCode::Tab => {
                 self.select_next_soldier();
@@ -940,6 +975,20 @@ fn describe(event: &Event, battle: &Battle) -> String {
             format!("!!! {} SEIZES {}'s MIND !!!", name(by), name(unit))
         }
         Event::PossessionEnds { unit } => format!("{} is their own again", name(unit)),
+        Event::WallSmashed { at, voxels } => {
+            format!("!!! masonry EXPLODES inward at {at} ({voxels} voxels) !!!")
+        }
+        Event::Fell { unit, to } => format!("{} falls to {to}", name(unit)),
+        Event::CarriedUp { unit, carried } => {
+            format!("{} shoulders {}", name(unit), name(carried))
+        }
+        Event::SetDown { unit, carried } => {
+            format!("{} lays {} down", name(unit), name(carried))
+        }
+        Event::Scavenged { unit } => format!("{} takes up a fallen weapon", name(unit)),
+        Event::NoiseInDark { near } => {
+            format!("something shrieks in the dark, near {near}...")
+        }
         Event::BattleOver { winner } => format!("=== BATTLE OVER: {winner:?} wins ==="),
     }
 }

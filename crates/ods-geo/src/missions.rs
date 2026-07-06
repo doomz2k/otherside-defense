@@ -22,6 +22,8 @@ pub struct BattleReport {
     /// (squad index, health remaining, experience) for survivors.
     pub survivors: Vec<(usize, i32, Experience)>,
     pub demons_slain: u32,
+    /// Crippled parts per surviving squad member (squad index, parts).
+    pub injuries: Vec<(usize, Vec<ods_sim::body::BodyPart>)>,
     /// Unconscious demons on a held field: bound and dragged home.
     pub captured_grunts: u32,
     pub captured_overseers: u32,
@@ -33,6 +35,28 @@ pub struct BattleReport {
 const MAX_AUTO_TURNS: u32 = 40;
 
 /// Build a rift-site assault on the standard field map.
+pub(crate) fn build_nest(
+    seed: u64,
+    squad: &[&Soldier],
+    kits: &[(u32, u32)],
+    demon_count: u32,
+    strength: u32,
+    research: &ResearchState,
+) -> Battle {
+    scenario::nest_map(seed, make_units(squad, kits, research), demon_count, strength)
+}
+
+pub(crate) fn build_otherside(
+    seed: u64,
+    squad: &[&Soldier],
+    kits: &[(u32, u32)],
+    demon_count: u32,
+    strength: u32,
+    research: &ResearchState,
+) -> Battle {
+    scenario::otherside(seed, make_units(squad, kits, research), demon_count, strength)
+}
+
 pub(crate) fn build_assault(
     seed: u64,
     squad: &[&Soldier],
@@ -93,11 +117,15 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
 
     let mut dead = Vec::new();
     let mut survivors = Vec::new();
+    let mut injuries = Vec::new();
     for i in 0..squad_len {
         let u = &battle.units[i];
         // A Taken soldier is alive, walking, and lost forever.
         if u.alive && u.side == Side::Order {
             survivors.push((i, u.health, battle.experience(UnitId(i as u32))));
+            if !u.injuries.is_empty() {
+                injuries.push((i, u.injuries.clone()));
+            }
         } else {
             dead.push(i);
         }
@@ -131,6 +159,7 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
         turns: battle.turn,
         dead,
         survivors,
+        injuries,
         demons_slain: demons_total.saturating_sub(battle.living(Side::Demons).count() as u32),
         captured_grunts,
         captured_overseers,
@@ -177,11 +206,21 @@ fn make_unit(id: u32, s: &Soldier, kit: (u32, u32), research: &ResearchState) ->
     } else if research.is_complete(Project::BlessedArms) {
         u.weapon.power += 8;
     }
+    match s.quirk {
+        Some(crate::campaign::Quirk::Marksman) => u.accuracy += 8,
+        Some(crate::campaign::Quirk::Jumpy) => {
+            u.bravery = (u.bravery - 10).max(5);
+            u.reactions += 8;
+        }
+        Some(crate::campaign::Quirk::IronNerves) => u.bravery = (u.bravery + 15).min(95),
+        Some(crate::campaign::Quirk::Swift) => u.tu_max += 5,
+        _ => {}
+    }
     let (grenades, dressings) = kit;
     u.grenades = grenades;
     u.heal_charges = dressings;
-    // An overloaded pack slows the hand.
-    if grenades + dressings > 5 {
+    // An overloaded pack slows the hand (unless born to haul).
+    if grenades + dressings > 5 && s.quirk != Some(crate::campaign::Quirk::PackMule) {
         u.tu_max -= 4;
     }
     u.tu = u.tu_max;
