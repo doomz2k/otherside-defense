@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use glam::{IVec3, Vec3};
 use ods_voxel::VoxelWorld;
 
+use crate::body::BodyPart;
 use crate::tiles::{TileMap, step_cost};
 use crate::units::{FireMode, Side, Species, Unit, UnitId};
 use crate::{SimRng, TILE_VOXELS};
@@ -71,6 +72,11 @@ pub enum Event {
     Hatched { unit: UnitId },
     /// The rift obelisk is demolished; the incursion collapses.
     ObjectiveDestroyed,
+    /// A body part is crippled by a heavy hit.
+    PartCrippled { unit: UnitId, part: BodyPart },
+    Turned { unit: UnitId, facing: IVec3 },
+    /// A primed charge hits the ground, fuse hissing.
+    ChargeDropped { at: IVec3, timer: u32 },
     BattleOver { winner: Side },
 }
 
@@ -90,6 +96,11 @@ pub enum Action {
     Bind { unit: UnitId, target: UnitId },
     /// Psi assault (Overseers and worse): batters morale through walls.
     Terrify { unit: UnitId, target: UnitId },
+    /// Face a direction (1 TU per 45°) — sets the reaction-fire arc.
+    Turn { unit: UnitId, toward: IVec3 },
+    /// Prime a charge and drop it at your feet; it detonates after `timer`
+    /// half-turns. Then run.
+    DropCharge { unit: UnitId, timer: u32 },
     EndTurn,
 }
 
@@ -110,6 +121,36 @@ pub enum ActionError {
     NotAdjacent,
     /// The unit has no psionic talent.
     NoPsi,
+}
+
+/// Is `tile` within the unit's forward 135° arc?
+fn in_facing_arc(unit: &Unit, tile: IVec3) -> bool {
+    let d = tile - unit.tile;
+    if d.x == 0 && d.y == 0 {
+        return true;
+    }
+    let dir = glam::Vec2::new(d.x as f32, d.y as f32).normalize_or_zero();
+    let face = glam::Vec2::new(unit.facing.x as f32, unit.facing.y as f32).normalize_or_zero();
+    dir.dot(face) >= 0.38
+}
+
+/// 45° steps between two facing octants (for turn costs).
+fn octant_steps(from: IVec3, to: IVec3) -> i32 {
+    let oct = |v: IVec3| -> i32 {
+        match (v.x.signum(), v.y.signum()) {
+            (1, 0) => 0,
+            (1, 1) => 1,
+            (0, 1) => 2,
+            (-1, 1) => 3,
+            (-1, 0) => 4,
+            (-1, -1) => 5,
+            (0, -1) => 6,
+            (1, -1) => 7,
+            _ => 0,
+        }
+    };
+    let diff = (oct(from) - oct(to)).rem_euclid(8);
+    diff.min(8 - diff)
 }
 
 fn cheb(a: IVec3, b: IVec3) -> i32 {
@@ -147,6 +188,8 @@ pub struct Battle {
     /// Sight range in tiles; night assaults shrink it.
     pub vision_tiles: i32,
     pub objective: Option<Objective>,
+    /// Primed charges on the ground: (tile, half-turns until detonation).
+    pub charges: Vec<(IVec3, u32)>,
     xp: Vec<Experience>,
     rng: SimRng,
 }
@@ -170,6 +213,7 @@ impl Battle {
             winner: None,
             vision_tiles: VISION_TILES,
             objective: None,
+            charges: Vec::new(),
             xp,
             rng: SimRng::from_seed(seed),
         }
@@ -322,6 +366,8 @@ impl Battle {
             Action::SetReserve { unit, on } => self.do_set_reserve(unit, on),
             Action::Bind { unit, target } => self.do_bind(unit, target),
             Action::Terrify { unit, target } => self.do_terrify(unit, target),
+            Action::Turn { unit, toward } => self.do_turn(unit, toward),
+            Action::DropCharge { unit, timer } => self.do_drop_charge(unit, timer),
             Action::EndTurn => Ok(self.end_turn()),
         }
     }
@@ -335,6 +381,45 @@ impl Battle {
             return Err(ActionError::NotYourTurn);
         }
         Ok(())
+    }
+
+    fn do_turn(&mut self, id: UnitId, toward: IVec3) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        let toward = IVec3::new(toward.x.signum(), toward.y.signum(), 0);
+        if toward.x == 0 && toward.y == 0 {
+            return Err(ActionError::BadTarget);
+        }
+        let cost = octant_steps(self.unit(id).facing, toward);
+        if cost == 0 {
+            return Ok(Vec::new());
+        }
+        if self.unit(id).tu < cost {
+            return Err(ActionError::NotEnoughTu);
+        }
+        let u = self.unit_mut(id);
+        u.tu -= cost;
+        u.facing = toward;
+        Ok(vec![Event::Turned { unit: id, facing: toward }])
+    }
+
+    fn do_drop_charge(&mut self, id: UnitId, timer: u32) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        if self.unit(id).grenades == 0 {
+            return Err(ActionError::NoCharges);
+        }
+        let cost = self.unit(id).tu_max * 15 / 100;
+        if self.unit(id).tu < cost {
+            return Err(ActionError::NotEnoughTu);
+        }
+        let at = self.unit(id).tile;
+        {
+            let u = self.unit_mut(id);
+            u.tu -= cost;
+            u.grenades -= 1;
+        }
+        let timer = timer.clamp(1, 6);
+        self.charges.push((at, timer));
+        Ok(vec![Event::ChargeDropped { at, timer }])
     }
 
     fn do_kneel(&mut self, id: UnitId) -> Result<Vec<Event>, ActionError> {
@@ -440,7 +525,7 @@ impl Battle {
         };
         let budget = |u: &Unit| u.tu - reserve;
 
-        if budget(self.unit(id)) < step_cost(from, path[0]) {
+        if budget(self.unit(id)) < step_cost(from, path[0]) * self.unit(id).move_cost_mult() {
             return Err(ActionError::NotEnoughTu);
         }
         self.unit_mut(id).kneeling = false; // you can't stay low and sprint
@@ -448,13 +533,17 @@ impl Battle {
         let mut events = Vec::new();
         let mut here = from;
         for next in path {
-            let cost = step_cost(here, next);
+            let cost = step_cost(here, next) * self.unit(id).move_cost_mult();
             if budget(self.unit(id)) < cost {
                 break;
             }
             {
                 let u = self.unit_mut(id);
                 u.tu -= cost;
+                let step = next - here;
+                if step.x != 0 || step.y != 0 {
+                    u.facing = IVec3::new(step.x.signum(), step.y.signum(), 0);
+                }
                 u.tile = next;
             }
             events.push(Event::Moved {
@@ -491,6 +580,8 @@ impl Battle {
                     && e.reactions * e.tu / e.tu_max.max(1) > mover_initiative
                     // Melee reactions only trigger when you brush past claws.
                     && (!e.weapon.melee || cheb(e.tile, mover_tile) <= 1)
+                    // And only into the watcher's forward arc.
+                    && in_facing_arc(e, mover_tile)
             })
             .map(|e| e.id)
             .collect();
@@ -567,7 +658,15 @@ impl Battle {
                 s.weapon.melee,
             )
         };
-        self.unit_mut(shooter).tu -= cost;
+        {
+            let target_tile = self.unit(target).tile;
+            let s = self.unit_mut(shooter);
+            s.tu -= cost;
+            let d = target_tile - s.tile;
+            if d.x != 0 || d.y != 0 {
+                s.facing = IVec3::new(d.x.signum(), d.y.signum(), 0);
+            }
+        }
 
         for _ in 0..rounds {
             if !self.unit(target).is_active() || self.winner.is_some() {
@@ -575,6 +674,7 @@ impl Battle {
             }
             let hit = (self.rng.roll(100) as i32) < chance;
             events.push(Event::Fired { unit: shooter, target, mode, reaction, hit });
+            self.unit_mut(target).suppression += 1;
             if reaction {
                 self.xp[shooter.0 as usize].reaction_shots += 1;
             }
@@ -609,6 +709,17 @@ impl Battle {
             u.tu -= cost;
             u.grenades -= 1;
         }
+        // A bad throw scatters: the charge lands where fate says, not you.
+        let throw_acc = (50 + self.unit(id).accuracy / 2).clamp(30, 90);
+        let at = if (self.rng.roll(100) as i32) < throw_acc {
+            at
+        } else {
+            const RING: [(i32, i32); 8] =
+                [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)];
+            let (dx, dy) = RING[self.rng.roll(8) as usize];
+            let dist = 1 + self.rng.roll(2) as i32;
+            at + IVec3::new(dx * dist, dy * dist, 0)
+        };
         let mut events = vec![Event::Threw { unit: id, at }];
         self.explode(at, GRENADE_POWER, Some(id), &mut events);
         Ok(events)
@@ -721,6 +832,13 @@ impl Battle {
         source: Option<UnitId>,
         events: &mut Vec<Event>,
     ) {
+        // Directional armor soaks its share first.
+        let damage = if let Some(src) = source {
+            let origin = self.unit(src).tile;
+            (damage - self.unit(target).armor_against(origin)).max(0)
+        } else {
+            (damage - self.unit(target).armor_side).max(0)
+        };
         {
             let t = self.unit_mut(target);
             t.health -= damage;
@@ -753,6 +871,25 @@ impl Battle {
                 t.wounds += new_wounds;
                 let total = t.wounds;
                 events.push(Event::Wounded { unit: target, total });
+            }
+            // And heavy blows land SOMEWHERE: roll the hit location.
+            if damage >= 8 && self.rng.roll(100) < 35 {
+                let parts = self.unit(target).species.body_parts();
+                let part = parts[self.rng.roll(parts.len() as u32) as usize];
+                if !self.unit(target).injuries.contains(&part) {
+                    self.unit_mut(target).injuries.push(part);
+                    events.push(Event::PartCrippled { unit: target, part });
+                    if part == BodyPart::Head {
+                        // Concussed: stun trauma on top of the wound.
+                        let t = self.unit_mut(target);
+                        t.stun += 8;
+                        if t.stun >= t.health && t.conscious {
+                            t.conscious = false;
+                            events.push(Event::Subdued { unit: target });
+                            self.check_victory(events);
+                        }
+                    }
+                }
             }
         }
     }
@@ -818,6 +955,22 @@ impl Battle {
         }
         let mut events = vec![Event::TurnStarted { side: self.side_to_move, turn: self.turn }];
 
+        // Primed charges burn down — and go off.
+        let mut exploding = Vec::new();
+        for (at, timer) in &mut self.charges {
+            *timer -= 1;
+            if *timer == 0 {
+                exploding.push(*at);
+            }
+        }
+        self.charges.retain(|(_, t)| *t > 0);
+        for at in exploding {
+            self.explode(at, GRENADE_POWER, None, &mut events);
+            if self.winner.is_some() {
+                return events;
+            }
+        }
+
         // Stun trauma fades; the subdued may come round groggy.
         let side_units: Vec<UnitId> = self
             .units
@@ -827,6 +980,7 @@ impl Battle {
             .collect();
         for id in side_units {
             let u = self.unit_mut(id);
+            u.suppression = 0; // a fresh turn steadies the nerves
             u.stun = (u.stun - 3).max(0);
             if !u.conscious && u.stun < u.health {
                 u.conscious = true;
@@ -1458,6 +1612,117 @@ mod tests {
         assert!(events.iter().any(|e| matches!(e, Event::Hatched { .. })), "{events:?}");
         assert_eq!(b.units.len(), unit_count + 1, "a fresh Taker joins the field");
         assert_eq!(b.units.last().unwrap().species, Species::Taker);
+    }
+
+    #[test]
+    fn armor_is_directional() {
+        let mut units = duelists();
+        units[1].armor_front = 10;
+        units[1].armor_rear = 0;
+        units[1].facing = IVec3::new(-1, 0, 0); // facing the soldier
+        let mut b = open_field(units, 3);
+        // Shot from the front: soaked by 10.
+        let front = b.unit(UnitId(1)).armor_against(IVec3::new(1, 5, 0));
+        assert_eq!(front, 10);
+        // Sneak around behind: nothing.
+        b.units[1].facing = IVec3::new(1, 0, 0);
+        let rear = b.unit(UnitId(1)).armor_against(IVec3::new(1, 5, 0));
+        assert_eq!(rear, 0);
+    }
+
+    #[test]
+    fn movement_sets_facing_and_reactions_need_the_arc() {
+        let mut b = open_field(duelists(), 3);
+        b.perform(Action::Move { unit: UnitId(0), to: IVec3::new(3, 5, 0) }).unwrap();
+        assert_eq!(b.unit(UnitId(0)).facing, IVec3::new(1, 0, 0));
+
+        // An imp staring away cannot react, no matter its readiness.
+        let mut units = duelists();
+        units[0].reactions = 10;
+        units[1].reactions = 90;
+        units[1].facing = IVec3::new(1, 0, 0); // looking east, away from the soldier
+        let mut b = open_field(units, 7);
+        b.units[0].tu = 20;
+        let events = b
+            .perform(Action::Move { unit: UnitId(0), to: IVec3::new(4, 5, 0) })
+            .unwrap();
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Fired { reaction: true, .. })),
+            "no reaction fire outside the watch arc: {events:?}"
+        );
+    }
+
+    #[test]
+    fn turning_costs_tu_by_octant() {
+        let mut b = open_field(duelists(), 3);
+        b.units[0].facing = IVec3::new(1, 0, 0);
+        b.perform(Action::Turn { unit: UnitId(0), toward: IVec3::new(-1, 0, 0) }).unwrap();
+        assert_eq!(b.unit(UnitId(0)).tu, 55 - 4, "an about-face is four octants");
+        assert_eq!(b.unit(UnitId(0)).facing, IVec3::new(-1, 0, 0));
+    }
+
+    #[test]
+    fn crippled_legs_slow_and_crippled_arms_spoil_aim() {
+        let mut b = open_field(duelists(), 3);
+        let clean = b.unit(UnitId(0)).hit_chance(FireMode::Snap).unwrap();
+        b.units[0].injuries.push(crate::body::BodyPart::RightArm);
+        let hurt = b.unit(UnitId(0)).hit_chance(FireMode::Snap).unwrap();
+        assert!(hurt < clean, "{hurt} vs {clean}");
+
+        b.units[0].injuries.push(crate::body::BodyPart::LeftLeg);
+        let tu_before = b.unit(UnitId(0)).tu;
+        b.perform(Action::Move { unit: UnitId(0), to: IVec3::new(2, 5, 0) }).unwrap();
+        assert_eq!(tu_before - b.unit(UnitId(0)).tu, 8, "crippled legs double the step");
+    }
+
+    #[test]
+    fn suppression_rattles_the_aim_then_fades() {
+        let mut b = open_field(duelists(), 3);
+        let calm = b.unit(UnitId(1)).hit_chance(FireMode::Snap).unwrap();
+        b.units[1].suppression = 6;
+        let rattled = b.unit(UnitId(1)).hit_chance(FireMode::Snap).unwrap();
+        assert!(rattled < calm);
+        // Their own turn start steadies them.
+        b.perform(Action::EndTurn).unwrap();
+        assert_eq!(b.unit(UnitId(1)).suppression, 0);
+    }
+
+    #[test]
+    fn dropped_charges_detonate_on_schedule() {
+        let mut b = open_field(duelists(), 3);
+        let events = b
+            .perform(Action::DropCharge { unit: UnitId(0), timer: 2 })
+            .unwrap();
+        assert!(matches!(events[0], Event::ChargeDropped { timer: 2, .. }));
+        assert_eq!(b.unit(UnitId(0)).grenades, 1);
+
+        let ev1 = b.perform(Action::EndTurn).unwrap(); // half-turn 1
+        assert!(!ev1.iter().any(|e| matches!(e, Event::Exploded { .. })));
+        let ev2 = b.perform(Action::EndTurn).unwrap(); // boom
+        assert!(
+            ev2.iter().any(|e| matches!(e, Event::Exploded { .. })),
+            "{ev2:?}"
+        );
+        assert!(b.charges.is_empty());
+    }
+
+    #[test]
+    fn bad_throws_scatter_but_stay_close() {
+        // Low accuracy forces frequent scatter; landings stay within 2 tiles.
+        let mut worst_miss = 0;
+        for seed in 0..12 {
+            let mut units = duelists();
+            units[0].accuracy = 1;
+            let mut b = open_field(units, 100 + seed);
+            let target = IVec3::new(6, 6, 0);
+            let events = b.perform(Action::Throw { unit: UnitId(0), at: target }).unwrap();
+            if let Some(Event::Threw { at, .. }) = events.first() {
+                let d = (*at - target).abs();
+                worst_miss = worst_miss.max(d.x.max(d.y));
+            }
+        }
+        assert!(worst_miss > 0, "a 1-accuracy thrower must fumble sometimes");
+        assert!(worst_miss <= 2, "scatter is bounded: {worst_miss}");
     }
 
     #[test]

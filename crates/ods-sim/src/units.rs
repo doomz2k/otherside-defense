@@ -5,6 +5,8 @@
 
 use glam::IVec3;
 
+use crate::body::BodyPart;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Side {
     Order,
@@ -36,6 +38,8 @@ pub enum Species {
     Taker,
     /// A Taken body. Slow, but every one is a Taker in waiting.
     Husk,
+    /// A lord of the Otherside: psi mastery up to full possession.
+    Prince,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -163,6 +167,26 @@ pub struct Unit {
     pub reserve_snap: bool,
     /// Can use the Terrify psi attack.
     pub psi: bool,
+    /// Can use full Possession (Princes).
+    pub psi_master: bool,
+    /// Facing (unit step vector, z ignored). Reactions only fire into the
+    /// forward arc.
+    pub facing: IVec3,
+    /// Directional armor: flat damage soak by attack sector.
+    pub armor_front: i32,
+    pub armor_side: i32,
+    pub armor_rear: i32,
+    /// Incoming fire this enemy turn; degrades aim and reactions.
+    pub suppression: i32,
+    /// Crippled body parts (battle-local; the campaign turns them into
+    /// longer convalescence).
+    pub injuries: Vec<BodyPart>,
+    /// Turns remaining under a Prince's control (acts for the enemy).
+    pub possessed: u32,
+    /// Smoke grenades carried.
+    pub smoke_grenades: u32,
+    /// Non-combatant caught in the massacre (soldier-shaped, unarmed).
+    pub civilian: bool,
     pub weapon: Weapon,
     /// Open fatal wounds; each bleeds 1 health at the unit's turn start.
     pub wounds: i32,
@@ -194,6 +218,16 @@ impl Unit {
             kneeling: false,
             reserve_snap: false,
             psi: false,
+            psi_master: false,
+            facing: IVec3::new(-1, 0, 0),
+            armor_front: 0,
+            armor_side: 0,
+            armor_rear: 0,
+            suppression: 0,
+            injuries: Vec::new(),
+            possessed: 0,
+            smoke_grenades: 0,
+            civilian: false,
             weapon: hellspit(),
             wounds: 0,
             grenades: 0,
@@ -219,6 +253,25 @@ impl Unit {
             weapon: rifle(),
             grenades: 2,
             heal_charges: 3,
+            smoke_grenades: 1,
+            facing: IVec3::new(1, 0, 0),
+            armor_front: 2,
+            armor_side: 1,
+            armor_rear: 0,
+            ..Self::base(id, Side::Order, Species::Soldier, name, tile)
+        }
+    }
+
+    /// An unarmed townsperson caught in the massacre.
+    pub fn civilian(id: u32, name: &str, tile: IVec3) -> Self {
+        Self {
+            tu_max: 45,
+            tu: 45,
+            health_max: 15,
+            health: 15,
+            bravery: 10,
+            weapon: claw("bare hands", 2),
+            civilian: true,
             ..Self::base(id, Side::Order, Species::Soldier, name, tile)
         }
     }
@@ -236,7 +289,29 @@ impl Unit {
             accuracy: 55,
             bravery: 70,
             psi: true,
+            armor_front: 1,
+            armor_side: 1,
+            armor_rear: 1,
             ..Self::base(id, Side::Demons, Species::Overseer, name, tile)
+        }
+    }
+
+    /// A lord of the Otherside. Every Prince is a psi master.
+    pub fn prince(id: u32, name: &str, tile: IVec3) -> Self {
+        Self {
+            tu_max: 55,
+            tu: 55,
+            health_max: 42,
+            health: 42,
+            reactions: 55,
+            accuracy: 60,
+            bravery: 95,
+            psi: true,
+            psi_master: true,
+            armor_front: 6,
+            armor_side: 5,
+            armor_rear: 4,
+            ..Self::base(id, Side::Demons, Species::Prince, name, tile)
         }
     }
 
@@ -250,6 +325,9 @@ impl Unit {
             accuracy: 60,
             bravery: 60,
             weapon: claw("fangs", 25),
+            armor_front: 6,
+            armor_side: 3,
+            armor_rear: 1,
             ..Self::base(id, Side::Demons, Species::Hellhound, name, tile)
         }
     }
@@ -275,6 +353,9 @@ impl Unit {
             accuracy: 70,
             bravery: 90,
             weapon: claw("taking claws", 90),
+            armor_front: 4,
+            armor_side: 4,
+            armor_rear: 4,
             ..Self::base(id, Side::Demons, Species::Taker, name, tile)
         }
     }
@@ -315,7 +396,44 @@ impl Unit {
         if self.kneeling {
             chance = chance * 115 / 100;
         }
+        for injury in &self.injuries {
+            chance = match injury {
+                BodyPart::LeftArm | BodyPart::RightArm => chance * 70 / 100,
+                BodyPart::Weapon => chance * 60 / 100,
+                _ => chance,
+            };
+        }
+        chance = chance * (100 - (self.suppression * 5).min(30)) / 100;
         Some(chance.clamp(5, 95))
+    }
+
+    /// Flat damage soaked, judged by where the blow came from relative to
+    /// the unit's facing.
+    pub fn armor_against(&self, from: IVec3) -> i32 {
+        let d = from - self.tile;
+        let dir = glam::Vec2::new(d.x as f32, d.y as f32).normalize_or_zero();
+        let face = glam::Vec2::new(self.facing.x as f32, self.facing.y as f32).normalize_or_zero();
+        let dot = dir.dot(face);
+        if dot >= 0.38 {
+            self.armor_front
+        } else if dot <= -0.38 {
+            self.armor_rear
+        } else {
+            self.armor_side
+        }
+    }
+
+    /// Movement cost multiplier from crippled legs.
+    pub fn move_cost_mult(&self) -> i32 {
+        if self
+            .injuries
+            .iter()
+            .any(|p| matches!(p, BodyPart::LeftLeg | BodyPart::RightLeg))
+        {
+            2
+        } else {
+            1
+        }
     }
 
     pub fn rounds_per_action(&self, mode: FireMode) -> u32 {

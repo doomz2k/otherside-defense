@@ -629,6 +629,13 @@ fn describe(event: &Event, battle: &Battle) -> String {
         Event::Taken { unit } => format!("!!! {} IS TAKEN — the body rises !!!", name(unit)),
         Event::Hatched { unit } => format!("!!! {} tears free of the husk !!!", name(unit)),
         Event::ObjectiveDestroyed => "THE OBELISK FALLS — the rift collapses!".to_string(),
+        Event::PartCrippled { unit, part } => {
+            format!("*** {}'s {} is crippled ***", name(unit), part.name())
+        }
+        Event::Turned { unit, .. } => format!("{} takes a new watch arc", name(unit)),
+        Event::ChargeDropped { at, timer } => {
+            format!("a primed charge drops at {at} — {timer} half-turns on the fuse")
+        }
         Event::BattleOver { winner } => format!("=== BATTLE OVER: {winner:?} wins ==="),
     }
 }

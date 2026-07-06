@@ -22,6 +22,7 @@ pub enum BodyPart {
     Maw,
     /// The Bile-wisp's floating body is one distended organ.
     Sac,
+    Wings,
 }
 
 impl BodyPart {
@@ -38,6 +39,7 @@ impl BodyPart {
             BodyPart::Tail => "tail",
             BodyPart::Maw => "maw",
             BodyPart::Sac => "sac",
+            BodyPart::Wings => "wings",
         }
     }
 }
@@ -55,6 +57,7 @@ impl Species {
             Species::BileWisp => &[Sac, Maw],
             Species::Taker => &[Head, Torso, LeftArm, RightArm, LeftLeg, RightLeg],
             Species::Husk => &[Head, Torso, LeftArm, RightArm, LeftLeg, RightLeg],
+            Species::Prince => &[Head, Torso, LeftArm, RightArm, Horns, Wings],
         }
     }
 }

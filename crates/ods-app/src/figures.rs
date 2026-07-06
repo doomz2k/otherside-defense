@@ -55,6 +55,11 @@ const BONE: [f32; 4] = [0.88, 0.86, 0.78, 1.0];
 const BONE_DARK: [f32; 4] = [0.65, 0.62, 0.55, 1.0];
 const HUSK_SKIN: [f32; 4] = [0.45, 0.52, 0.42, 1.0];
 const HUSK_DARK: [f32; 4] = [0.33, 0.38, 0.31, 1.0];
+const PRINCE_ROBE: [f32; 4] = [0.12, 0.05, 0.15, 1.0];
+const PRINCE_DARK: [f32; 4] = [0.08, 0.03, 0.10, 1.0];
+const GOLD: [f32; 4] = [0.95, 0.78, 0.25, 1.0];
+const ASH: [f32; 4] = [0.70, 0.65, 0.72, 1.0];
+const CIVVY: [f32; 4] = [0.55, 0.42, 0.28, 1.0];
 
 /// The anatomy-tagged geometry of each species.
 pub fn blueprint(species: Species) -> &'static [PartBox] {
@@ -134,6 +139,20 @@ pub fn blueprint(species: Species) -> &'static [PartBox] {
         ];
             P
         }
+        Species::Prince => {
+            const P: &[PartBox] = &[
+            pb(Torso, (-3.2, -2.0, 0.0), (3.2, 2.0, 10.5), PRINCE_ROBE),
+            pb(Torso, (-2.4, -1.6, 4.0), (2.4, 1.6, 6.0), GOLD),
+            pb(LeftArm, (-4.6, -1.2, 5.5), (-3.2, 1.2, 10.0), PRINCE_DARK),
+            pb(RightArm, (3.2, -1.2, 5.5), (4.6, 1.2, 10.0), PRINCE_DARK),
+            pb(Head, (-1.5, -1.3, 10.5), (1.5, 1.5, 13.2), ASH),
+            pb(Horns, (-2.8, -0.5, 12.0), (-1.5, 0.5, 14.8), GOLD),
+            pb(Horns, (1.5, -0.5, 12.0), (2.8, 0.5, 14.8), GOLD),
+            pb(Wings, (-6.5, -2.6, 6.0), (-3.2, -1.8, 12.5), PRINCE_DARK),
+            pb(Wings, (3.2, -2.6, 6.0), (6.5, -1.8, 12.5), PRINCE_DARK),
+        ];
+            P
+        }
         Species::Husk => {
             const P: &[PartBox] = &[
             pb(LeftLeg, (-2.5, -1.0, 0.0), (-0.5, 1.0, 4.5), HUSK_DARK),
@@ -184,12 +203,24 @@ fn push_unit(vertices: &mut Vec<LitVertex>, indices: &mut Vec<u32>, unit: &Unit)
     };
 
     for part in blueprint(unit.species) {
-        // The first per-part rule of many to come: weapons fall from
-        // unconscious hands. (Hit-location damage will hook in here.)
+        // Weapons fall from unconscious hands.
         if !unit.conscious && part.part == BodyPart::Weapon {
             continue;
         }
         let mut color = part.color;
+        // Townsfolk wear homespun, not armor.
+        if unit.civilian && part.part != BodyPart::Head {
+            color = CIVVY;
+        }
+        // Crippled parts darken to bruised red — hit location made visible.
+        if unit.injuries.contains(&part.part) {
+            color = [
+                (color[0] * 0.4 + 0.35).min(1.0),
+                color[1] * 0.25,
+                color[2] * 0.25,
+                1.0,
+            ];
+        }
         if !unit.conscious {
             // Drained of struggle.
             color = [color[0] * 0.6, color[1] * 0.6, color[2] * 0.6, 1.0];
