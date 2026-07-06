@@ -212,8 +212,10 @@ pub enum MissionKind {
     Rift(u32),
     Nest(u32),
     Reckoning,
-    /// Through the opened way, into the Otherside. Winning wins everything.
+    /// Through the opened way, into the Otherside: the breach fight.
     FinalAssault,
+    /// The second stage: the arch-demon's sanctum. Winning wins everything.
+    FinalSanctum,
 }
 
 impl MissionKind {
@@ -223,6 +225,7 @@ impl MissionKind {
             MissionKind::Nest(_) => "nest razing",
             MissionKind::Reckoning => "the Reckoning",
             MissionKind::FinalAssault => "the final assault",
+            MissionKind::FinalSanctum => "the sanctum",
         }
     }
 }
@@ -271,6 +274,9 @@ pub struct Campaign {
     pub month_score: i64,
     pub bad_months: u32,
     pub over: Option<CampaignOutcome>,
+    /// Breach won: the way to the arch-demon's sanctum stands open.
+    #[serde(default)]
+    pub sanctum_open: bool,
     /// Rises with every banishment; at 5+, hell schedules a Reckoning.
     reckoning_heat: u32,
     reckoning_day: Option<u32>,
@@ -308,6 +314,7 @@ impl Campaign {
             manufacture: None,
             prisoners: Prisoners::default(),
             memorial: Vec::new(),
+            sanctum_open: false,
             month_score: 0,
             bad_months: 0,
             over: None,
@@ -634,6 +641,12 @@ impl Campaign {
                 }
                 (8, 9, false)
             }
+            MissionKind::FinalSanctum => {
+                if !self.sanctum_open {
+                    return Err(GeoError::PrerequisiteMissing);
+                }
+                (7, 10, false) // fewer bodies, worse breeds — a Prince waits
+            }
         };
 
         let squad_idx: Vec<usize> = self
@@ -676,7 +689,17 @@ impl Campaign {
                 self.bases[0].gate(),
             )
         } else {
-            missions::build_assault(seed, &squad, &kits, garrison, strength, &self.research)
+            let civilians = match kind {
+                MissionKind::Rift(id) => {
+                    let terror = self
+                        .rifts
+                        .iter()
+                        .any(|r| r.id == id && r.kind == RiftKind::Terror);
+                    if terror { 4 } else { 0 }
+                }
+                _ => 0,
+            };
+            missions::build_assault(seed, &squad, &kits, garrison, strength, civilians, &self.research)
         };
 
         // Vision: assaults on the night side of the world are fought at
@@ -691,7 +714,7 @@ impl Campaign {
                 if self.is_daylight(lon) { 14 } else { 9 }
             }
             MissionKind::Reckoning => 14, // your own halls, lamplit
-            MissionKind::FinalAssault => 9,
+            MissionKind::FinalAssault | MissionKind::FinalSanctum => 9,
         };
         Ok((battle, MissionToken { kind, squad_idx }))
     }
@@ -716,6 +739,12 @@ impl Campaign {
             MissionKind::Rift(id) => {
                 if let Some(rift) = self.rifts.iter().find(|r| r.id == id) {
                     let (kind, region) = (rift.kind, rift.region);
+                    // Every townsperson matters, win or lose.
+                    let civ_delta = report.civilians_saved as i64 * 5
+                        - report.civilians_dead as i64 * 10;
+                    if civ_delta != 0 {
+                        self.score(region, civ_delta);
+                    }
                     if report.victory {
                         self.rifts.retain(|r| r.id != id);
                         self.score(region, kind.banish_score());
@@ -750,9 +779,21 @@ impl Campaign {
             }
             MissionKind::FinalAssault => {
                 if report.victory {
-                    self.over = Some(CampaignOutcome::Victory);
+                    // The breach holds. No time to bleed: the sanctum waits.
+                    self.sanctum_open = true;
+                    for &(pos, _, _) in &report.survivors {
+                        self.soldiers[token.squad_idx[pos]].recovery_days = 0;
+                    }
                 } else {
                     // The way slams shut; the survivors crawl home.
+                    self.month_score -= 30;
+                }
+            }
+            MissionKind::FinalSanctum => {
+                if report.victory {
+                    self.over = Some(CampaignOutcome::Victory);
+                } else {
+                    self.sanctum_open = false; // the way seals behind them
                     self.month_score -= 30;
                 }
             }
@@ -1494,10 +1535,33 @@ mod tests {
             Some(GeoError::NoMaterials)
         );
         c.brimstone = FINAL_ASSAULT_BRIMSTONE;
+        assert_eq!(
+            c.begin_mission(MissionKind::FinalSanctum).err(),
+            Some(GeoError::PrerequisiteMissing),
+            "no sanctum until the breach is won"
+        );
+
+        // Stage one: the breach. Cheat the guard dead so victory is certain.
         let (mut battle, token) = c.begin_mission(MissionKind::FinalAssault).unwrap();
         assert_eq!(c.brimstone, 0, "the rite consumes its brimstone");
+        for u in battle.units.iter_mut().skip(token_len(&token)) {
+            u.alive = false;
+        }
+        battle.winner = Some(ods_sim::units::Side::Order);
+        c.conclude_mission(token, &battle);
+        assert_eq!(c.over, None, "the breach alone wins nothing");
+        assert!(c.sanctum_open, "but the way stands open");
+        assert!(
+            c.soldiers.iter().any(|s| s.is_fit()),
+            "the breach squad fights on without pause"
+        );
 
-        // Cheat the arch-demon's guard dead so victory is certain.
+        // Stage two: the sanctum, and the Name broken.
+        let (mut battle, token) = c.begin_mission(MissionKind::FinalSanctum).unwrap();
+        assert!(
+            battle.units.iter().any(|u| u.species == ods_sim::units::Species::Prince),
+            "a Prince holds the sanctum"
+        );
         for u in battle.units.iter_mut().skip(token_len(&token)) {
             u.alive = false;
         }

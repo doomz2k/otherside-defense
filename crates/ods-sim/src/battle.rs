@@ -38,6 +38,14 @@ pub const BIND_STUN: i32 = 15;
 /// Terrify psi attack: cost and range.
 pub const TERRIFY_COST_PCT: i32 = 25;
 pub const TERRIFY_RANGE_TILES: i32 = 14;
+/// Full possession (Princes only).
+pub const POSSESS_COST_PCT: i32 = 40;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CloudKind {
+    Smoke,
+    Fire,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -77,6 +85,13 @@ pub enum Event {
     Turned { unit: UnitId, facing: IVec3 },
     /// A primed charge hits the ground, fuse hissing.
     ChargeDropped { at: IVec3, timer: u32 },
+    SmokePopped { at: IVec3 },
+    FireStarted { at: IVec3 },
+    Burned { unit: UnitId, amount: i32 },
+    DoorOpened { at: IVec3 },
+    /// A Prince seizes a mind outright.
+    Possessed { unit: UnitId, by: UnitId },
+    PossessionEnds { unit: UnitId },
     BattleOver { winner: Side },
 }
 
@@ -101,6 +116,12 @@ pub enum Action {
     /// Prime a charge and drop it at your feet; it detonates after `timer`
     /// half-turns. Then run.
     DropCharge { unit: UnitId, timer: u32 },
+    /// Pop a smoke grenade at a tile: sight-blocking cover for a few turns.
+    ThrowSmoke { unit: UnitId, at: IVec3 },
+    /// Open an adjacent closed door (6 TU).
+    OpenDoor { unit: UnitId, at: IVec3 },
+    /// Seize an enemy mind outright (Princes): it acts for you next turn.
+    Possess { unit: UnitId, target: UnitId },
     EndTurn,
 }
 
@@ -121,6 +142,8 @@ pub enum ActionError {
     NotAdjacent,
     /// The unit has no psionic talent.
     NoPsi,
+    /// No such door, or it's already open.
+    NoDoor,
 }
 
 /// Is `tile` within the unit's forward 135° arc?
@@ -190,6 +213,10 @@ pub struct Battle {
     pub objective: Option<Objective>,
     /// Primed charges on the ground: (tile, half-turns until detonation).
     pub charges: Vec<(IVec3, u32)>,
+    /// Drifting smoke and burning ground: (tile, kind, half-turns left).
+    pub clouds: Vec<(IVec3, CloudKind, u32)>,
+    /// Door tiles: (tile, opened).
+    pub doors: Vec<(IVec3, bool)>,
     xp: Vec<Experience>,
     rng: SimRng,
 }
@@ -214,6 +241,8 @@ impl Battle {
             vision_tiles: VISION_TILES,
             objective: None,
             charges: Vec::new(),
+            clouds: Vec::new(),
+            doors: Vec::new(),
             xp,
             rng: SimRng::from_seed(seed),
         }
@@ -312,8 +341,12 @@ impl Battle {
     pub fn can_see(&self, a: UnitId, b: UnitId) -> bool {
         let (a, b) = (self.unit(a), self.unit(b));
         let d = (b.tile - a.tile).abs();
-        d.x.max(d.y).max(d.z) <= self.vision_tiles
+        let dist = d.x.max(d.y).max(d.z);
+        // Burning ground lights its surroundings beyond the vision limit.
+        let in_range = dist <= self.vision_tiles || (dist <= 20 && self.near_fire(b.tile));
+        in_range
             && self.los_clear(Self::eye(a.tile), Self::chest(b.tile))
+            && !self.smoke_blocks(Self::eye(a.tile), Self::chest(b.tile))
     }
 
     /// Enemy units currently visible to `side` (drives fog + target picking).
@@ -368,6 +401,9 @@ impl Battle {
             Action::Terrify { unit, target } => self.do_terrify(unit, target),
             Action::Turn { unit, toward } => self.do_turn(unit, toward),
             Action::DropCharge { unit, timer } => self.do_drop_charge(unit, timer),
+            Action::ThrowSmoke { unit, at } => self.do_throw_smoke(unit, at),
+            Action::OpenDoor { unit, at } => self.do_open_door(unit, at),
+            Action::Possess { unit, target } => self.do_possess(unit, target),
             Action::EndTurn => Ok(self.end_turn()),
         }
     }
@@ -377,10 +413,137 @@ impl Battle {
         if !u.is_active() {
             return Err(ActionError::DeadUnit);
         }
-        if u.side != self.side_to_move {
+        // A possessed unit answers to the OTHER side; its own side has lost
+        // it for the duration.
+        let acting_for_enemy = u.possessed > 0 && u.side != self.side_to_move;
+        let acting_normally = u.possessed == 0 && u.side == self.side_to_move;
+        if !(acting_normally || acting_for_enemy) {
             return Err(ActionError::NotYourTurn);
         }
         Ok(())
+    }
+
+    fn do_possess(&mut self, id: UnitId, target: UnitId) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        if !self.unit(id).psi_master {
+            return Err(ActionError::NoPsi);
+        }
+        let t = self.unit(target);
+        if !t.is_active() || t.side == self.unit(id).side || t.possessed > 0 {
+            return Err(ActionError::BadTarget);
+        }
+        if cheb(self.unit(id).tile, t.tile) > TERRIFY_RANGE_TILES {
+            return Err(ActionError::OutOfRange);
+        }
+        let cost = self.unit(id).tu_max * POSSESS_COST_PCT / 100;
+        if self.unit(id).tu < cost {
+            return Err(ActionError::NotEnoughTu);
+        }
+        self.unit_mut(id).tu -= cost;
+
+        let attack = 45 + self.rng.roll(56) as i32;
+        let defense = {
+            let t = self.unit(target);
+            t.bravery + t.morale / 4 + self.rng.roll(31) as i32
+        };
+        if attack > defense {
+            self.unit_mut(target).possessed = 1;
+            Ok(vec![Event::Possessed { unit: target, by: id }])
+        } else {
+            Ok(vec![Event::Terrified { unit: id, target, morale_lost: 0 }])
+        }
+    }
+
+    fn do_throw_smoke(&mut self, id: UnitId, at: IVec3) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        if self.unit(id).smoke_grenades == 0 {
+            return Err(ActionError::NoCharges);
+        }
+        let cost = self.unit(id).tu_max * 20 / 100;
+        if self.unit(id).tu < cost {
+            return Err(ActionError::NotEnoughTu);
+        }
+        if cheb(self.unit(id).tile, at) > GRENADE_RANGE_TILES {
+            return Err(ActionError::OutOfRange);
+        }
+        {
+            let u = self.unit_mut(id);
+            u.tu -= cost;
+            u.smoke_grenades -= 1;
+        }
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let tile = at + IVec3::new(dx, dy, 0);
+                if self.tiles.is_walkable(tile) {
+                    self.add_cloud(tile, CloudKind::Smoke, 5);
+                }
+            }
+        }
+        Ok(vec![Event::SmokePopped { at }])
+    }
+
+    fn do_open_door(&mut self, id: UnitId, at: IVec3) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        if cheb(self.unit(id).tile, at) > 1 {
+            return Err(ActionError::NotAdjacent);
+        }
+        if self.unit(id).tu < 6 {
+            return Err(ActionError::NotEnoughTu);
+        }
+        let Some(door) = self.doors.iter_mut().find(|(tile, open)| *tile == at && !open) else {
+            return Err(ActionError::NoDoor);
+        };
+        door.1 = true;
+        self.unit_mut(id).tu -= 6;
+        // Swing the leaf: clear the tile's blocking mass.
+        let o = at * TILE_VOXELS;
+        self.world.fill_box(
+            o + IVec3::new(0, 0, 4),
+            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, 14),
+            ods_voxel::Voxel::EMPTY,
+        );
+        self.tiles
+            .rederive_region(&self.world, o, o + IVec3::splat(TILE_VOXELS));
+        Ok(vec![Event::DoorOpened { at }])
+    }
+
+    fn add_cloud(&mut self, tile: IVec3, kind: CloudKind, ttl: u32) {
+        if let Some(c) = self.clouds.iter_mut().find(|(t, k, _)| *t == tile && *k == kind) {
+            c.2 = c.2.max(ttl);
+        } else {
+            self.clouds.push((tile, kind, ttl));
+        }
+    }
+
+    fn smoke_blocks(&self, from: Vec3, to: Vec3) -> bool {
+        // March tile centers along the sight line; any smoke between the
+        // endpoints (exclusive) fogs the shot.
+        let from_t = crate::voxel_to_tile(from.as_ivec3());
+        let to_t = crate::voxel_to_tile(to.as_ivec3());
+        let steps = cheb(from_t, to_t);
+        if steps <= 1 {
+            return false;
+        }
+        for i in 1..steps {
+            let p = from + (to - from) * (i as f32 / steps as f32);
+            let tile = crate::voxel_to_tile(p.as_ivec3());
+            if tile != from_t
+                && tile != to_t
+                && self
+                    .clouds
+                    .iter()
+                    .any(|(t, k, _)| *t == tile && *k == CloudKind::Smoke)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn near_fire(&self, tile: IVec3) -> bool {
+        self.clouds
+            .iter()
+            .any(|(t, k, _)| *k == CloudKind::Fire && cheb(*t, tile) <= 1)
     }
 
     fn do_turn(&mut self, id: UnitId, toward: IVec3) -> Result<Vec<Event>, ActionError> {
@@ -603,8 +766,14 @@ impl Battle {
         mode: FireMode,
     ) -> Result<Vec<Event>, ActionError> {
         self.check_actor(id)?;
+        let shooter_possessed = self.unit(id).possessed > 0;
         let t = self.unit(target);
-        if !t.is_active() || t.side == self.unit(id).side {
+        if !t.is_active() {
+            return Err(ActionError::BadTarget);
+        }
+        // The possessed turn their guns on their own; the free choose enemies.
+        let friendly = t.side == self.unit(id).side;
+        if friendly != shooter_possessed || t.id == id {
             return Err(ActionError::BadTarget);
         }
         let cost = self
@@ -735,6 +904,11 @@ impl Battle {
         self.tiles
             .rederive_region(&self.world, c - IVec3::splat(r), c + IVec3::splat(r));
         events.push(Event::Exploded { at, voxels: destroyed });
+        // Hellfire lingers: the blast site burns.
+        if self.tiles.is_walkable(at) {
+            self.add_cloud(at, CloudKind::Fire, 4);
+            events.push(Event::FireStarted { at });
+        }
         self.check_objective(events);
 
         let victims: Vec<UnitId> = self
@@ -940,7 +1114,8 @@ impl Battle {
 
     fn check_victory(&mut self, events: &mut Vec<Event>) {
         for side in [Side::Order, Side::Demons] {
-            if self.living(side).count() == 0 {
+            // Civilians can survive without holding the field.
+            if self.living(side).filter(|u| !u.civilian).count() == 0 {
                 self.winner = Some(side.enemy());
                 events.push(Event::BattleOver { winner: side.enemy() });
                 return;
@@ -968,6 +1143,77 @@ impl Battle {
             self.explode(at, GRENADE_POWER, None, &mut events);
             if self.winner.is_some() {
                 return events;
+            }
+        }
+
+        // Smoke thins; fire gutters, burns, and spreads.
+        for c in &mut self.clouds {
+            c.2 -= 1;
+        }
+        let expired: Vec<()> = Vec::new();
+        let _ = expired;
+        self.clouds.retain(|(_, _, ttl)| *ttl > 0);
+        if self.side_to_move == Side::Order {
+            // Once per full round: fire reaches for fresh fuel.
+            let fires: Vec<IVec3> = self
+                .clouds
+                .iter()
+                .filter(|(_, k, _)| *k == CloudKind::Fire)
+                .map(|(t, _, _)| *t)
+                .collect();
+            for at in fires {
+                if self.rng.roll(100) < 30 {
+                    const RING: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+                    let (dx, dy) = RING[self.rng.roll(4) as usize];
+                    let next = at + IVec3::new(dx, dy, 0);
+                    if self.tiles.is_walkable(next)
+                        && !self
+                            .clouds
+                            .iter()
+                            .any(|(t, k, _)| *t == next && *k == CloudKind::Fire)
+                    {
+                        self.add_cloud(next, CloudKind::Fire, 3);
+                        events.push(Event::FireStarted { at: next });
+                    }
+                }
+            }
+        }
+        // Anyone standing in flame burns.
+        let burning: Vec<UnitId> = self
+            .units
+            .iter()
+            .filter(|u| {
+                u.is_active()
+                    && u.side == self.side_to_move
+                    && self
+                        .clouds
+                        .iter()
+                        .any(|(t, k, _)| *t == u.tile && *k == CloudKind::Fire)
+            })
+            .map(|u| u.id)
+            .collect();
+        for id in burning {
+            let dmg = 6 + self.rng.roll(8) as i32;
+            events.push(Event::Burned { unit: id, amount: dmg });
+            self.unit_mut(id).morale = (self.unit(id).morale - 10).max(0);
+            self.apply_damage(id, dmg, None, &mut events);
+            if self.winner.is_some() {
+                return events;
+            }
+        }
+
+        // Seized minds come back to their owners.
+        let possessed: Vec<UnitId> = self
+            .units
+            .iter()
+            .filter(|u| u.alive && u.side == self.side_to_move && u.possessed > 0)
+            .map(|u| u.id)
+            .collect();
+        for id in possessed {
+            let u = self.unit_mut(id);
+            u.possessed -= 1;
+            if u.possessed == 0 {
+                events.push(Event::PossessionEnds { unit: id });
             }
         }
 
@@ -1723,6 +1969,112 @@ mod tests {
         }
         assert!(worst_miss > 0, "a 1-accuracy thrower must fumble sometimes");
         assert!(worst_miss <= 2, "scatter is bounded: {worst_miss}");
+    }
+
+    #[test]
+    fn smoke_blinds_and_fades() {
+        let mut b = open_field(duelists(), 3);
+        assert!(b.can_see(UnitId(0), UnitId(1)));
+        let events = b
+            .perform(Action::ThrowSmoke { unit: UnitId(0), at: IVec3::new(5, 5, 0) })
+            .unwrap();
+        assert!(matches!(events[0], Event::SmokePopped { .. }));
+        assert!(!b.can_see(UnitId(0), UnitId(1)), "smoke between them blinds both");
+        // Smoke thins over half-turns.
+        for _ in 0..12 {
+            b.perform(Action::EndTurn).unwrap();
+        }
+        assert!(b.clouds.is_empty(), "smoke cannot last forever");
+        assert!(b.can_see(UnitId(0), UnitId(1)));
+    }
+
+    #[test]
+    fn explosions_start_fires_that_burn() {
+        let mut b = open_field(duelists(), 6);
+        b.perform(Action::Throw { unit: UnitId(0), at: IVec3::new(6, 6, 0) })
+            .unwrap();
+        assert!(
+            b.clouds.iter().any(|(_, k, _)| *k == CloudKind::Fire),
+            "the blast site must burn"
+        );
+        // Park the imp in the flames and let its turn start.
+        let fire_tile = b
+            .clouds
+            .iter()
+            .find(|(_, k, _)| *k == CloudKind::Fire)
+            .map(|(t, _, _)| *t)
+            .unwrap();
+        b.units[1].tile = fire_tile;
+        let hp = b.unit(UnitId(1)).health;
+        let events = b.perform(Action::EndTurn).unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Burned { unit, .. } if *unit == UnitId(1)))
+                || b.unit(UnitId(1)).health < hp
+                || !b.unit(UnitId(1)).alive,
+            "standing in fire hurts: {events:?}"
+        );
+    }
+
+    #[test]
+    fn possession_turns_a_rifle_on_its_own_squad() {
+        let mut units = vec![
+            Unit::soldier(0, "Puppet", IVec3::new(2, 5, 0)),
+            Unit::soldier(1, "Victim", IVec3::new(3, 5, 0)),
+            Unit::prince(2, "Prince", IVec3::new(10, 5, 0)),
+        ];
+        units[0].bravery = 5;
+        units[0].morale = 20; // an easy mind to take
+        let mut b = open_field(units, 3);
+        b.perform(Action::EndTurn).unwrap();
+
+        let mut possessed = false;
+        for _ in 0..20 {
+            if b.unit(UnitId(2)).tu < 55 * POSSESS_COST_PCT / 100 {
+                b.perform(Action::EndTurn).unwrap();
+                if b.winner.is_some() {
+                    break;
+                }
+                b.perform(Action::EndTurn).unwrap();
+            }
+            let events = b
+                .perform(Action::Possess { unit: UnitId(2), target: UnitId(0) })
+                .unwrap();
+            if events.iter().any(|e| matches!(e, Event::Possessed { .. })) {
+                possessed = true;
+                break;
+            }
+        }
+        assert!(possessed, "a broken mind cannot resist forever");
+        // The puppet may now fire on its own side — during the demon turn.
+        let result = b.perform(Action::Fire {
+            unit: UnitId(0),
+            target: UnitId(1),
+            mode: FireMode::Snap,
+        });
+        assert!(result.is_ok(), "the possessed turn on their own: {result:?}");
+        // And is not the Order's to command once play returns.
+        b.perform(Action::EndTurn).unwrap();
+        if b.unit(UnitId(0)).possessed > 0 {
+            assert_eq!(
+                b.perform(Action::Move { unit: UnitId(0), to: IVec3::new(1, 1, 0) }),
+                Err(ActionError::NotYourTurn)
+            );
+        }
+    }
+
+    #[test]
+    fn civilians_do_not_hold_the_field() {
+        let mut units = duelists();
+        units.push(Unit::civilian(2, "Berta", IVec3::new(3, 3, 0)));
+        let mut b = open_field(units, 3);
+        let mut events = Vec::new();
+        b.apply_damage(UnitId(0), 999, None, &mut events);
+        assert_eq!(
+            b.winner,
+            Some(Side::Demons),
+            "with the soldier dead, a cowering civilian holds nothing"
+        );
+        assert!(b.unit(UnitId(2)).alive, "but she may yet live");
     }
 
     #[test]

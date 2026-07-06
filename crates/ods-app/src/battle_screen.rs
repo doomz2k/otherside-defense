@@ -129,6 +129,32 @@ impl BattleScreen {
             KeyCode::Digit2 => self.fire_mode = FireMode::Aimed,
             KeyCode::Digit3 => self.fire_mode = FireMode::Auto,
             KeyCode::KeyG => self.grenade_armed = !self.grenade_armed,
+            KeyCode::KeyV => {
+                // Pop smoke at the selected soldier's feet-ish forward tile.
+                if let Some(id) = self.selected {
+                    let at = self.battle.unit(id).tile + self.battle.unit(id).facing * 2;
+                    let result = self.battle.perform(Action::ThrowSmoke { unit: id, at });
+                    self.apply(renderer, audio, result);
+                }
+            }
+            KeyCode::KeyO => {
+                // Open the nearest adjacent closed door.
+                if let Some(id) = self.selected {
+                    let me = self.battle.unit(id).tile;
+                    let door = self
+                        .battle
+                        .doors
+                        .iter()
+                        .find(|(tile, open)| !open && (*tile - me).abs().max_element() <= 1)
+                        .map(|(tile, _)| *tile);
+                    if let Some(at) = door {
+                        let result = self.battle.perform(Action::OpenDoor { unit: id, at });
+                        self.apply(renderer, audio, result);
+                    } else {
+                        self.log.push("no closed door within reach".to_string());
+                    }
+                }
+            }
             KeyCode::KeyK => {
                 if let Some(id) = self.selected {
                     let result = self.battle.perform(Action::Kneel { unit: id });
@@ -288,6 +314,8 @@ impl BattleScreen {
         if self.battle.winner.is_some() {
             return;
         }
+        let fled = ai::run_civilian_moves(&mut self.battle);
+        self.consume(renderer, audio, &fled);
         match self.battle.perform(Action::EndTurn) {
             Ok(events) => self.consume(renderer, audio, &events),
             Err(e) => {
@@ -509,6 +537,13 @@ impl BattleScreen {
                 }
             }
         }
+        for (tile, kind, _) in &self.battle.clouds {
+            let color = match kind {
+                ods_sim::battle::CloudKind::Smoke => [0.7, 0.7, 0.75, 0.45],
+                ods_sim::battle::CloudKind::Fire => [1.0, 0.45, 0.1, 0.5],
+            };
+            push_tile_quad(&mut verts, &mut indices, *tile, color);
+        }
         if let Some(id) = self.selected {
             let u = self.battle.unit(id);
             if u.alive {
@@ -636,6 +671,14 @@ fn describe(event: &Event, battle: &Battle) -> String {
         Event::ChargeDropped { at, timer } => {
             format!("a primed charge drops at {at} — {timer} half-turns on the fuse")
         }
+        Event::SmokePopped { at } => format!("smoke blooms at {at}"),
+        Event::FireStarted { at } => format!("fire takes hold at {at}"),
+        Event::Burned { unit, amount } => format!("{} burns ({amount})", name(unit)),
+        Event::DoorOpened { at } => format!("a door swings open at {at}"),
+        Event::Possessed { unit, by } => {
+            format!("!!! {} SEIZES {}'s MIND !!!", name(by), name(unit))
+        }
+        Event::PossessionEnds { unit } => format!("{} is their own again", name(unit)),
         Event::BattleOver { winner } => format!("=== BATTLE OVER: {winner:?} wins ==="),
     }
 }

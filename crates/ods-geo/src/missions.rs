@@ -25,6 +25,9 @@ pub struct BattleReport {
     /// Unconscious demons on a held field: bound and dragged home.
     pub captured_grunts: u32,
     pub captured_overseers: u32,
+    /// Townsfolk alive / lost on massacre sites.
+    pub civilians_saved: u32,
+    pub civilians_dead: u32,
 }
 
 const MAX_AUTO_TURNS: u32 = 40;
@@ -36,9 +39,16 @@ pub(crate) fn build_assault(
     kits: &[(u32, u32)],
     demon_count: u32,
     strength: u32,
+    civilians: u32,
     research: &ResearchState,
 ) -> Battle {
-    scenario::incursion(seed, make_units(squad, kits, research), demon_count, strength)
+    scenario::incursion_with_civilians(
+        seed,
+        make_units(squad, kits, research),
+        demon_count,
+        strength,
+        civilians,
+    )
 }
 
 /// Build a Reckoning: demons breaching the chapterhouse itself, on a map
@@ -73,7 +83,12 @@ pub(crate) fn run_auto(battle: &mut Battle) -> u32 {
 pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
     use ods_sim::units::Species;
 
-    let demons_total = (battle.units.len() - squad_len) as u32;
+    let demons_total = battle
+        .units
+        .iter()
+        .skip(squad_len)
+        .filter(|u| !u.civilian)
+        .count() as u32;
     let victory = battle.winner == Some(Side::Order);
 
     let mut dead = Vec::new();
@@ -93,9 +108,20 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
         for u in battle.units.iter().skip(squad_len) {
             if u.alive && !u.conscious && u.side == Side::Demons {
                 match u.species {
-                    Species::Overseer => captured_overseers += 1,
+                    Species::Overseer | Species::Prince => captured_overseers += 1,
                     _ => captured_grunts += 1,
                 }
+            }
+        }
+    }
+
+    let (mut civilians_saved, mut civilians_dead) = (0, 0);
+    for u in battle.units.iter().skip(squad_len) {
+        if u.civilian {
+            if u.alive && u.side == Side::Order {
+                civilians_saved += 1;
+            } else {
+                civilians_dead += 1;
             }
         }
     }
@@ -108,6 +134,8 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
         demons_slain: demons_total.saturating_sub(battle.living(Side::Demons).count() as u32),
         captured_grunts,
         captured_overseers,
+        civilians_saved,
+        civilians_dead,
     }
 }
 

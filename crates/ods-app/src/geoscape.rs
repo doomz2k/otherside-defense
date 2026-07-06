@@ -198,7 +198,18 @@ impl Core {
                         "Open the way to the Otherside ({} brimstone).",
                         ods_geo::FINAL_ASSAULT_BRIMSTONE
                     ));
-                    if ui
+                    if c.sanctum_open {
+                        ui.colored_label(
+                            egui::Color32::GOLD,
+                            "The breach holds. The sanctum waits.",
+                        );
+                        if ui
+                            .button(egui::RichText::new("⚔ INTO THE SANCTUM").strong())
+                            .clicked()
+                        {
+                            action = GeoAction::LeadMission(MissionKind::FinalSanctum);
+                        }
+                    } else if ui
                         .button(egui::RichText::new("⚔ THE FINAL ASSAULT").strong())
                         .clicked()
                     {

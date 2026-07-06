@@ -14,7 +14,45 @@ pub fn run_demon_turn(battle: &mut Battle) -> Vec<Event> {
 
 /// Play out the Order turn (campaign auto-resolve only) and hand play back.
 pub fn run_order_turn(battle: &mut Battle) -> Vec<Event> {
-    run_side_turn(battle, Side::Order)
+    let mut events = run_civilian_moves(battle);
+    events.extend(run_side_turn(battle, Side::Order));
+    events
+}
+
+/// Civilians bolt away from the nearest demon. Call during the Order's turn
+/// (the app calls it before ending the player's turn; the auto-resolver
+/// folds it into `run_order_turn`).
+pub fn run_civilian_moves(battle: &mut Battle) -> Vec<Event> {
+    let mut events = Vec::new();
+    if battle.side_to_move != Side::Order || battle.winner.is_some() {
+        return events;
+    }
+    let civs: Vec<UnitId> = battle
+        .living(Side::Order)
+        .filter(|u| u.civilian && u.possessed == 0)
+        .map(|u| u.id)
+        .collect();
+    for id in civs {
+        let me = battle.unit(id).tile;
+        let Some(threat) = battle
+            .living(Side::Demons)
+            .min_by_key(|u| (dist(me, u.tile), u.id.0))
+            .map(|u| u.tile)
+        else {
+            break;
+        };
+        if dist(me, threat) > 10 {
+            continue; // far enough; cower in place
+        }
+        let away = me + (me - threat).signum() * 4;
+        if let Some(goal) = nearest_open_neighbor(battle, away, me, false)
+            && goal != me
+            && let Ok(ev) = battle.perform(Action::Move { unit: id, to: goal })
+        {
+            events.extend(ev);
+        }
+    }
+    events
 }
 
 fn run_side_turn(battle: &mut Battle, side: Side) -> Vec<Event> {
@@ -23,7 +61,39 @@ fn run_side_turn(battle: &mut Battle, side: Side) -> Vec<Event> {
         return events;
     }
 
-    let troops: Vec<UnitId> = battle.living(side).map(|u| u.id).collect();
+    // Puppets first: enemy units under possession act for this side.
+    let puppets: Vec<UnitId> = battle
+        .units
+        .iter()
+        .filter(|u| u.is_active() && u.side != side && u.possessed > 0)
+        .map(|u| u.id)
+        .collect();
+    for id in puppets {
+        // Fire on their own nearest squadmate until dry.
+        for _ in 0..4 {
+            if battle.winner.is_some() || !battle.unit(id).is_active() {
+                break;
+            }
+            let me_tile = battle.unit(id).tile;
+            let victim = battle
+                .units
+                .iter()
+                .filter(|u| u.is_active() && u.side != side && u.id != id && u.possessed == 0)
+                .min_by_key(|u| (dist(me_tile, u.tile), u.id.0))
+                .map(|u| u.id);
+            let Some(victim) = victim else { break };
+            match battle.perform(Action::Fire { unit: id, target: victim, mode: FireMode::Snap }) {
+                Ok(ev) => events.extend(ev),
+                Err(_) => break,
+            }
+        }
+    }
+
+    let troops: Vec<UnitId> = battle
+        .living(side)
+        .filter(|u| !u.civilian && u.possessed == 0)
+        .map(|u| u.id)
+        .collect();
     for id in troops {
         // Each iteration must spend TU or break, so this always terminates;
         // the cap is a backstop.
@@ -64,6 +134,15 @@ fn pick_action(battle: &Battle, id: UnitId, side: Side) -> Option<Action> {
         {
             return Some(Action::Move { unit: id, to: goal });
         }
+    }
+
+    // Princes seize minds outright when the strength is in them.
+    if me.psi_master
+        && me.tu >= me.tu_max * crate::battle::POSSESS_COST_PCT / 100
+        && prey_dist <= crate::battle::TERRIFY_RANGE_TILES
+        && prey.possessed == 0
+    {
+        return Some(Action::Possess { unit: id, target: prey.id });
     }
 
     // Psi talents whisper before they fight: break the bravest target.

@@ -19,6 +19,8 @@ const WALL_TOP: i32 = 14;
 pub const MAT_GROUND: Voxel = Voxel(1);
 pub const MAT_WALL: Voxel = Voxel(2);
 pub const MAT_RUBBLE: Voxel = Voxel(3);
+/// Door leaf: a thin blocking slab until opened (or blown apart).
+pub const MAT_DOOR: Voxel = Voxel(5);
 /// The rift obelisk: hell's anchor into the world. Demolish it to win.
 pub const MAT_OBELISK: Voxel = Voxel(4);
 
@@ -93,10 +95,14 @@ pub fn demon_pack(count: u32, strength: u32, first_id: u32, spawns: &[(i32, i32)
         let (x, y) = spawns[i];
         let tile = IVec3::new(x, y, 0);
         let name = names[i % names.len()];
-        let unit = if strength >= 5 && i == 0 {
+        let unit = if strength >= 10 && i == 0 {
+            Unit::prince(id, &format!("Prince of {name}"), tile)
+        } else if strength >= 5 && i == 0 {
             Unit::overseer(id, &format!("Overseer of {name}"), tile)
         } else if strength >= 7 && i == 1 {
             Unit::taker(id, "The Taker", tile)
+        } else if strength >= 10 && i == 2 {
+            Unit::overseer(id, &format!("Overseer of {name}"), tile)
         } else if strength >= 3 {
             match i % 4 {
                 2 => Unit::hellhound(id, &format!("Hound of {name}"), tile),
@@ -115,7 +121,18 @@ pub fn demon_pack(count: u32, strength: u32, first_id: u32, spawns: &[(i32, i32)
 /// demon head-count, and an escalation strength. Unit ids are reassigned to
 /// match battle indexing; squad order is preserved so the caller can map
 /// results back to its roster.
-pub fn incursion(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32, strength: u32) -> Battle {
+pub fn incursion(seed: u64, soldiers: Vec<Unit>, demon_count: u32, strength: u32) -> Battle {
+    incursion_with_civilians(seed, soldiers, demon_count, strength, 0)
+}
+
+/// Massacre sites have townsfolk still alive in the chapel — for now.
+pub fn incursion_with_civilians(
+    seed: u64,
+    mut soldiers: Vec<Unit>,
+    demon_count: u32,
+    strength: u32,
+    civilians: u32,
+) -> Battle {
     let mut world = VoxelWorld::new();
     world.fill_box(
         IVec3::ZERO,
@@ -172,7 +189,34 @@ pub fn incursion(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32, strength:
     }
     units.extend(demon_pack(demon_count, strength, units.len() as u32, &DEMON_SPAWNS));
 
+    // Townsfolk sheltering inside the chapel walls.
+    const CIV_SPAWNS: [(i32, i32); 4] = [(11, 10), (12, 13), (10, 12), (13, 10)];
+    let civ_names = ["Aldwin", "Berta", "Cosmin", "Delia"];
+    for i in 0..civilians.min(4) as usize {
+        let (x, y) = CIV_SPAWNS[i];
+        units.push(Unit::civilian(
+            units.len() as u32,
+            civ_names[i],
+            IVec3::new(x, y, 0),
+        ));
+    }
+
+    // Hang door leaves in the chapel doorways: thin slabs across the passage.
+    let mut door_tiles = Vec::new();
+    for (tx, ty) in [(9, 11), (14, 12)] {
+        let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
+        world.fill_box(
+            o + IVec3::new(6, 0, GROUND_TOP),
+            o + IVec3::new(10, TILE_VOXELS, 14),
+            MAT_DOOR,
+        );
+        door_tiles.push(IVec3::new(tx, ty, 0));
+    }
+
     let mut battle = Battle::new(world, IVec3::ZERO, MAP_TILES, units, seed);
+    for tile in door_tiles {
+        battle.doors.push((tile, false));
+    }
     battle.set_objective(obelisk_min, obelisk_max);
     battle
 }
@@ -449,6 +493,46 @@ mod tests {
             "{all_events:?}"
         );
         assert_eq!(b.winner, Some(crate::units::Side::Order));
+    }
+
+    #[test]
+    fn chapel_doors_block_until_opened() {
+        use crate::battle::{Action, Event};
+        use crate::units::UnitId;
+
+        let mut soldiers = vec![Unit::soldier(0, "S", glam::IVec3::ZERO)];
+        soldiers[0].tu_max = 99;
+        let mut b = super::incursion(3, soldiers, 0, 1);
+        let door = glam::IVec3::new(9, 11, 0);
+        assert!(!b.tiles.is_walkable(door), "a closed door bars the way");
+
+        b.units[0].tile = glam::IVec3::new(8, 11, 0); // on the stoop
+        b.units[0].tu = 99;
+        let events = b.perform(Action::OpenDoor { unit: UnitId(0), at: door }).unwrap();
+        assert!(matches!(events[0], Event::DoorOpened { .. }));
+        assert!(b.tiles.is_walkable(door), "an open door is a doorway again");
+        assert_eq!(
+            b.perform(Action::OpenDoor { unit: UnitId(0), at: door }),
+            Err(crate::battle::ActionError::NoDoor)
+        );
+    }
+
+    #[test]
+    fn massacre_sites_shelter_civilians() {
+        use crate::ai;
+        use crate::units::Side;
+
+        let soldiers = vec![Unit::soldier(0, "S", glam::IVec3::ZERO)];
+        let mut b = super::incursion_with_civilians(5, soldiers, 3, 1, 4);
+        let civs = b.units.iter().filter(|u| u.civilian).count();
+        assert_eq!(civs, 4);
+        for u in b.units.iter().filter(|u| u.civilian) {
+            assert!(b.tiles.is_walkable(u.tile), "{} spawns clear", u.name);
+        }
+        // They flee on their own during the Order turn.
+        let events = ai::run_civilian_moves(&mut b);
+        let _ = events; // may be empty if no demon is near enough — fine
+        assert_eq!(b.side_to_move, Side::Order, "flight is not a turn");
     }
 
     #[test]
