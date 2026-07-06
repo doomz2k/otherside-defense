@@ -46,21 +46,34 @@ and pathing.
 | `K` | kneel (+15% accuracy until you move) |
 | `H` | field-dress the selected soldier (staunch bleeding) |
 | `V` / `O` | pop smoke ahead / open an adjacent door |
+| `U` / `J` | carry a fallen comrade / scavenge a weapon |
 | `F` | floor cutaway (see inside ground-floor interiors) |
 | Tab | next soldier |
 | Space or Enter | end turn (demons play) |
 | Right-drag / scroll / WASD | orbit / zoom / pan camera |
 | Esc | disarm charge / deselect |
 
+Damage numbers, misses, terror, and crippled parts float up from the field;
+night fights sink into cold blue lit only by muzzle flash and open flame.
+
 ## The bestiary
 
 Imps swarm; **Overseers** whisper Terrify through walls; **Hellhounds** charge
-on 70 TU; **Bile-wisps** lob acid over cover; and the **Taker** kills soldiers
-into Husks that stand up on the wrong side — and hatch a fresh Taker when
-destroyed. Packs escalate by campaign month. Every creature is drawn as a
-voxel figure assembled from named body parts (head, torso, each limb, horns,
-maws, tails — declared in `ods-sim`'s anatomy, built in `ods-app/figures.rs`)
-so location-based damage and customisation can hook in per-part later.
+on 70 TU; **Bile-wisps** lob acid over cover; **Gargoyles** fly true and perch
+where they please; **Behemoths** walk straight through walls; **Princes**
+possess minds outright; and the **Taker** kills soldiers into Husks that stand
+up on the wrong side — and hatch a fresh Taker when destroyed. Packs escalate
+by campaign month. Every creature is drawn as a voxel figure assembled from
+named body parts (head, torso, each limb, horns, maws, tails — declared in
+`ods-sim`'s anatomy, built in `ods-app/figures.rs`); heavy hits cripple those
+same parts (arms spoil aim, legs slow movement, headshots stun), and wounds
+that never heal right become permanent scars on the roster. The in-game
+**Bestiary** fills in lore for every breed met — take one alive and the
+occultists open it up, anatomy and all.
+
+All weapon and species numbers live in RON tables
+(`crates/ods-sim/data/*.ron`), embedded at build time and overridable by
+dropping edited copies in `./data/` next to the executable — the modding hook.
 
 ## The campaign arc
 
@@ -97,11 +110,16 @@ Forbidden Codex (blessed arms, hellsteel plate, rift augury). Two badly-losing
 months or deep debt ends the campaign — the classic slow defeat is fully in.
 
 Beyond v1: rifts are **soft for their first two days** and dig in afterwards,
-so striking fast matters; victories salvage **brimstone and hellsteel** (sell
-it, or spend it to unlock the Hellfire Lance); soldiers **grow by doing** —
-accuracy from hits, reactions from overwatch, bravery from surviving dread —
-with kills and missions on their permanent record. And every banishment heats
-hell's attention: at 5 heat a **Reckoning** is scheduled, a base-defense
-battle fought on a map generated from your actual chapterhouse floor plan.
-Lose it (or have no fit defenders) and the campaign ends with the
-chapterhouse in ruins.
+so striking fast matters; victories salvage **brimstone and hellsteel** (sold
+at reliquary prices that reroll monthly, or spent to unlock the Hellfire
+Lance); soldiers **grow by doing** — accuracy from hits, reactions from
+overwatch, bravery from surviving dread — with kills, missions, quirks they
+were born with, and lasting scars all on their permanent record. Regions have
+a **panic** level: expiries frighten them, banishments soothe them, and past
+the breakpoint their patrons flee and hell schedules extra terror to feed on
+the fear. Every banishment heats hell's attention: at 5 heat a **Reckoning**
+strikes one of your chapterhouses — a base-defense battle on a map generated
+from that house's actual floor plan, defended by the soldiers stationed
+there. Losing an outpost costs the outpost; losing the founding house ends
+the campaign. The Order's whole record — missions, kills, captures, shots
+fired, civilians saved — accrues in the **Ledger**.
