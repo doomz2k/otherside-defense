@@ -24,10 +24,18 @@ pub enum Facility {
     Chapel,
     /// Warded meditation cells: garrisoned soldiers slowly steel their nerve.
     Sanctum,
+    /// A drill yard: garrisoned soldiers train toward the chosen focus.
+    TrainingGround,
+    /// Pre-chalked ward lines for the day the gate comes down.
+    WardTower,
+    /// Blessed hounds — they fight for the halls when the halls are hit.
+    Kennel,
+    /// Warded storage: salvage survives a Reckoning's looting.
+    Vault,
 }
 
 impl Facility {
-    pub const BUILDABLE: [Facility; 7] = [
+    pub const BUILDABLE: [Facility; 11] = [
         Facility::Quarters,
         Facility::AugurArray,
         Facility::Library,
@@ -35,6 +43,10 @@ impl Facility {
         Facility::Workshop,
         Facility::Chapel,
         Facility::Sanctum,
+        Facility::TrainingGround,
+        Facility::WardTower,
+        Facility::Kennel,
+        Facility::Vault,
     ];
 
     pub fn cost(self) -> i64 {
@@ -47,6 +59,10 @@ impl Facility {
             Facility::Workshop => 150,
             Facility::Chapel => 180,
             Facility::Sanctum => 220,
+            Facility::TrainingGround => 160,
+            Facility::WardTower => 140,
+            Facility::Kennel => 170,
+            Facility::Vault => 190,
         }
     }
 
@@ -60,6 +76,10 @@ impl Facility {
             Facility::Workshop => 10,
             Facility::Chapel => 12,
             Facility::Sanctum => 14,
+            Facility::TrainingGround => 10,
+            Facility::WardTower => 8,
+            Facility::Kennel => 10,
+            Facility::Vault => 12,
         }
     }
 
@@ -73,6 +93,10 @@ impl Facility {
             Facility::Workshop => 10,
             Facility::Chapel => 8,
             Facility::Sanctum => 10,
+            Facility::TrainingGround => 8,
+            Facility::WardTower => 6,
+            Facility::Kennel => 10,
+            Facility::Vault => 8,
         }
     }
 
@@ -86,6 +110,10 @@ impl Facility {
             Facility::Workshop => "Workshop",
             Facility::Chapel => "Chapel",
             Facility::Sanctum => "Sanctum",
+            Facility::TrainingGround => "Training Ground",
+            Facility::WardTower => "Ward Tower",
+            Facility::Kennel => "Kennel",
+            Facility::Vault => "Vault",
         }
     }
 }

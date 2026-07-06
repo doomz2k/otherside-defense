@@ -102,6 +102,23 @@ pub fn narrate(c: &Campaign, event: &GeoEvent) -> String {
         E::NightTerror { name } => {
             format!("{stamp} {name} wakes screaming; the ward-candles are lit until dawn")
         }
+        E::SkyHunt { region, outcome } => match outcome {
+            ods_geo::SkyHuntOutcome::Repelled => format!(
+                "{stamp} gargoyles struck the zeppelin over {} — driven off",
+                region.name()
+            ),
+            ods_geo::SkyHuntOutcome::Bloodied => format!(
+                "{stamp} !!! gargoyles tore into the zeppelin over {} — the squad flies on, bleeding",
+                region.name()
+            ),
+            ods_geo::SkyHuntOutcome::TurnedBack => format!(
+                "{stamp} !!! the zeppelin limps home from {} with its skin flapping",
+                region.name()
+            ),
+        },
+        E::SalvageLooted { brimstone, hellsteel } => format!(
+            "{stamp} the breach reached the stores: {brimstone} brimstone and {hellsteel} hellsteel carried off"
+        ),
         E::RelicFound { name } => {
             format!("{stamp} in the rubble, something old and holy: {name}")
         }

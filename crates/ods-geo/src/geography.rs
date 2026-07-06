@@ -65,6 +65,20 @@ impl Region {
         }
     }
 
+    /// The council patron who signs this region's tithe.
+    pub fn patron(self) -> &'static str {
+        match self {
+            Region::NorthAmerica => "Governor Ashcroft",
+            Region::SouthAmerica => "Doña Marisol de Vega",
+            Region::Europe => "Cardinal Voss",
+            Region::Africa => "the Oba of Brass",
+            Region::MiddleEast => "Emir Khalidun",
+            Region::Asia => "Minister Qiao",
+            Region::Oceania => "Commodore Harrow",
+            Region::Arctic => "the Keeper of the White Chapel",
+        }
+    }
+
     /// Marker anchor / squad-departure point per region (lat, lon).
     pub fn centroid(self) -> (f32, f32) {
         match self {

@@ -92,7 +92,9 @@ pub(crate) fn build_assault(
 }
 
 /// Build a Reckoning: demons breaching the chapterhouse itself, on a map
-/// generated from the actual facility layout.
+/// generated from the actual facility layout — plus whatever fortifications
+/// the house actually built.
+#[allow(clippy::too_many_arguments)] // a garrison brief has this many parts
 pub(crate) fn build_defense(
     seed: u64,
     squad: &[&Soldier],
@@ -101,8 +103,29 @@ pub(crate) fn build_defense(
     research: &ResearchState,
     cells: &[(usize, usize)],
     gate: (usize, usize),
+    wards: u32,
+    hounds: u32,
 ) -> Battle {
-    scenario::base_defense(seed, make_units(squad, kits, research), demon_count, cells, gate)
+    scenario::base_defense_fortified(
+        seed,
+        make_units(squad, kits, research),
+        demon_count,
+        cells,
+        gate,
+        wards,
+        hounds,
+    )
+}
+
+/// Build a purge: storming a corrupted patron's manor.
+pub(crate) fn build_purge(
+    seed: u64,
+    squad: &[&Soldier],
+    kits: &[(u32, u32)],
+    demon_count: u32,
+    research: &ResearchState,
+) -> Battle {
+    scenario::manor_purge(seed, make_units(squad, kits, research), demon_count)
 }
 
 /// Drive a battle to its end with AI on both sides.

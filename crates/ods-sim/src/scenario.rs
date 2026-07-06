@@ -788,6 +788,34 @@ pub fn otherside(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32, strength:
     battle
 }
 
+/// A corrupted patron's manor: room-to-room work under chandeliers. Built
+/// on the base-defense generator's bones; half the garrison are CULTISTS —
+/// human traitors in human shapes, fighting for the other side.
+pub fn manor_purge(seed: u64, soldiers: Vec<Unit>, demon_count: u32) -> Battle {
+    const MANOR: [(usize, usize); 9] =
+        [(1, 1), (2, 1), (1, 2), (2, 2), (3, 2), (2, 3), (3, 3), (4, 2), (4, 3)];
+    let mut battle = base_defense(seed, soldiers, demon_count, &MANOR, (4, 3));
+    // Every second demon is a turned servant of the house.
+    let mut cultist = 0;
+    for u in &mut battle.units {
+        if u.side == crate::units::Side::Demons && !u.civilian {
+            cultist += 1;
+            if cultist % 2 == 0 {
+                let (id, tile) = (u.id.0, u.tile);
+                let mut c = Unit::soldier(id, &format!("Cultist {}", cultist / 2), tile);
+                c.side = crate::units::Side::Demons;
+                c.weapon = crate::units::hellspit();
+                c.bravery = 80; // faith of a kind
+                c.armor_front = 0;
+                c.armor_side = 0;
+                c.armor_rear = 0;
+                *u = c;
+            }
+        }
+    }
+    battle
+}
+
 /// Tiles per chapterhouse grid cell in a base-defense map.
 const CELL_TILES: i32 = 4;
 
@@ -798,10 +826,25 @@ const CELL_TILES: i32 = 4;
 /// *your* floor plan — base architecture is fortress design.
 pub fn base_defense(
     seed: u64,
+    soldiers: Vec<Unit>,
+    demon_count: u32,
+    cells: &[(usize, usize)],
+    gate: (usize, usize),
+) -> Battle {
+    base_defense_fortified(seed, soldiers, demon_count, cells, gate, 2, 0)
+}
+
+/// Base defense with the fortifications the chapterhouse actually built:
+/// `wards` chalked lines along the breach corridor, `hounds` blessed beasts
+/// mustering with the defenders.
+pub fn base_defense_fortified(
+    seed: u64,
     mut soldiers: Vec<Unit>,
     demon_count: u32,
     cells: &[(usize, usize)],
     gate: (usize, usize),
+    wards: u32,
+    hounds: u32,
 ) -> Battle {
     let grid = 6i32;
     let map_tiles = IVec3::new(grid * CELL_TILES, grid * CELL_TILES, 1);
@@ -874,7 +917,8 @@ pub fn base_defense(
     }
 
     let mut ward_tiles = Vec::new();
-    for idx in [6usize, 9] {
+    for k in 0..wards as usize {
+        let idx = 5 + k * 3;
         if idx < order.len().saturating_sub(8) {
             ward_tiles.push(order[idx]);
         }
@@ -896,6 +940,17 @@ pub fn base_defense(
             &format!("Imp of {}", demon_names[i]),
             order[i],
         ));
+    }
+    // The kennels open: blessed hounds hold the halls with the garrison.
+    for h in 0..hounds as usize {
+        let idx = order.len().saturating_sub(defenders + h + 1);
+        if idx < demon_count {
+            break; // no room left that isn't already contested
+        }
+        let id = units.len() as u32;
+        let mut hound = Unit::hellhound(id, &format!("Blessed Hound {}", h + 1), order[idx]);
+        hound.side = crate::units::Side::Order;
+        units.push(hound);
     }
 
     let mut battle = Battle::new(world, IVec3::ZERO, map_tiles, units, seed);

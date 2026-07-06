@@ -24,10 +24,13 @@ pub enum Project {
     /// Stitching what hell is made of onto what we are: prosthetics from
     /// hellsteel, grafts from captured flesh. The price is paid in sleep.
     FleshGrafting,
+    /// Armored gondolas and blessing-etched envelopes: sorties fight
+    /// through gargoyle sky-hunts instead of bleeding for them.
+    EscortGondola,
 }
 
 impl Project {
-    pub const ALL: [Project; 8] = [
+    pub const ALL: [Project; 9] = [
         Project::BlessedArms,
         Project::HellsteelPlate,
         Project::RiftAugury,
@@ -36,6 +39,7 @@ impl Project {
         Project::HeraldsConfession,
         Project::NameOfTheEnemy,
         Project::FleshGrafting,
+        Project::EscortGondola,
     ];
 
     /// Total occultist-days required.
@@ -49,6 +53,7 @@ impl Project {
             Project::HeraldsConfession => 150,
             Project::NameOfTheEnemy => 250,
             Project::FleshGrafting => 140,
+            Project::EscortGondola => 120,
         }
     }
 
@@ -57,6 +62,7 @@ impl Project {
         match self {
             Project::HellfireLance => (10, 15),
             Project::FleshGrafting => (0, 8),
+            Project::EscortGondola => (0, 10),
             _ => (0, 0),
         }
     }
@@ -94,6 +100,7 @@ impl Project {
             Project::HeraldsConfession => "The Herald's Confession",
             Project::NameOfTheEnemy => "The Name of the Enemy",
             Project::FleshGrafting => "Flesh Grafting",
+            Project::EscortGondola => "Escort Gondola",
         }
     }
 }

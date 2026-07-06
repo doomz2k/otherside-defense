@@ -161,6 +161,20 @@ pub struct Sortie {
     pub days_left: u32,
     /// Wait for the player to lead on arrival instead of auto-resolving.
     pub lead: bool,
+    /// Mauled by a sky-hunt en route: the squad lands at three-quarter blood.
+    #[serde(default)]
+    pub bloodied: bool,
+}
+
+/// How a gargoyle sky-hunt on a sortie ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkyHuntOutcome {
+    /// The escort gondola's guns answered: driven off, unbloodied.
+    Repelled,
+    /// The squad lands, but not whole.
+    Bloodied,
+    /// The zeppelin turns for home with its skin flapping.
+    TurnedBack,
 }
 
 /// A funding nation's demand: banish rifts in their region this month.
@@ -243,6 +257,9 @@ pub struct Soldier {
     /// A named relic, carried until death loses it in the field.
     #[serde(default)]
     pub relic: Option<Relic>,
+    /// Standing squad (0 = unassigned; see [`SQUAD_NAMES`]).
+    #[serde(default)]
+    pub squad: u8,
     /// The quirk this one was born with.
     #[serde(default)]
     pub quirk: Option<Quirk>,
@@ -351,6 +368,10 @@ pub enum GeoEvent {
     NightTerror { name: String },
     /// Something old and holy in the rubble: a named relic comes home.
     RelicFound { name: String },
+    /// Gargoyles found the zeppelin. How it went depends on the gondola.
+    SkyHunt { region: Region, outcome: SkyHuntOutcome },
+    /// The breach reached the stores before it was driven out.
+    SalvageLooted { brimstone: u32, hellsteel: u32 },
     /// The dream WAS a map: an undetected rift, revealed in sleep.
     DreamOfTheRift { region: Region },
     CampaignOver { outcome: CampaignOutcome },
@@ -396,6 +417,8 @@ pub enum MissionKind {
     Rift(u32),
     Nest(u32),
     Reckoning,
+    /// Storm a corrupted patron's manor and cut the cult out of the council.
+    Purge(Region),
     /// Through the opened way, into the Otherside: the breach fight.
     FinalAssault,
     /// The second stage: the arch-demon's sanctum. Winning wins everything.
@@ -408,6 +431,7 @@ impl MissionKind {
             MissionKind::Rift(_) => "rift assault",
             MissionKind::Nest(_) => "nest razing",
             MissionKind::Reckoning => "the Reckoning",
+            MissionKind::Purge(_) => "the purge",
             MissionKind::FinalAssault => "the final assault",
             MissionKind::FinalSanctum => "the sanctum",
         }
@@ -445,6 +469,30 @@ pub struct CampaignStats {
 
 /// Panic at or above this boils over: terror rifts and fleeing patrons.
 pub const PANIC_BREAKPOINT: i64 = 60;
+
+/// The standing squads' banners (index 1..; 0 is the unassigned pool).
+pub const SQUAD_NAMES: [&str; 4] = ["(any)", "Lamplighters", "Grave Watch", "Ashen Choir"];
+
+/// What the drill yard drills into the garrison.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Focus {
+    #[default]
+    Marksmanship,
+    Conditioning,
+    Nerve,
+}
+
+impl Focus {
+    pub const ALL: [Focus; 3] = [Focus::Marksmanship, Focus::Conditioning, Focus::Nerve];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Focus::Marksmanship => "Marksmanship",
+            Focus::Conditioning => "Conditioning",
+            Focus::Nerve => "Nerve",
+        }
+    }
+}
 
 fn default_sanity() -> i32 {
     100
@@ -621,6 +669,15 @@ pub struct Campaign {
     /// Days of blood moon remaining (None: the sky is honest tonight).
     #[serde(default)]
     pub blood_moon: Option<u32>,
+    /// The standing squad that answers the next call (0 = anyone fit).
+    #[serde(default)]
+    pub active_squad: u8,
+    /// Regions whose council patron secretly serves the other side.
+    #[serde(default)]
+    pub corrupted_patrons: std::collections::HashSet<Region>,
+    /// What the drill yard drills.
+    #[serde(default)]
+    pub training_focus: Focus,
     /// Day of month the omen shows (0: no blood moon this month).
     #[serde(default)]
     omen_day: u32,
@@ -692,6 +749,9 @@ impl Campaign {
             trophies: 0,
             codex_slain: std::collections::HashSet::new(),
             blood_moon: None,
+            active_squad: 0,
+            corrupted_patrons: std::collections::HashSet::new(),
+            training_focus: Focus::Marksmanship,
             omen_day: 0,
             sorties: Vec::new(),
             pending_events: Vec::new(),
@@ -798,6 +858,7 @@ impl Campaign {
             has_circlet: false,
             armor: ArmorTier::Vestments,
             relic: None,
+            squad: 0,
             quirk: match self.rng.roll(10) {
                 0 => Some(Quirk::Marksman),
                 1 => Some(Quirk::Jumpy),
@@ -1222,21 +1283,30 @@ impl Campaign {
         if self.sorties.iter().any(|s| s.rift_id == rift_id) {
             return Err(GeoError::SortieAlready);
         }
-        let squad: Vec<usize> = self
+        let want = self.active_squad;
+        let mut squad: Vec<usize> = self
             .soldiers
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.is_fit())
+            .filter(|(_, s)| s.is_fit() && want != 0 && s.squad == want)
             .map(|(i, _)| i)
             .take(SQUAD_SIZE)
             .collect();
+        for (i, s) in self.soldiers.iter().enumerate() {
+            if squad.len() >= SQUAD_SIZE {
+                break;
+            }
+            if s.is_fit() && !squad.contains(&i) {
+                squad.push(i);
+            }
+        }
         if squad.is_empty() {
             return Err(GeoError::NoSquadFit);
         }
         for &i in &squad {
             self.soldiers[i].aboard = Some(rift_id);
         }
-        self.sorties.push(Sortie { rift_id, days_left: days, lead });
+        self.sorties.push(Sortie { rift_id, days_left: days, lead, bloodied: false });
         Ok(days)
     }
 
@@ -1306,6 +1376,11 @@ impl Campaign {
         self.fight(MissionKind::Nest(nest_id))
     }
 
+    /// Storm a corrupted patron's manor, AI-resolved.
+    pub fn purge_patron(&mut self, region: Region) -> Result<BattleReport, GeoError> {
+        self.fight(MissionKind::Purge(region))
+    }
+
     /// Set up a mission as a real Battle for the caller to drive — either
     /// interactively (the Battlescape screen) or via AI. Squad selection,
     /// research bonuses, and the battle seed all come from campaign state.
@@ -1352,6 +1427,12 @@ impl Campaign {
                 (NEST_GARRISON + bonus, self.month, false)
             }
             MissionKind::Reckoning => ((5 + self.month / 2).min(8) + bonus, self.month, true),
+            MissionKind::Purge(region) => {
+                if !self.corrupted_patrons.contains(&region) {
+                    return Err(GeoError::NotDetected);
+                }
+                ((4 + self.month / 2).min(7) + bonus, self.month, false)
+            }
             MissionKind::FinalAssault => {
                 if !self.research.is_complete(Project::NameOfTheEnemy) {
                     return Err(GeoError::PrerequisiteMissing);
@@ -1387,13 +1468,27 @@ impl Campaign {
             _ => Vec::new(),
         };
         let squad_idx: Vec<usize> = if aboard.is_empty() {
-            self.soldiers
+            // The active standing squad answers first; the pool fills gaps.
+            let want = self.active_squad;
+            let mut picked: Vec<usize> = self
+                .soldiers
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| s.is_fit() && (!defense || s.home == base))
+                .filter(|(_, s)| {
+                    s.is_fit() && (!defense || s.home == base) && want != 0 && s.squad == want
+                })
                 .map(|(i, _)| i)
                 .take(SQUAD_SIZE)
-                .collect()
+                .collect();
+            for (i, s) in self.soldiers.iter().enumerate() {
+                if picked.len() >= SQUAD_SIZE {
+                    break;
+                }
+                if s.is_fit() && (!defense || s.home == base) && !picked.contains(&i) {
+                    picked.push(i);
+                }
+            }
+            picked
         } else {
             aboard
         };
@@ -1427,11 +1522,16 @@ impl Campaign {
                 &self.research,
                 &self.bases[base].occupied_cells(),
                 self.bases[base].gate(),
+                2 + 2 * self.bases[base].count_active(Facility::WardTower) as u32,
+                (self.bases[base].count_active(Facility::Kennel) as u32).min(2),
             )
         } else {
             match kind {
                 MissionKind::Nest(_) => {
                     missions::build_nest(seed, &squad, &kits, garrison, strength, &self.research)
+                }
+                MissionKind::Purge(_) => {
+                    missions::build_purge(seed, &squad, &kits, garrison, &self.research)
                 }
                 MissionKind::FinalAssault | MissionKind::FinalSanctum => missions::build_otherside(
                     seed,
@@ -1499,6 +1599,7 @@ impl Campaign {
                 if self.is_daylight(lon) { 14 } else { 9 }
             }
             MissionKind::Reckoning => 14, // your own halls, lamplit
+            MissionKind::Purge(_) => 12,  // chandeliers and long shadows
             MissionKind::FinalAssault | MissionKind::FinalSanctum => 9,
         };
         // The sky rolls its own dice (rift fields only; halls have roofs).
@@ -1556,6 +1657,16 @@ impl Campaign {
                 u.bravery = (u.bravery + 4).min(95);
             }
         }
+        // A mauled sortie lands at three-quarter blood.
+        if let MissionKind::Rift(id) = kind
+            && self.sorties.iter().any(|s| s.rift_id == id && s.bloodied)
+        {
+            for i in 0..squad_idx.len() {
+                let u = &mut battle.units[i];
+                u.health = (u.health * 3 / 4).max(1);
+            }
+        }
+
         // The trophy hall's lesson: these things die.
         if trophy_bravery > 0 {
             for i in 0..squad_idx.len() {
@@ -1668,6 +1779,18 @@ impl Campaign {
                     }
                 }
             }
+            MissionKind::Purge(region) => {
+                if report.victory {
+                    self.corrupted_patrons.remove(&region);
+                    // The tithe flows honest again — and gratefully.
+                    let f = self.region_funding.get_mut(&region).expect("region exists");
+                    *f = (*f * 2).min(400);
+                    self.score(region, 25);
+                    self.shift_panic(region, -10);
+                } else {
+                    self.score(region, -10);
+                }
+            }
             MissionKind::Reckoning => {
                 let base = token.base;
                 if report.victory {
@@ -1681,6 +1804,18 @@ impl Campaign {
                                 self.bases[base].demolish(x, y);
                                 self.wrecked.push(facility);
                             }
+                    }
+                    // Without a warded vault, the breach loots the stores.
+                    if self.bases[base].count_active(Facility::Vault) == 0 {
+                        let (b, h) = (self.brimstone * 15 / 100, self.hellsteel * 15 / 100);
+                        self.brimstone -= b;
+                        self.hellsteel -= h;
+                        if b + h > 0 {
+                            self.pending_events.push(GeoEvent::SalvageLooted {
+                                brimstone: b,
+                                hellsteel: h,
+                            });
+                        }
                     }
                 } else if base == 0 {
                     // The founding chapterhouse falls, and the Order with it.
@@ -1961,6 +2096,30 @@ impl Campaign {
             }
         }
 
+        // The drill yard: idle hands run the chosen drills.
+        let drilling = self
+            .bases
+            .iter()
+            .any(|b| b.count_active(Facility::TrainingGround) > 0);
+        if drilling {
+            let focus = self.training_focus;
+            for s in &mut self.soldiers {
+                if s.recovery_days == 0
+                    && s.warding.is_none()
+                    && s.aboard.is_none()
+                    && self.rng.roll(100) < 15
+                {
+                    match focus {
+                        Focus::Marksmanship => {
+                            s.stats.accuracy = (s.stats.accuracy + 1).min(70)
+                        }
+                        Focus::Conditioning => s.stats.tu = (s.stats.tu + 1).min(60),
+                        Focus::Nerve => s.stats.bravery = (s.stats.bravery + 1).min(70),
+                    }
+                }
+            }
+        }
+
         // The Sanctum's cells: garrisoned soldiers sit the silence and
         // come out steadier.
         let sanctum = self
@@ -2119,16 +2278,57 @@ impl Campaign {
             }
         }
 
-        // Sorties fly on. Arrivals either fight at once (auto) or hold the
-        // perimeter for the player's order (lead).
+        // Sorties fly on — through skies that are watched. Arrivals either
+        // fight at once (auto) or hold the perimeter for the order (lead).
+        let escorted = self.research.is_complete(Project::EscortGondola);
         let mut arrivals = Vec::new();
-        for s in &mut self.sorties {
-            if s.days_left > 0 {
-                s.days_left -= 1;
-                if s.days_left == 0 {
-                    arrivals.push((s.rift_id, s.lead));
+        let mut turned_back = Vec::new();
+        for i in 0..self.sorties.len() {
+            if self.sorties[i].days_left == 0 {
+                continue;
+            }
+            let rift_id = self.sorties[i].rift_id;
+            let region = self
+                .rifts
+                .iter()
+                .find(|r| r.id == rift_id)
+                .map(|r| r.region);
+            // The hunt: gargoyles ride the same winds.
+            if self.rng.roll(100) < 15 {
+                let outcome = if escorted {
+                    SkyHuntOutcome::Repelled
+                } else {
+                    match self.rng.roll(100) {
+                        0..50 => SkyHuntOutcome::Bloodied,
+                        50..80 => SkyHuntOutcome::Repelled, // luck, not guns
+                        _ => SkyHuntOutcome::TurnedBack,
+                    }
+                };
+                if let Some(region) = region {
+                    events.push(GeoEvent::SkyHunt { region, outcome });
+                }
+                match outcome {
+                    SkyHuntOutcome::Bloodied => self.sorties[i].bloodied = true,
+                    SkyHuntOutcome::TurnedBack => {
+                        turned_back.push(rift_id);
+                        continue;
+                    }
+                    SkyHuntOutcome::Repelled => {}
                 }
             }
+            self.sorties[i].days_left -= 1;
+            if self.sorties[i].days_left == 0 {
+                arrivals.push((rift_id, self.sorties[i].lead));
+            }
+        }
+        for rift_id in turned_back {
+            // Shaken and grounded a few days.
+            for s in &mut self.soldiers {
+                if s.aboard == Some(rift_id) {
+                    s.recovery_days += 2;
+                }
+            }
+            self.end_sortie(rift_id);
         }
         for (rift_id, lead) in arrivals {
             let Some(region) = self.rifts.iter().find(|r| r.id == rift_id).map(|r| r.region)
@@ -2197,6 +2397,8 @@ impl Campaign {
                 RiftKind::Infiltration => {
                     let f = self.region_funding.get_mut(&region).expect("region exists");
                     *f /= 2;
+                    // Worse than the money: the patron is theirs now.
+                    self.corrupted_patrons.insert(region);
                     events.push(GeoEvent::RegionInfiltrated { region });
                 }
                 _ => {}
@@ -2227,8 +2429,12 @@ impl Campaign {
             let score = self.region_score.get(&region).copied().unwrap_or(0);
             let panicked =
                 self.region_panic.get(&region).copied().unwrap_or(0) >= PANIC_BREAKPOINT;
+            let corrupted = self.corrupted_patrons.contains(&region);
             let funding = self.region_funding.get_mut(&region).expect("region exists");
-            if panicked {
+            if corrupted {
+                // A patron in hell's pocket siphons the tithe, month on month.
+                *funding -= *funding / 4;
+            } else if panicked {
                 *funding -= *funding / 5;
             } else if score >= 20 {
                 *funding += (*funding / 10).max(5);
@@ -3401,5 +3607,98 @@ mod tests {
         assert!(rose, "the omen keeps its promise");
         assert!(set, "and it passes");
         assert!(c.blood_moon.is_none());
+    }
+
+    #[test]
+    fn corrupted_patrons_drain_until_purged() {
+        let mut c = Campaign::new(70);
+        c.month_plan.clear();
+        // An infiltration runs its course: the patron turns.
+        c.rifts.push(Rift {
+            id: 900,
+            kind: RiftKind::Infiltration,
+            region: Region::Asia,
+            lat: 20.0,
+            lon: 100.0,
+            days_left: 1,
+            days_open: 0,
+            detected: false,
+        });
+        c.advance_day();
+        assert!(c.corrupted_patrons.contains(&Region::Asia));
+
+        // The purge is a real battle in the manor; win or lose, it resolves.
+        let report = c.purge_patron(Region::Asia).unwrap();
+        if report.victory {
+            assert!(!c.corrupted_patrons.contains(&Region::Asia), "the cult is cut out");
+        } else {
+            assert!(c.corrupted_patrons.contains(&Region::Asia), "the manor holds");
+        }
+        // No purging the innocent.
+        assert_eq!(c.purge_patron(Region::Europe).err(), Some(GeoError::NotDetected));
+    }
+
+    #[test]
+    fn squads_answer_their_banner_first() {
+        let mut c = Campaign::new(71);
+        // Two in the Lamplighters, the rest unassigned.
+        c.soldiers[0].squad = 1;
+        c.soldiers[1].squad = 1;
+        c.active_squad = 1;
+        let id = detected_rift(&mut c, RiftKind::Scouting, Region::Europe);
+        let (_, token) = c.begin_mission(MissionKind::Rift(id)).unwrap();
+        assert!(token.squad_idx.contains(&0) && token.squad_idx.contains(&1),
+            "the banner musters first: {:?}", token.squad_idx);
+    }
+
+    #[test]
+    fn manor_purges_field_cultists() {
+        let squad: Vec<ods_sim::units::Unit> = (0..4)
+            .map(|i| ods_sim::units::Unit::soldier(i, &format!("S{i}"), glam::IVec3::ZERO))
+            .collect();
+        let b = ods_sim::scenario::manor_purge(9, squad, 6);
+        use ods_sim::units::{Side, Species};
+        let cultists = b
+            .units
+            .iter()
+            .filter(|u| u.side == Side::Demons && u.species == Species::Soldier)
+            .count();
+        assert!(cultists > 0, "the house staff turned");
+        for u in &b.units {
+            assert!(b.tiles.is_walkable(u.tile), "{} in a wall", u.name);
+        }
+    }
+
+    #[test]
+    fn drills_and_fortifications_do_their_jobs() {
+        let mut c = Campaign::new(72);
+        c.month_plan.clear();
+        c.rifts.clear();
+        // Drill yard: accuracy creeps toward the cap.
+        c.bases[0].start_build(Facility::TrainingGround, 5, 0);
+        for _ in 0..Facility::TrainingGround.build_days() {
+            c.advance_day();
+        }
+        c.training_focus = Focus::Marksmanship;
+        let before: i32 = c.soldiers.iter().map(|s| s.stats.accuracy).sum();
+        for _ in 0..30 {
+            c.advance_day();
+        }
+        let after: i32 = c.soldiers.iter().map(|s| s.stats.accuracy).sum();
+        assert!(after > before, "a month of drills shows: {before} -> {after}");
+
+        // Kennels field hounds on the defense map.
+        let squad: Vec<ods_sim::units::Unit> = (0..4)
+            .map(|i| ods_sim::units::Unit::soldier(i, &format!("S{i}"), glam::IVec3::ZERO))
+            .collect();
+        let cells = [(2usize, 2usize), (2, 3), (3, 2), (3, 3), (4, 3)];
+        let b = ods_sim::scenario::base_defense_fortified(3, squad, 4, &cells, (2, 2), 2, 2);
+        use ods_sim::units::{Side, Species};
+        let hounds = b
+            .units
+            .iter()
+            .filter(|u| u.side == Side::Order && u.species == Species::Hellhound)
+            .count();
+        assert!(hounds > 0, "the kennels open for the halls");
     }
 }

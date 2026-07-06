@@ -227,6 +227,12 @@ impl Core {
                 ui.heading("Incursions");
                 let fit = c.soldiers.iter().filter(|s| s.is_fit()).count();
                 ui.label(format!("{fit} soldiers fit for duty"));
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Answering:");
+                    for (i, name) in ods_geo::SQUAD_NAMES.iter().enumerate() {
+                        ui.selectable_value(&mut c.active_squad, i as u8, *name);
+                    }
+                });
                 ui.separator();
 
                 let rifts: Vec<_> = c
@@ -425,8 +431,9 @@ impl Core {
                         let lance_ok = c.research.is_complete(Project::HellfireLance);
                         let mut lance_toggle: Option<(usize, bool)> = None;
                         let mut transfer: Option<usize> = None;
+                        let mut squad_rotate: Option<usize> = None;
                         egui::Grid::new("roster").striped(true).show(ui, |ui| {
-                            for h in ["Name", "Rank", "Quirk", "Mind", "TU", "HP", "Acc", "K", "🧨", "✚", "Lance", "Status"] {
+                            for h in ["Name", "Rank", "Quirk", "Squad", "Mind", "TU", "HP", "Acc", "K", "🧨", "✚", "Lance", "Status"] {
                                 ui.strong(h);
                             }
                             ui.end_row();
@@ -452,6 +459,17 @@ impl Core {
                                 }
                                 ui.label(s.rank());
                                 ui.label(s.quirk.map_or("–", |q| q.name()));
+                                {
+                                    let tag = ods_geo::SQUAD_NAMES[s.squad as usize];
+                                    let short: String = tag.chars().take(4).collect();
+                                    if ui
+                                        .small_button(short)
+                                        .on_hover_text(format!("standing squad: {tag} (click to rotate)"))
+                                        .clicked()
+                                    {
+                                        squad_rotate = Some(si);
+                                    }
+                                }
                                 let mind_color = match s.sanity {
                                     0..=20 => egui::Color32::from_rgb(220, 60, 60),
                                     21..=50 => egui::Color32::from_rgb(230, 180, 70),
@@ -514,6 +532,10 @@ impl Core {
                                 ui.end_row();
                             }
                         });
+                        if let Some(si) = squad_rotate {
+                            c.soldiers[si].squad =
+                                (c.soldiers[si].squad + 1) % ods_geo::SQUAD_NAMES.len() as u8;
+                        }
                         if let Some((si, take)) = lance_toggle
                             && let Err(e) = c.assign_lance(si, take)
                         {
@@ -807,6 +829,16 @@ impl Core {
                     c.quarters_capacity()
                 ));
 
+                if c.bases.iter().any(|b| b.count_active(Facility::TrainingGround) > 0) {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Drills:");
+                        for f in ods_geo::Focus::ALL {
+                            ui.selectable_value(&mut c.training_focus, f, f.name());
+                        }
+                    });
+                }
+
                 ui.add_space(6.0);
                 ui.heading("Forbidden Codex");
                 match &c.research.active {
@@ -939,6 +971,25 @@ impl Core {
                         "Standing nests: {}",
                         c.nests.iter().filter(|n| n.region == region).count()
                     ));
+                    if c.corrupted_patrons.contains(&region) {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(230, 80, 200),
+                            format!("{} serves the other side", region.patron()),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("⚔ Lead the purge").clicked() {
+                                action = GeoAction::LeadMission(MissionKind::Purge(region));
+                            }
+                            if ui.button("🎲 Auto").clicked() {
+                                match c.purge_patron(region) {
+                                    Ok(r) => self.log.push(report_line("purge", r)),
+                                    Err(e) => self.log.push(format!("cannot purge: {e:?}")),
+                                }
+                            }
+                        });
+                    } else {
+                        ui.label(format!("Patron: {}", region.patron()));
+                    }
                     let panic = c.region_panic.get(&region).copied().unwrap_or(0);
                     let (mood, color) = match panic {
                         0..20 => ("wary", egui::Color32::LIGHT_GREEN),
