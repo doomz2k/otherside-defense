@@ -61,6 +61,16 @@ pub fn narrate(c: &Campaign, event: &GeoEvent) -> String {
         E::RequestFailed { region } => {
             format!("{stamp} {} despairs of us — the demand went unmet", region.name())
         }
+        E::MarketShift { brimstone, hellsteel } => format!(
+            "{stamp} the reliquaries repost prices: brimstone {brimstone}k, hellsteel {hellsteel}k"
+        ),
+        E::RegionPanicking { region, panic } => format!(
+            "{stamp} !!! {} is in open panic ({panic}) — patrons flee, terror feeds",
+            region.name()
+        ),
+        E::ChapterhouseLost { region } => {
+            format!("{stamp} !!! the chapterhouse in {} is overrun and lost", region.name())
+        }
         E::CampaignOver { outcome } => match outcome {
             ods_geo::CampaignOutcome::Victory => {
                 format!("{stamp} ### THE NAME IS BROKEN — THE ORDER PREVAILS ###")

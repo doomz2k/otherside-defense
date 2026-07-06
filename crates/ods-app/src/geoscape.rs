@@ -154,6 +154,13 @@ impl Core {
                         }
                     }
                 }
+                ui.separator();
+                if ui.button("📖 Bestiary").clicked() {
+                    self.show_codex = !self.show_codex;
+                }
+                if ui.button("📜 Ledger").clicked() {
+                    self.show_stats = !self.show_stats;
+                }
                 if ui.button("Menu").clicked() {
                     self.screen = Screen::Menu;
                 }
@@ -281,15 +288,22 @@ impl Core {
 
                 ui.add_space(6.0);
                 ui.heading("Market");
+                ui.label("Reliquary prices shift with the month's fortunes.");
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(c.brimstone > 0, egui::Button::new("Sell 🜏 (15k)"))
+                        .add_enabled(
+                            c.brimstone > 0,
+                            egui::Button::new(format!("Sell 🜏 ({}k)", c.brim_price)),
+                        )
                         .clicked()
                     {
                         let _ = c.sell_brimstone(1);
                     }
                     if ui
-                        .add_enabled(c.hellsteel > 0, egui::Button::new("Sell ⛓ (5k)"))
+                        .add_enabled(
+                            c.hellsteel > 0,
+                            egui::Button::new(format!("Sell ⛓ ({}k)", c.steel_price)),
+                        )
                         .clicked()
                     {
                         let _ = c.sell_hellsteel(1);
@@ -638,10 +652,120 @@ impl Core {
                         "Standing nests: {}",
                         c.nests.iter().filter(|n| n.region == region).count()
                     ));
+                    let panic = c.region_panic.get(&region).copied().unwrap_or(0);
+                    let (mood, color) = match panic {
+                        0..20 => ("wary", egui::Color32::LIGHT_GREEN),
+                        20..ods_geo::PANIC_BREAKPOINT => ("fearful", egui::Color32::YELLOW),
+                        _ => ("PANICKING", egui::Color32::LIGHT_RED),
+                    };
+                    ui.colored_label(color, format!("Populace: {mood} (dread {panic})"));
                     if ui.button("Close").clicked() {
                         self.selected_region = None;
                     }
                 });
+        }
+
+        // ------------------------------------------------ bestiary codex
+        if self.show_codex {
+            let mut open = true;
+            egui::Window::new("Bestiary of the Otherside")
+                .open(&mut open)
+                .default_width(420.0)
+                .show(ctx, |ui| {
+                    ui.label(
+                        "Field reports describe what the squads have met. Take a specimen \
+                         alive and the occultists open it up — anatomy and all.",
+                    );
+                    ui.separator();
+                    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                        for species in ods_sim::units::Species::DEMONS {
+                            let seen = c.codex_seen.contains(&species);
+                            let captured = c.codex_captured.contains(&species);
+                            if !seen {
+                                ui.label(
+                                    egui::RichText::new("??? — unencountered")
+                                        .weak()
+                                        .italics(),
+                                );
+                                ui.separator();
+                                continue;
+                            }
+                            ui.horizontal(|ui| {
+                                ui.strong(species.name());
+                                if captured {
+                                    ui.colored_label(egui::Color32::GOLD, "⛓ dissected");
+                                }
+                            });
+                            ui.label(bestiary_lore(species));
+                            if captured {
+                                let parts: Vec<&str> = species
+                                    .body_parts()
+                                    .iter()
+                                    .map(|p| p.name())
+                                    .collect();
+                                ui.label(format!("Anatomy: {}", parts.join(", ")));
+                            } else {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Bind one alive to learn its anatomy.",
+                                    )
+                                    .weak(),
+                                );
+                            }
+                            ui.separator();
+                        }
+                    });
+                });
+            self.show_codex = open;
+        }
+
+        // ------------------------------------------------ campaign ledger
+        if self.show_stats {
+            let mut open = true;
+            egui::Window::new("The Order's Ledger")
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    let s = c.stats;
+                    egui::Grid::new("ledger").striped(true).show(ui, |ui| {
+                        ui.label("Missions won / lost");
+                        ui.label(format!("{} / {}", s.missions_won, s.missions_lost));
+                        ui.end_row();
+                        ui.label("Rifts banished");
+                        ui.label(s.rifts_banished.to_string());
+                        ui.end_row();
+                        ui.label("Nests razed");
+                        ui.label(s.nests_razed.to_string());
+                        ui.end_row();
+                        ui.label("Reckonings repelled");
+                        ui.label(s.reckonings_repelled.to_string());
+                        ui.end_row();
+                        ui.label("Demons slain / bound");
+                        ui.label(format!("{} / {}", s.demons_slain, s.demons_captured));
+                        ui.end_row();
+                        ui.label("Soldiers lost / hired");
+                        ui.label(format!("{} / {}", s.soldiers_lost, s.soldiers_hired));
+                        ui.end_row();
+                        ui.label("Civilians saved / lost");
+                        ui.label(format!("{} / {}", s.civilians_saved, s.civilians_dead));
+                        ui.end_row();
+                        ui.label("Shots fired / hit");
+                        let pct = if s.shots_fired > 0 {
+                            format!(" ({}%)", s.shots_hit * 100 / s.shots_fired)
+                        } else {
+                            String::new()
+                        };
+                        ui.label(format!("{} / {}{pct}", s.shots_fired, s.shots_hit));
+                        ui.end_row();
+                        ui.label("Breeds catalogued");
+                        ui.label(format!(
+                            "{} seen, {} dissected",
+                            c.codex_seen.len(),
+                            c.codex_captured.len()
+                        ));
+                        ui.end_row();
+                    });
+                });
+            self.show_stats = open;
         }
 
         // -------------------------------------------------- game over/won
@@ -671,6 +795,50 @@ impl Core {
         }
 
         action
+    }
+}
+
+/// What the field reports say about each breed, once it has been met.
+fn bestiary_lore(species: ods_sim::units::Species) -> &'static str {
+    use ods_sim::units::Species as S;
+    match species {
+        S::Soldier => "One of ours.",
+        S::Imp => {
+            "The rabble of the Otherside. Weak alone, endless together; their \
+             hellspit burns at range. Aim for the horns — they steer by them."
+        }
+        S::Overseer => {
+            "A pack-driver. It does not merely fight: it reaches into minds and \
+             squeezes. Kill it first and the rabble it drives loses its nerve."
+        }
+        S::Hellhound => {
+            "Fast, thick-hided, and always closing. It takes a wall of reaction \
+             fire to drop one mid-pounce. Never let it reach the line."
+        }
+        S::BileWisp => {
+            "A floating gut full of acid. It lobs its bile clean over cover, \
+             and bursts wetly when shot — keep your distance twice over."
+        }
+        S::Taker => {
+            "The horror the survivors won't describe. One touch of its claws \
+             and a soldier is not killed but Taken — and rises as a Husk."
+        }
+        S::Husk => {
+            "What is left when a Taker is finished. Slow, unafraid, and \
+             wearing a face from the memorial wall. Grant them rest."
+        }
+        S::Prince => {
+            "A lord of the Otherside. Its will is a weapon: possession, terror, \
+             and a court of lesser breeds. It has never known fear — teach it."
+        }
+        S::Gargoyle => {
+            "A winged skirmisher that perches where it pleases and dives where \
+             it hurts. The stone hide turns rifle fire; the wings do not."
+        }
+        S::Behemoth => {
+            "A siege-beast. Walls are a suggestion to it; the chapterhouse's \
+             own masonry becomes its rubble. Bring the lances or bring nothing."
+        }
     }
 }
 

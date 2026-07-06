@@ -9,6 +9,7 @@
 pub mod ai;
 pub mod battle;
 pub mod body;
+pub mod data;
 pub mod scenario;
 pub mod tiles;
 pub mod units;

@@ -248,6 +248,12 @@ pub enum GeoEvent {
     RequestIssued { region: Region, needed: u32, reward: i64 },
     RequestFulfilled { reward: i64 },
     RequestFailed { region: Region },
+    /// The reliquaries repriced salvage for the month.
+    MarketShift { brimstone: i64, hellsteel: i64 },
+    /// A region's dread has boiled over: expect terror, lose faith.
+    RegionPanicking { region: Region, panic: i64 },
+    /// A secondary chapterhouse was overrun and lost.
+    ChapterhouseLost { region: Region },
     CampaignOver { outcome: CampaignOutcome },
 }
 
@@ -309,6 +315,38 @@ impl MissionKind {
 pub struct MissionToken {
     kind: MissionKind,
     squad_idx: Vec<usize>,
+    /// The chapterhouse under attack (Reckonings only; 0 otherwise).
+    base: usize,
+}
+
+/// The campaign's running ledger of deeds, kept for the war room and the
+/// end-of-campaign accounting.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CampaignStats {
+    pub missions_won: u32,
+    pub missions_lost: u32,
+    pub rifts_banished: u32,
+    pub nests_razed: u32,
+    pub reckonings_repelled: u32,
+    pub demons_slain: u32,
+    pub demons_captured: u32,
+    pub soldiers_lost: u32,
+    pub soldiers_hired: u32,
+    pub civilians_saved: u32,
+    pub civilians_dead: u32,
+    pub shots_fired: u32,
+    pub shots_hit: u32,
+}
+
+/// Panic at or above this boils over: terror rifts and fleeing patrons.
+pub const PANIC_BREAKPOINT: i64 = 60;
+
+fn default_brim_price() -> i64 {
+    15
+}
+
+fn default_steel_price() -> i64 {
+    5
 }
 
 const RECRUIT_NAMES: [&str; 16] = [
@@ -362,6 +400,25 @@ pub struct Campaign {
     /// Facilities wrecked in the most recent Reckoning (for the UI/log).
     #[serde(default, skip)]
     pub wrecked: Vec<Facility>,
+    /// Field intelligence: breeds encountered and breeds taken alive.
+    #[serde(default)]
+    pub codex_seen: std::collections::HashSet<ods_sim::units::Species>,
+    #[serde(default)]
+    pub codex_captured: std::collections::HashSet<ods_sim::units::Species>,
+    /// This month's reliquary prices for salvage.
+    #[serde(default = "default_brim_price")]
+    pub brim_price: i64,
+    #[serde(default = "default_steel_price")]
+    pub steel_price: i64,
+    /// Civilian dread per region, 0..; feeds terror and flight of funding.
+    #[serde(default)]
+    pub region_panic: HashMap<Region, i64>,
+    /// The campaign's running tallies.
+    #[serde(default)]
+    pub stats: CampaignStats,
+    /// Which chapterhouse the next Reckoning falls on.
+    #[serde(default)]
+    reckoning_target: usize,
     /// Rises with every banishment; at 5+, hell schedules a Reckoning.
     reckoning_heat: u32,
     reckoning_day: Option<u32>,
@@ -404,6 +461,13 @@ impl Campaign {
             request: None,
             ironman: false,
             wrecked: Vec::new(),
+            codex_seen: std::collections::HashSet::new(),
+            codex_captured: std::collections::HashSet::new(),
+            brim_price: default_brim_price(),
+            steel_price: default_steel_price(),
+            region_panic: HashMap::new(),
+            stats: CampaignStats::default(),
+            reckoning_target: 0,
             month_score: 0,
             bad_months: 0,
             over: None,
@@ -542,6 +606,7 @@ impl Campaign {
             return Err(GeoError::QuartersFull);
         }
         self.funds -= SOLDIER_HIRE_COST;
+        self.stats.soldiers_hired += 1;
         let s = self.roll_recruit();
         self.soldiers.push(s);
         Ok(self.soldiers.last().expect("just pushed"))
@@ -661,14 +726,14 @@ impl Campaign {
         Ok(())
     }
 
-    /// Sell salvage to national reliquaries (brimstone 15k, hellsteel 5k each).
+    /// Sell salvage to national reliquaries at this month's prices.
     pub fn sell_brimstone(&mut self, amount: u32) -> Result<i64, GeoError> {
         self.guard_over()?;
         if amount > self.brimstone {
             return Err(GeoError::NoMaterials);
         }
         self.brimstone -= amount;
-        let gain = amount as i64 * 15;
+        let gain = amount as i64 * self.brim_price;
         self.funds += gain;
         Ok(gain)
     }
@@ -679,9 +744,15 @@ impl Campaign {
             return Err(GeoError::NoMaterials);
         }
         self.hellsteel -= amount;
-        let gain = amount as i64 * 5;
+        let gain = amount as i64 * self.steel_price;
         self.funds += gain;
         Ok(gain)
+    }
+
+    /// Nudge a region's panic, clamped at calm.
+    fn shift_panic(&mut self, region: Region, delta: i64) {
+        let p = self.region_panic.entry(region).or_insert(0);
+        *p = (*p + delta).max(0);
     }
 
     /// Post a fit soldier to ward a detected rift: while warded, the rift
@@ -771,6 +842,11 @@ impl Campaign {
     ) -> Result<(ods_sim::battle::Battle, MissionToken), GeoError> {
         self.guard_over()?;
         let bonus = self.difficulty.garrison_bonus();
+        // Reckonings strike a specific chapterhouse; its own garrison answers.
+        let base = match kind {
+            MissionKind::Reckoning => self.reckoning_target.min(self.bases.len() - 1),
+            _ => 0,
+        };
         let (garrison, strength, defense) = match kind {
             MissionKind::Rift(id) => {
                 let rift = self
@@ -814,7 +890,7 @@ impl Campaign {
             .soldiers
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.is_fit())
+            .filter(|(_, s)| s.is_fit() && (!defense || s.home == base))
             .map(|(i, _)| i)
             .take(SQUAD_SIZE)
             .collect();
@@ -846,8 +922,8 @@ impl Campaign {
                 &kits,
                 garrison,
                 &self.research,
-                &self.bases[0].occupied_cells(),
-                self.bases[0].gate(),
+                &self.bases[base].occupied_cells(),
+                self.bases[base].gate(),
             )
         } else {
             match kind {
@@ -900,7 +976,7 @@ impl Campaign {
             MissionKind::Reckoning => 14, // your own halls, lamplit
             MissionKind::FinalAssault | MissionKind::FinalSanctum => 9,
         };
-        Ok((battle, MissionToken { kind, squad_idx }))
+        Ok((battle, MissionToken { kind, squad_idx, base }))
     }
 
     /// Fold a finished battle back into the campaign: casualties, wounds,
@@ -919,6 +995,29 @@ impl Campaign {
             self.prisoners.overseers += report.captured_overseers;
         }
 
+        // The codex learns what the squads met — and what they took alive.
+        self.codex_seen.extend(report.species_seen.iter().copied());
+        if report.victory {
+            self.codex_captured.extend(report.species_captured.iter().copied());
+        }
+
+        // The ledgers.
+        let stats = &mut self.stats;
+        if report.victory {
+            stats.missions_won += 1;
+            stats.demons_captured += report.captured_grunts + report.captured_overseers;
+        } else {
+            stats.missions_lost += 1;
+        }
+        stats.demons_slain += report.demons_slain;
+        stats.soldiers_lost += report.dead.len() as u32;
+        stats.civilians_saved += report.civilians_saved;
+        stats.civilians_dead += report.civilians_dead;
+        for &(_, _, xp) in &report.survivors {
+            stats.shots_fired += xp.shots_fired;
+            stats.shots_hit += xp.shots_hit;
+        }
+
         match token.kind {
             MissionKind::Rift(id) => {
                 if let Some(rift) = self.rifts.iter().find(|r| r.id == id) {
@@ -932,8 +1031,10 @@ impl Campaign {
                     if report.victory {
                         self.rifts.retain(|r| r.id != id);
                         self.score(region, kind.banish_score());
+                        self.shift_panic(region, -10);
                         self.collect_salvage(kind, report.demons_slain);
                         self.reckoning_heat += 1;
+                        self.stats.rifts_banished += 1;
                         if let Some(req) = &mut self.request
                             && req.region == region {
                                 req.done += 1;
@@ -950,28 +1051,45 @@ impl Campaign {
                     if report.victory {
                         self.nests.retain(|n| n.id != id);
                         self.score(region, NEST_RAZE_SCORE);
+                        self.shift_panic(region, -20);
                         self.brimstone += 6;
                         self.hellsteel += report.demons_slain;
                         self.reckoning_heat += 1;
+                        self.stats.nests_razed += 1;
                     } else {
                         self.score(region, -5);
                     }
                 }
             }
             MissionKind::Reckoning => {
+                let base = token.base;
                 if report.victory {
-                    self.score(self.bases[0].region, 30);
+                    self.score(self.bases[base].region, 30);
+                    self.stats.reckonings_repelled += 1;
                     // The halls are held — but the fighting wrecked things.
-                    let cells = self.bases[0].occupied_cells();
+                    let cells = self.bases[base].occupied_cells();
                     for (x, y) in cells {
-                        if let Some((facility, _)) = self.bases[0].facility_at(x, y)
+                        if let Some((facility, _)) = self.bases[base].facility_at(x, y)
                             && facility != Facility::Gatehouse && self.rng.roll(100) < 15 {
-                                self.bases[0].demolish(x, y);
+                                self.bases[base].demolish(x, y);
                                 self.wrecked.push(facility);
                             }
                     }
-                } else {
+                } else if base == 0 {
+                    // The founding chapterhouse falls, and the Order with it.
                     self.over = Some(CampaignOutcome::ChapterhouseFallen);
+                } else {
+                    // An outpost is overrun: strike it from the maps and
+                    // restation its people at the founding house.
+                    self.bases.remove(base);
+                    for s in &mut self.soldiers {
+                        if s.home == base {
+                            s.home = 0;
+                            s.recovery_days += 4;
+                        } else if s.home > base {
+                            s.home -= 1;
+                        }
+                    }
                 }
             }
             MissionKind::FinalAssault => {
@@ -1060,9 +1178,13 @@ impl Campaign {
         *self.region_score.entry(region).or_insert(0) += delta;
     }
 
-    /// Hell answers success. Fought in the chapterhouse's own floor plan;
-    /// with no fit defenders, the chapterhouse simply falls.
+    /// Hell answers success, striking one chapterhouse. With no fit
+    /// defenders stationed there, that house simply falls — and if it was
+    /// the founding house, the Order falls with it.
     fn resolve_reckoning(&mut self, events: &mut Vec<GeoEvent>) {
+        self.reckoning_target = self.rng.roll(self.bases.len() as u32) as usize;
+        let target = self.reckoning_target;
+        let region = self.bases[target].region;
         match self.fight(MissionKind::Reckoning) {
             Ok(report) if report.victory => {
                 events.push(GeoEvent::ReckoningRepelled {
@@ -1070,17 +1192,30 @@ impl Campaign {
                     dead: report.dead.len(),
                 });
             }
-            Ok(_) => {
+            Ok(_) if target == 0 => {
                 // `conclude_mission` already marked the campaign over.
                 events.push(GeoEvent::CampaignOver {
                     outcome: CampaignOutcome::ChapterhouseFallen,
                 });
             }
-            Err(GeoError::NoSquadFit) => {
+            Ok(_) => events.push(GeoEvent::ChapterhouseLost { region }),
+            Err(GeoError::NoSquadFit) if target == 0 => {
                 self.over = Some(CampaignOutcome::ChapterhouseFallen);
                 events.push(GeoEvent::CampaignOver {
                     outcome: CampaignOutcome::ChapterhouseFallen,
                 });
+            }
+            Err(GeoError::NoSquadFit) => {
+                self.bases.remove(target);
+                for s in &mut self.soldiers {
+                    if s.home == target {
+                        s.home = 0;
+                        s.recovery_days += 4;
+                    } else if s.home > target {
+                        s.home -= 1;
+                    }
+                }
+                events.push(GeoEvent::ChapterhouseLost { region });
             }
             Err(_) => {}
         }
@@ -1228,6 +1363,8 @@ impl Campaign {
         for (id, kind, region, lat, lon) in expired {
             let penalty = kind.expire_penalty();
             self.score(region, -penalty);
+            // An incursion that ran its full course leaves a terrified populace.
+            self.shift_panic(region, if kind == RiftKind::Terror { 15 } else { 8 });
             events.push(GeoEvent::RiftExpired { id, kind, region, penalty });
             match kind {
                 RiftKind::NestBuilding => {
@@ -1262,11 +1399,16 @@ impl Campaign {
     fn monthly_report(&mut self) -> Vec<GeoEvent> {
         let mut events = Vec::new();
 
-        // The council reads the month's regional scores.
+        // The council reads the month's regional scores — through the lens
+        // of each region's dread. Panicked patrons flee regardless of score.
         for region in Region::ALL {
             let score = self.region_score.get(&region).copied().unwrap_or(0);
+            let panicked =
+                self.region_panic.get(&region).copied().unwrap_or(0) >= PANIC_BREAKPOINT;
             let funding = self.region_funding.get_mut(&region).expect("region exists");
-            if score >= 20 {
+            if panicked {
+                *funding -= *funding / 5;
+            } else if score >= 20 {
                 *funding += (*funding / 10).max(5);
             } else if score <= -20 {
                 *funding -= *funding / 10;
@@ -1324,6 +1466,27 @@ impl Campaign {
         self.region_score.clear();
         self.month_plan =
             director::plan_month(&mut self.rng, self.month, self.difficulty.plan_bonus());
+
+        // Panic cools a little with time — but where it has boiled over,
+        // hell smells the fear and sends terror to feed on it.
+        for region in Region::ALL {
+            let p = self.region_panic.entry(region).or_insert(0);
+            *p = (*p - 5).max(0);
+            if *p >= PANIC_BREAKPOINT {
+                let panic = *p;
+                let day = 1 + self.rng.roll(DAYS_PER_MONTH - 2);
+                self.month_plan.push(PlannedRift { day, kind: RiftKind::Terror, region });
+                events.push(GeoEvent::RegionPanicking { region, panic });
+            }
+        }
+
+        // The reliquaries reprice salvage with the fortunes of war.
+        self.brim_price = 10 + self.rng.roll(13) as i64;
+        self.steel_price = 3 + self.rng.roll(6) as i64;
+        events.push(GeoEvent::MarketShift {
+            brimstone: self.brim_price,
+            hellsteel: self.steel_price,
+        });
         // Enough banishments and hell comes looking for the source.
         if self.reckoning_heat >= 5 {
             self.reckoning_heat = 0;
@@ -2050,5 +2213,154 @@ mod tests {
         };
         assert_eq!(run(77), run(77), "same seed, same three months");
         assert_ne!(run(77).2, run(78).2, "different seeds diverge");
+    }
+
+    #[test]
+    fn salvage_sells_at_the_market_price() {
+        let mut c = Campaign::new(30);
+        c.brimstone = 10;
+        c.hellsteel = 10;
+        c.brim_price = 22;
+        c.steel_price = 3;
+        assert_eq!(c.sell_brimstone(2).unwrap(), 44);
+        assert_eq!(c.sell_hellsteel(3).unwrap(), 9);
+
+        // Month end rerolls the prices within the honest range.
+        c.month_plan.clear();
+        c.rifts.clear();
+        c.day = DAYS_PER_MONTH;
+        let events = c.advance_day();
+        let shifted = events
+            .iter()
+            .any(|e| matches!(e, GeoEvent::MarketShift { .. }));
+        assert!(shifted, "{events:?}");
+        assert!((10..=22).contains(&c.brim_price));
+        assert!((3..=8).contains(&c.steel_price));
+    }
+
+    #[test]
+    fn panic_boils_over_into_terror_and_fleeing_funds() {
+        let mut c = Campaign::new(31);
+        c.month_plan.clear();
+        c.rifts.clear();
+        c.region_panic.insert(Region::Africa, 80);
+        let funding_before = c.region_funding[&Region::Africa];
+        c.day = DAYS_PER_MONTH;
+        let events = c.advance_day();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GeoEvent::RegionPanicking { region: Region::Africa, .. })),
+            "{events:?}"
+        );
+        // Panicked patrons pull a fifth of their funding.
+        assert_eq!(c.region_funding[&Region::Africa], funding_before - funding_before / 5);
+        // Hell schedules extra terror where the fear is thickest.
+        assert!(
+            c.month_plan
+                .iter()
+                .any(|p| p.kind == RiftKind::Terror && p.region == Region::Africa)
+        );
+        // Decay happened before the check: 80 -> 75.
+        assert_eq!(c.region_panic[&Region::Africa], 75);
+    }
+
+    #[test]
+    fn expiries_frighten_and_banishments_soothe() {
+        let mut c = Campaign::new(32);
+        c.month_plan.clear();
+        c.rifts.push(Rift {
+            id: 900,
+            kind: RiftKind::Terror,
+            region: Region::Asia,
+            lat: 20.0,
+            lon: 100.0,
+            days_left: 1,
+            days_open: 0,
+            detected: false,
+        });
+        c.advance_day();
+        assert_eq!(c.region_panic[&Region::Asia], 15, "terror expiry terrifies");
+
+        // A banishment calms the region it saves.
+        c.region_panic.insert(Region::Europe, 30);
+        for _ in 0..8 {
+            let id = detected_rift(&mut c, RiftKind::Scouting, Region::Europe);
+            match c.assault_rift(id) {
+                Ok(r) if r.victory => break,
+                Ok(_) => continue,
+                Err(_) => break, // the roster is spent; the seed was cruel
+            }
+        }
+        assert!(c.region_panic[&Region::Europe] <= 30);
+    }
+
+    #[test]
+    fn codex_and_stats_fill_from_fighting() {
+        let mut c = Campaign::new(33);
+        assert!(c.codex_seen.is_empty());
+        let mut won = 0;
+        while won < 2 {
+            let id = detected_rift(&mut c, RiftKind::Harvest, Region::Europe);
+            if c.assault_rift(id).unwrap().victory {
+                won += 1;
+            }
+            if c.soldiers.is_empty() {
+                return; // a doomed seed proves nothing either way
+            }
+        }
+        assert!(!c.codex_seen.is_empty(), "the squads met something out there");
+        assert_eq!(c.stats.missions_won + c.stats.missions_lost, won + c.stats.missions_lost);
+        assert_eq!(c.stats.rifts_banished, won);
+        assert!(c.stats.shots_fired >= c.stats.shots_hit);
+        assert!(c.stats.demons_slain > 0);
+    }
+
+    #[test]
+    fn reckonings_strike_the_targeted_garrison() {
+        let mut c = Campaign::new(34);
+        c.funds += CHAPTERHOUSE_COST;
+        c.found_chapterhouse(Region::Asia).unwrap();
+        c.soldiers.iter_mut().for_each(|s| s.home = 0);
+
+        // An unmanned outpost has no defenders to muster.
+        c.reckoning_target = 1;
+        assert!(matches!(
+            c.begin_mission(MissionKind::Reckoning),
+            Err(GeoError::NoSquadFit)
+        ));
+
+        // Restation half the roster there and the muster answers — with
+        // exactly the soldiers who live in those halls.
+        for i in 0..3 {
+            c.transfer_soldier(i, 1).unwrap();
+            c.soldiers[i].recovery_days = 0; // arrived
+        }
+        let (_, token) = c.begin_mission(MissionKind::Reckoning).unwrap();
+        assert_eq!(token.base, 1);
+        assert!(token.squad_idx.iter().all(|&i| c.soldiers[i].home == 1));
+        assert_eq!(token.squad_idx.len(), 3);
+    }
+
+    #[test]
+    fn a_fallen_outpost_is_lost_not_the_war() {
+        let mut c = Campaign::new(35);
+        c.funds += CHAPTERHOUSE_COST;
+        c.found_chapterhouse(Region::Asia).unwrap();
+        c.soldiers.iter_mut().for_each(|s| s.home = 0);
+        // Schedule the Reckoning for today; with everyone stationed at the
+        // founding house, an outpost strike must cost only the outpost.
+        c.month_plan.clear();
+        c.rifts.clear();
+        c.reckoning_day = Some(c.day);
+        let events = c.advance_day();
+        if c.bases.len() == 1 {
+            // The strike landed on the empty outpost (rng picked base 1).
+            assert!(events.iter().any(|e| matches!(e, GeoEvent::ChapterhouseLost { .. })));
+            assert!(c.over.is_none(), "losing an outpost is not losing the war");
+        } else {
+            // It landed on the manned founding house instead: a real fight.
+            assert_eq!(c.bases.len(), 2);
+        }
     }
 }

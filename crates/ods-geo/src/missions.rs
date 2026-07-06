@@ -30,6 +30,9 @@ pub struct BattleReport {
     /// Townsfolk alive / lost on massacre sites.
     pub civilians_saved: u32,
     pub civilians_dead: u32,
+    /// Breeds encountered / dragged home bound — feeds the codex.
+    pub species_seen: Vec<ods_sim::units::Species>,
+    pub species_captured: Vec<ods_sim::units::Species>,
 }
 
 const MAX_AUTO_TURNS: u32 = 40;
@@ -132,6 +135,7 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
     }
 
     let (mut captured_grunts, mut captured_overseers) = (0, 0);
+    let mut species_captured = Vec::new();
     if victory {
         for u in battle.units.iter().skip(squad_len) {
             if u.alive && !u.conscious && u.side == Side::Demons {
@@ -139,7 +143,18 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
                     Species::Overseer | Species::Prince => captured_overseers += 1,
                     _ => captured_grunts += 1,
                 }
+                if !species_captured.contains(&u.species) {
+                    species_captured.push(u.species);
+                }
             }
+        }
+    }
+
+    // Everything that walked the field goes in the field reports.
+    let mut species_seen = Vec::new();
+    for u in battle.units.iter().skip(squad_len) {
+        if !u.civilian && !species_seen.contains(&u.species) {
+            species_seen.push(u.species);
         }
     }
 
@@ -165,6 +180,8 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
         captured_overseers,
         civilians_saved,
         civilians_dead,
+        species_seen,
+        species_captured,
     }
 }
 
@@ -191,18 +208,7 @@ fn make_unit(id: u32, s: &Soldier, kit: (u32, u32), research: &ResearchState) ->
     u.health = u.health_max;
     if s.has_lance && research.is_complete(Project::HellfireLance) {
         // A forged lance replaces the rifle outright.
-        u.weapon = ods_sim::units::Weapon {
-            name: "hellfire lance",
-            power: 46,
-            snap_cost_pct: 30,
-            aimed_cost_pct: 55,
-            snap_acc: 60,
-            aimed_acc: 120,
-            auto: None,
-            breach_radius: 2.6,
-            melee: false,
-            arcing: false,
-        };
+        u.weapon = ods_sim::units::hellfire_lance();
     } else if research.is_complete(Project::BlessedArms) {
         u.weapon.power += 8;
     }

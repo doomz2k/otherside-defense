@@ -1,0 +1,25 @@
+// Weapon balance lives here, not in code. Drop an edited copy at
+// ./data/weapons.ron next to the executable to override at runtime.
+{
+    "rifle": (power: 30, snap_cost_pct: 25, aimed_cost_pct: 50, snap_acc: 60,
+              aimed_acc: 110, auto: Some((cost_pct: 35, acc: 35, rounds: 3)),
+              breach_radius: 1.6, melee: false, arcing: false),
+    "hellspit": (power: 18, snap_cost_pct: 30, aimed_cost_pct: 60, snap_acc: 55,
+                 aimed_acc: 100, auto: None, breach_radius: 1.2, melee: false, arcing: false),
+    "bile_lob": (power: 22, snap_cost_pct: 40, aimed_cost_pct: 60, snap_acc: 65,
+                 aimed_acc: 100, auto: None, breach_radius: 2.5, melee: false, arcing: true),
+    "fangs": (power: 25, snap_cost_pct: 25, aimed_cost_pct: 60, snap_acc: 85,
+              aimed_acc: 110, auto: None, breach_radius: 0.0, melee: true, arcing: false),
+    "taking_claws": (power: 90, snap_cost_pct: 25, aimed_cost_pct: 60, snap_acc: 85,
+                     aimed_acc: 110, auto: None, breach_radius: 0.0, melee: true, arcing: false),
+    "dead_hands": (power: 15, snap_cost_pct: 25, aimed_cost_pct: 60, snap_acc: 85,
+                   aimed_acc: 110, auto: None, breach_radius: 0.0, melee: true, arcing: false),
+    "stone_talons": (power: 20, snap_cost_pct: 25, aimed_cost_pct: 60, snap_acc: 85,
+                     aimed_acc: 110, auto: None, breach_radius: 0.0, melee: true, arcing: false),
+    "crushing_fists": (power: 40, snap_cost_pct: 25, aimed_cost_pct: 60, snap_acc: 85,
+                       aimed_acc: 110, auto: None, breach_radius: 0.0, melee: true, arcing: false),
+    "bare_hands": (power: 2, snap_cost_pct: 25, aimed_cost_pct: 60, snap_acc: 85,
+                   aimed_acc: 110, auto: None, breach_radius: 0.0, melee: true, arcing: false),
+    "hellfire_lance": (power: 46, snap_cost_pct: 30, aimed_cost_pct: 55, snap_acc: 60,
+                       aimed_acc: 120, auto: None, breach_radius: 2.6, melee: false, arcing: false),
+}

@@ -46,6 +46,36 @@ pub enum Species {
     Behemoth,
 }
 
+impl Species {
+    /// Every demonic breed, in codex order.
+    pub const DEMONS: [Species; 9] = [
+        Species::Imp,
+        Species::Hellhound,
+        Species::BileWisp,
+        Species::Overseer,
+        Species::Gargoyle,
+        Species::Taker,
+        Species::Husk,
+        Species::Behemoth,
+        Species::Prince,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Species::Soldier => "Soldier",
+            Species::Imp => "Imp",
+            Species::Overseer => "Overseer",
+            Species::Hellhound => "Hellhound",
+            Species::BileWisp => "Bile Wisp",
+            Species::Taker => "Taker",
+            Species::Husk => "Husk",
+            Species::Prince => "Prince",
+            Species::Gargoyle => "Gargoyle",
+            Species::Behemoth => "Behemoth",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct UnitId(pub u32);
 
@@ -86,60 +116,41 @@ pub struct Weapon {
 }
 
 impl Weapon {
-    fn base(name: &'static str, power: i32) -> Self {
+    /// Build a weapon from the balance tables (`crate::data`), keyed by its
+    /// table name. `name` stays a display string; numerics come from data.
+    pub fn from_data(name: &'static str, key: &str) -> Self {
+        let d = crate::data::weapons()
+            .get(key)
+            .unwrap_or_else(|| panic!("weapons.ron is missing \"{key}\""));
         Self {
             name,
-            power,
-            snap_cost_pct: 30,
-            aimed_cost_pct: 60,
-            snap_acc: 60,
-            aimed_acc: 100,
-            auto: None,
-            breach_radius: 1.0,
-            melee: false,
-            arcing: false,
+            power: d.power,
+            snap_cost_pct: d.snap_cost_pct,
+            aimed_cost_pct: d.aimed_cost_pct,
+            snap_acc: d.snap_acc,
+            aimed_acc: d.aimed_acc,
+            auto: d.auto.map(|a| AutoFire { cost_pct: a.cost_pct, acc: a.acc, rounds: a.rounds }),
+            breach_radius: d.breach_radius,
+            melee: d.melee,
+            arcing: d.arcing,
         }
     }
 }
 
 pub fn rifle() -> Weapon {
-    Weapon {
-        snap_cost_pct: 25,
-        aimed_cost_pct: 50,
-        aimed_acc: 110,
-        auto: Some(AutoFire { cost_pct: 35, acc: 35, rounds: 3 }),
-        breach_radius: 1.6,
-        ..Weapon::base("consecrated rifle", 30)
-    }
+    Weapon::from_data("consecrated rifle", "rifle")
 }
 
 pub fn hellspit() -> Weapon {
-    Weapon {
-        snap_acc: 55,
-        breach_radius: 1.2,
-        ..Weapon::base("hellspit", 18)
-    }
-}
-
-pub fn claw(name: &'static str, power: i32) -> Weapon {
-    Weapon {
-        snap_cost_pct: 25,
-        snap_acc: 85,
-        aimed_acc: 110,
-        melee: true,
-        breach_radius: 0.0,
-        ..Weapon::base(name, power)
-    }
+    Weapon::from_data("hellspit", "hellspit")
 }
 
 pub fn bile_lob() -> Weapon {
-    Weapon {
-        snap_cost_pct: 40,
-        snap_acc: 65,
-        arcing: true,
-        breach_radius: 2.5,
-        ..Weapon::base("bile glob", 22)
-    }
+    Weapon::from_data("bile glob", "bile_lob")
+}
+
+pub fn hellfire_lance() -> Weapon {
+    Weapon::from_data("hellfire lance", "hellfire_lance")
 }
 
 /// Maximum range of arcing weapons, in tiles (Chebyshev).
@@ -249,6 +260,24 @@ impl Unit {
         }
     }
 
+    /// Apply base stats from the species balance table (`crate::data`).
+    fn stats(mut self, key: &str) -> Self {
+        let d = crate::data::species()
+            .get(key)
+            .unwrap_or_else(|| panic!("species.ron is missing \"{key}\""));
+        self.tu_max = d.tu;
+        self.tu = d.tu;
+        self.health_max = d.health;
+        self.health = d.health;
+        self.reactions = d.reactions;
+        self.accuracy = d.accuracy;
+        self.bravery = d.bravery;
+        self.armor_front = d.armor.0;
+        self.armor_side = d.armor.1;
+        self.armor_rear = d.armor.2;
+        self
+    }
+
     /// Alive and conscious: able to act, react, and hold the field.
     pub fn is_active(&self) -> bool {
         self.alive && self.conscious
@@ -256,171 +285,96 @@ impl Unit {
 
     pub fn soldier(id: u32, name: &str, tile: IVec3) -> Self {
         Self {
-            tu_max: 55,
-            tu: 55,
-            health_max: 32,
-            health: 32,
-            reactions: 50,
-            accuracy: 60,
-            bravery: 30,
             weapon: rifle(),
             grenades: 2,
             heal_charges: 3,
             smoke_grenades: 1,
             facing: IVec3::new(1, 0, 0),
-            armor_front: 2,
-            armor_side: 1,
-            armor_rear: 0,
             ..Self::base(id, Side::Order, Species::Soldier, name, tile)
         }
+        .stats("soldier")
     }
 
     /// An unarmed townsperson caught in the massacre.
     pub fn civilian(id: u32, name: &str, tile: IVec3) -> Self {
         Self {
-            tu_max: 45,
-            tu: 45,
-            health_max: 15,
-            health: 15,
-            bravery: 10,
-            weapon: claw("bare hands", 2),
+            weapon: Weapon::from_data("bare hands", "bare_hands"),
             civilian: true,
             ..Self::base(id, Side::Order, Species::Soldier, name, tile)
         }
+        .stats("civilian")
     }
 
     pub fn imp(id: u32, name: &str, tile: IVec3) -> Self {
-        Self::base(id, Side::Demons, Species::Imp, name, tile)
+        Self::base(id, Side::Demons, Species::Imp, name, tile).stats("imp")
     }
 
     pub fn overseer(id: u32, name: &str, tile: IVec3) -> Self {
         Self {
-            tu_max: 50,
-            tu: 50,
-            health_max: 24,
-            health: 24,
-            accuracy: 55,
-            bravery: 70,
             psi: true,
-            armor_front: 1,
-            armor_side: 1,
-            armor_rear: 1,
             ..Self::base(id, Side::Demons, Species::Overseer, name, tile)
         }
+        .stats("overseer")
     }
 
     pub fn gargoyle(id: u32, name: &str, tile: IVec3) -> Self {
         Self {
-            tu_max: 60,
-            tu: 60,
-            health_max: 22,
-            health: 22,
-            reactions: 50,
-            accuracy: 55,
-            bravery: 65,
-            weapon: claw("stone talons", 20),
+            weapon: Weapon::from_data("stone talons", "stone_talons"),
             flies: true,
-            armor_front: 3,
-            armor_side: 2,
-            armor_rear: 2,
             ..Self::base(id, Side::Demons, Species::Gargoyle, name, tile)
         }
+        .stats("gargoyle")
     }
 
     pub fn behemoth(id: u32, name: &str, tile: IVec3) -> Self {
         Self {
-            tu_max: 50,
-            tu: 50,
-            health_max: 70,
-            health: 70,
-            reactions: 25,
-            accuracy: 55,
-            bravery: 100,
-            weapon: claw("crushing fists", 40),
+            weapon: Weapon::from_data("crushing fists", "crushing_fists"),
             smasher: true,
-            armor_front: 8,
-            armor_side: 6,
-            armor_rear: 4,
             ..Self::base(id, Side::Demons, Species::Behemoth, name, tile)
         }
+        .stats("behemoth")
     }
 
     /// A lord of the Otherside. Every Prince is a psi master.
     pub fn prince(id: u32, name: &str, tile: IVec3) -> Self {
         Self {
-            tu_max: 55,
-            tu: 55,
-            health_max: 42,
-            health: 42,
-            reactions: 55,
-            accuracy: 60,
-            bravery: 95,
             psi: true,
             psi_master: true,
-            armor_front: 6,
-            armor_side: 5,
-            armor_rear: 4,
             ..Self::base(id, Side::Demons, Species::Prince, name, tile)
         }
+        .stats("prince")
     }
 
     pub fn hellhound(id: u32, name: &str, tile: IVec3) -> Self {
         Self {
-            tu_max: 70,
-            tu: 70,
-            health_max: 30,
-            health: 30,
-            reactions: 55,
-            accuracy: 60,
-            bravery: 60,
-            weapon: claw("fangs", 25),
-            armor_front: 6,
-            armor_side: 3,
-            armor_rear: 1,
+            weapon: Weapon::from_data("fangs", "fangs"),
             ..Self::base(id, Side::Demons, Species::Hellhound, name, tile)
         }
+        .stats("hellhound")
     }
 
     pub fn bile_wisp(id: u32, name: &str, tile: IVec3) -> Self {
         Self {
-            tu_max: 40,
-            tu: 40,
-            health_max: 12,
-            health: 12,
             weapon: bile_lob(),
             ..Self::base(id, Side::Demons, Species::BileWisp, name, tile)
         }
+        .stats("bile_wisp")
     }
 
     pub fn taker(id: u32, name: &str, tile: IVec3) -> Self {
         Self {
-            tu_max: 70,
-            tu: 70,
-            health_max: 35,
-            health: 35,
-            reactions: 60,
-            accuracy: 70,
-            bravery: 90,
-            weapon: claw("taking claws", 90),
-            armor_front: 4,
-            armor_side: 4,
-            armor_rear: 4,
+            weapon: Weapon::from_data("taking claws", "taking_claws"),
             ..Self::base(id, Side::Demons, Species::Taker, name, tile)
         }
+        .stats("taker")
     }
 
     pub fn husk(id: u32, name: &str, tile: IVec3) -> Self {
         Self {
-            tu_max: 30,
-            tu: 30,
-            health_max: 25,
-            health: 25,
-            reactions: 20,
-            accuracy: 40,
-            bravery: 100,
-            weapon: claw("dead hands", 15),
+            weapon: Weapon::from_data("dead hands", "dead_hands"),
             ..Self::base(id, Side::Demons, Species::Husk, name, tile)
         }
+        .stats("husk")
     }
 
     /// TU cost for a fire mode; None when the weapon lacks the mode.

@@ -78,6 +78,8 @@ pub struct Core {
     pub selected_base: usize,
     pub difficulty_choice: ods_geo::Difficulty,
     pub ironman_choice: bool,
+    pub show_codex: bool,
+    pub show_stats: bool,
     audio: Option<audio::Audio>,
     /// The big spinning world.
     geo_camera: OrbitCamera,
@@ -146,6 +148,8 @@ impl Core {
             selected_base: 0,
             difficulty_choice: ods_geo::Difficulty::Veteran,
             ironman_choice: false,
+            show_codex: false,
+            show_stats: false,
             audio: audio::Audio::new(),
             geo_camera,
             geo_drag: false,
