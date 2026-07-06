@@ -209,7 +209,9 @@ pub fn build_figures(
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     for u in &battle.units {
-        if !u.alive {
+        // The dead stay on the field — collapsed, darkened, recoverable —
+        // unless they were eaten, defiled, or blown apart.
+        if !u.alive && !u.is_corpse() {
             continue;
         }
         if u.side == Side::Demons && !visible.contains(&u.tile) {
@@ -231,8 +233,11 @@ fn push_unit(
         (unit.tile * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, GROUND_TOP as f32)
     });
 
-    // Pose: kneeling compresses; the subdued lie in a heap.
-    let z_scale = if !unit.conscious {
+    // Pose: kneeling compresses; the subdued lie in a heap; the dead
+    // flatter still.
+    let z_scale = if !unit.alive {
+        0.12
+    } else if !unit.conscious {
         0.22
     } else if unit.kneeling {
         0.72
@@ -245,7 +250,15 @@ fn push_unit(
         if !unit.conscious && part.part == BodyPart::Weapon {
             continue;
         }
+        // Severed parts are simply not there.
+        if unit.severed.contains(&part.part) {
+            continue;
+        }
         let mut color = part.color;
+        // Corpses drain toward grave-grey.
+        if !unit.alive {
+            color = [color[0] * 0.3, color[1] * 0.3, color[2] * 0.3, 1.0];
+        }
         // Townsfolk wear homespun, not armor.
         if unit.civilian && part.part != BodyPart::Head {
             color = CIVVY;

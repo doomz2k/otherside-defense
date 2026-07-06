@@ -39,6 +39,10 @@ pub const MAT_SNOW: Voxel = Voxel(11);
 pub const MAT_FOLIAGE: Voxel = Voxel(12);
 /// Tree trunks and timber.
 pub const MAT_TIMBER: Voxel = Voxel(13);
+/// Spilled blood, dried into the ground.
+pub const MAT_BLOOD: Voxel = Voxel(14);
+/// Viscera. What overkill leaves.
+pub const MAT_GORE: Voxel = Voxel(15);
 
 /// The kind of country a rift opens into. Chosen by the campaign from the
 /// rift's world region; drives ground material and terrain generation.

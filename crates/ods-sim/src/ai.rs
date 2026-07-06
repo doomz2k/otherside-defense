@@ -5,7 +5,7 @@
 use glam::IVec3;
 
 use crate::battle::{Action, ActionError, Battle, Event};
-use crate::units::{FireMode, Side, UnitId};
+use crate::units::{FireMode, Side, Species, UnitId};
 
 /// Play out the demon turn and hand play back to the Order.
 pub fn run_demon_turn(battle: &mut Battle) -> Vec<Event> {
@@ -151,6 +151,31 @@ fn pick_action(battle: &Battle, id: UnitId, side: Side) -> Option<Action> {
         && prey_dist <= crate::battle::TERRIFY_RANGE_TILES
     {
         return Some(Action::Terrify { unit: id, target: prey.id });
+    }
+
+    // The dead have uses. A hurt demon feeds; a Taker recruits.
+    if side == Side::Demons {
+        let corpse = battle
+            .units
+            .iter()
+            .filter(|c| c.is_corpse() && c.side != side && dist(me.tile, c.tile) <= 1)
+            .min_by_key(|c| c.id.0);
+        if let Some(corpse) = corpse {
+            if me.species == Species::Taker
+                && corpse.species == Species::Soldier
+                && !corpse.civilian
+                && me.tu >= crate::battle::DEFILE_TU
+                && battle.unit_at(corpse.tile).is_none()
+            {
+                return Some(Action::Defile { unit: id, corpse: corpse.id });
+            }
+            if me.health < me.health_max / 2
+                && me.tu >= crate::battle::DEVOUR_TU
+                && prey_dist > 1
+            {
+                return Some(Action::Devour { unit: id, corpse: corpse.id });
+            }
+        }
     }
 
     if me.weapon.melee {

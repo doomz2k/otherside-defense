@@ -424,11 +424,24 @@ impl Core {
                             }
                             ui.end_row();
                             for (si, s) in c.soldiers.iter_mut().enumerate() {
-                                if s.scars.is_empty() {
+                                let mut tag = String::new();
+                                if !s.scars.is_empty() {
+                                    tag.push('*');
+                                }
+                                if !s.lost_parts.is_empty() {
+                                    tag.push('†');
+                                }
+                                if tag.is_empty() {
                                     ui.label(&s.name);
                                 } else {
-                                    ui.label(format!("{}*", s.name))
-                                        .on_hover_text(format!("{} lasting scar(s)", s.scars.len()));
+                                    let lost: Vec<&str> =
+                                        s.lost_parts.iter().map(|p| p.name()).collect();
+                                    let mut hover =
+                                        format!("{} lasting scar(s)", s.scars.len());
+                                    if !lost.is_empty() {
+                                        hover.push_str(&format!("; lost: {}", lost.join(", ")));
+                                    }
+                                    ui.label(format!("{}{tag}", s.name)).on_hover_text(hover);
                                 }
                                 ui.label(s.rank());
                                 ui.label(s.quirk.map_or("–", |q| q.name()));

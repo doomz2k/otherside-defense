@@ -7,6 +7,7 @@ use glam::{IVec3, Vec3};
 use ods_voxel::VoxelWorld;
 
 use crate::body::BodyPart;
+use crate::scenario::{MAT_BLOOD, MAT_GORE};
 use crate::tiles::{PathMode, TileMap, step_cost};
 use crate::units::{FireMode, Side, Species, Unit, UnitId};
 use crate::{SimRng, TILE_VOXELS};
@@ -21,6 +22,13 @@ const CHEST_Z: f32 = 9.0;
 
 /// Hellfire charge (grenade) parameters.
 pub const GRENADE_POWER: i32 = 40;
+/// Damage past death at which a body simply comes apart.
+const GIB_OVERKILL: i32 = 12;
+pub(crate) const DEVOUR_TU: i32 = 20;
+pub(crate) const DEFILE_TU: i32 = 25;
+const AMPUTATE_TU: i32 = 25;
+/// Turns of festering before an infected soldier turns.
+const INFECTION_TURNS: u32 = 4;
 pub const GRENADE_RANGE_TILES: i32 = 10;
 pub const GRENADE_COST_PCT: i32 = 45;
 pub const GRENADE_CARVE_RADIUS: f32 = 7.0;
@@ -93,6 +101,20 @@ pub enum Event {
     ObjectiveDestroyed,
     /// A body part is crippled by a heavy hit.
     PartCrippled { unit: UnitId, part: BodyPart },
+    /// A crippled part, hit again, comes off entirely.
+    PartSevered { unit: UnitId, part: BodyPart },
+    /// Overkill: nothing recognizable remains.
+    Gibbed { unit: UnitId },
+    /// A demon feeds on the fallen to knit its own wounds.
+    CorpseEaten { unit: UnitId, corpse: UnitId },
+    /// A Taker raises a soldier's corpse as a Husk.
+    Defiled { corpse: UnitId },
+    /// Demonic rot takes hold in a crippled part.
+    Infected { unit: UnitId, part: BodyPart },
+    /// The saw beats the rot: the part is lost, the soldier is saved.
+    Amputated { medic: UnitId, target: UnitId, part: BodyPart },
+    /// The rot finished its work: the soldier rises on the other side.
+    InfectionTurned { unit: UnitId },
     Turned { unit: UnitId, facing: IVec3 },
     /// A primed charge hits the ground, fuse hissing.
     ChargeDropped { at: IVec3, timer: u32 },
@@ -122,6 +144,12 @@ pub enum Action {
     Bind { unit: UnitId, target: UnitId },
     /// Psi assault (Overseers and worse): batters morale through walls.
     Terrify { unit: UnitId, target: UnitId },
+    /// Demons only: feed on an adjacent corpse to heal.
+    Devour { unit: UnitId, corpse: UnitId },
+    /// Takers only: raise an adjacent soldier corpse as a Husk.
+    Defile { unit: UnitId, corpse: UnitId },
+    /// Saw an infected part off an adjacent (or own) body before it turns.
+    Amputate { medic: UnitId, target: UnitId },
     /// Face a direction (1 TU per 45°) — sets the reaction-fire arc.
     Turn { unit: UnitId, toward: IVec3 },
     /// Prime a charge and drop it at your feet; it detonates after `timer`
@@ -474,6 +502,9 @@ impl Battle {
             Action::Fire { unit, target, mode } => self.do_fire(unit, target, mode),
             Action::Throw { unit, at } => self.do_throw(unit, at),
             Action::Heal { medic, target } => self.do_heal(medic, target),
+            Action::Devour { unit, corpse } => self.do_devour(unit, corpse),
+            Action::Defile { unit, corpse } => self.do_defile(unit, corpse),
+            Action::Amputate { medic, target } => self.do_amputate(medic, target),
             Action::Kneel { unit } => self.do_kneel(unit),
             Action::SetReserve { unit, on } => self.do_set_reserve(unit, on),
             Action::Bind { unit, target } => self.do_bind(unit, target),
@@ -595,7 +626,8 @@ impl Battle {
             return Err(ActionError::BadTarget);
         }
         let t = self.unit(target);
-        if !t.alive || t.conscious || t.side != self.unit(id).side {
+        let unconscious = t.alive && !t.conscious;
+        if (!unconscious && !t.is_corpse()) || t.side != self.unit(id).side {
             return Err(ActionError::BadTarget);
         }
         if cheb(self.unit(id).tile, t.tile) > 1 {
@@ -654,6 +686,102 @@ impl Battle {
         self.unit_mut(id).tu -= 8;
         self.unit_mut(id).weapon = weapon;
         Ok(vec![Event::Scavenged { unit: id }])
+    }
+
+    /// A demon feeds on a corpse: flesh knits, the body is spent.
+    fn do_devour(&mut self, id: UnitId, corpse: UnitId) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        if self.unit(id).side != Side::Demons || self.unit(id).civilian {
+            return Err(ActionError::BadTarget);
+        }
+        if !self.unit(corpse).is_corpse() {
+            return Err(ActionError::BadTarget);
+        }
+        if cheb(self.unit(id).tile, self.unit(corpse).tile) > 1 {
+            return Err(ActionError::NotAdjacent);
+        }
+        if self.unit(id).tu < DEVOUR_TU {
+            return Err(ActionError::NotEnoughTu);
+        }
+        self.unit_mut(id).tu -= DEVOUR_TU;
+        {
+            let u = self.unit_mut(id);
+            u.health = (u.health + 10).min(u.health_max);
+        }
+        self.unit_mut(corpse).consumed = true;
+        let tile = self.unit(corpse).tile;
+        self.spatter(tile, 4, MAT_GORE);
+        // The dead being eaten is not something the living shrug off.
+        let corpse_side = self.unit(corpse).side;
+        for u in &mut self.units {
+            if u.is_active() && u.side == corpse_side {
+                u.morale = (u.morale - 8).max(0);
+            }
+        }
+        Ok(vec![Event::CorpseEaten { unit: id, corpse }])
+    }
+
+    /// A Taker kneels over a dead soldier — and the dead soldier gets up.
+    fn do_defile(&mut self, id: UnitId, corpse: UnitId) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        if self.unit(id).species != Species::Taker {
+            return Err(ActionError::BadTarget);
+        }
+        let c = self.unit(corpse);
+        if !c.is_corpse() || c.species != Species::Soldier || c.civilian {
+            return Err(ActionError::BadTarget);
+        }
+        // The corpse's tile must be free for the Husk to stand on.
+        let tile = c.tile;
+        if self.unit_at(tile).is_some() {
+            return Err(ActionError::BadTarget);
+        }
+        if cheb(self.unit(id).tile, tile) > 1 {
+            return Err(ActionError::NotAdjacent);
+        }
+        if self.unit(id).tu < DEFILE_TU {
+            return Err(ActionError::NotEnoughTu);
+        }
+        self.unit_mut(id).tu -= DEFILE_TU;
+        self.convert_to_husk(corpse);
+        let mut events = vec![Event::Defiled { corpse }];
+        self.check_victory(&mut events);
+        Ok(events)
+    }
+
+    /// The saw: lose the limb, keep the soldier. Painful, bloody, decisive.
+    fn do_amputate(&mut self, medic: UnitId, target: UnitId) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(medic)?;
+        if medic != target && cheb(self.unit(medic).tile, self.unit(target).tile) > 1 {
+            return Err(ActionError::NotAdjacent);
+        }
+        if !self.unit(target).alive {
+            return Err(ActionError::BadTarget);
+        }
+        let Some((part, _)) = self.unit(target).infected else {
+            return Err(ActionError::BadTarget);
+        };
+        if self.unit(medic).tu < AMPUTATE_TU {
+            return Err(ActionError::NotEnoughTu);
+        }
+        self.unit_mut(medic).tu -= AMPUTATE_TU;
+        let mut events = vec![Event::Amputated { medic, target, part }];
+        {
+            let t = self.unit_mut(target);
+            t.infected = None;
+            t.health = (t.health - 4).max(1); // the saw is kinder than the rot
+            t.wounds += 1;
+            t.stun += 6;
+        }
+        self.sever_part(target, part, &mut events);
+        // sever_part can't kill here (not the head — rot never takes heads),
+        // but the shock can drop them.
+        let t = self.unit_mut(target);
+        if t.stun >= t.health && t.conscious {
+            t.conscious = false;
+            events.push(Event::Subdued { unit: target });
+        }
+        Ok(events)
     }
 
     /// Register a fuel cask hazard (counts its shell voxels).
@@ -1311,6 +1439,13 @@ impl Battle {
             health_left: self.unit(target).health.max(0),
         });
 
+        // Blood answers every serious wound.
+        if damage >= 5 {
+            let tile = self.unit(target).tile;
+            let drops = 2 + self.rng.roll(3);
+            self.spatter(tile, drops, MAT_BLOOD);
+        }
+
         if self.unit(target).health <= 0 {
             if let Some(killer) = source {
                 self.xp[killer.0 as usize].kills += 1;
@@ -1323,7 +1458,12 @@ impl Battle {
                     return;
                 }
             }
-            self.kill_unit(target, events);
+            // Overkill leaves nothing whole: the body comes apart.
+            if -self.unit(target).health >= GIB_OVERKILL {
+                self.gib_unit(target, events);
+            } else {
+                self.kill_unit(target, events);
+            }
         } else if damage >= 5 {
             // Serious hits can open fatal wounds that bleed each turn.
             let new_wounds = self.rng.roll(3) as i32;
@@ -1337,9 +1477,27 @@ impl Battle {
             if damage >= 8 && self.rng.roll(100) < 35 {
                 let parts = self.unit(target).species.body_parts();
                 let part = parts[self.rng.roll(parts.len() as u32) as usize];
-                if !self.unit(target).injuries.contains(&part) {
+                let already_crippled = self.unit(target).injuries.contains(&part);
+                let already_severed = self.unit(target).severed.contains(&part);
+                if already_crippled && !already_severed {
+                    // A mangled part, struck again, comes off.
+                    self.sever_part(target, part, events);
+                } else if !already_crippled {
                     self.unit_mut(target).injuries.push(part);
                     events.push(Event::PartCrippled { unit: target, part });
+                    // Demon claws seed rot in the wounds they leave.
+                    if part != BodyPart::Weapon
+                        && self.unit(target).species == Species::Soldier
+                        && !self.unit(target).civilian
+                        && self.unit(target).infected.is_none()
+                        && source.is_some_and(|src| {
+                            self.unit(src).side == Side::Demons && self.unit(src).weapon.melee
+                        })
+                        && self.rng.roll(100) < 35
+                    {
+                        self.unit_mut(target).infected = Some((part, 0));
+                        events.push(Event::Infected { unit: target, part });
+                    }
                     if part == BodyPart::Head {
                         // Concussed: stun trauma on top of the wound.
                         let t = self.unit_mut(target);
@@ -1355,14 +1513,93 @@ impl Battle {
         }
     }
 
+    /// Paint gore onto the ground surface of a tile: the top ground voxel
+    /// under scattered spots becomes blood or viscera. Stains persist for
+    /// the whole battle and remesh with the terrain.
+    fn spatter(&mut self, tile: IVec3, count: u32, mat: ods_voxel::Voxel) {
+        let o = tile * TILE_VOXELS;
+        for _ in 0..count {
+            let p = o + IVec3::new(
+                self.rng.roll(TILE_VOXELS as u32) as i32,
+                self.rng.roll(TILE_VOXELS as u32) as i32,
+                crate::scenario::GROUND_TOP - 1,
+            );
+            if self.world.voxel(p).is_solid() {
+                self.world.set_voxel(p, mat);
+            }
+        }
+    }
+
+    /// Take a part clean off: permanent, bloody, and sometimes fatal.
+    fn sever_part(&mut self, target: UnitId, part: BodyPart, events: &mut Vec<Event>) {
+        let tile = self.unit(target).tile;
+        {
+            let t = self.unit_mut(target);
+            if !t.injuries.contains(&part) {
+                t.injuries.push(part);
+            }
+            t.severed.push(part);
+            t.morale = (t.morale - 20).max(0);
+            // Rot goes with the limb that carried it.
+            if t.infected.map(|(p, _)| p) == Some(part) {
+                t.infected = None;
+            }
+        }
+        events.push(Event::PartSevered { unit: target, part });
+        self.spatter(tile, 5, MAT_GORE);
+        // Losing the weapon arm's grip — or the weapon part itself — means
+        // fighting with what's left.
+        if part == BodyPart::Weapon {
+            self.unit_mut(target).weapon = crate::units::Weapon::from_data("bare hands", "bare_hands");
+        }
+        // Squadmates watch it happen.
+        let side = self.unit(target).side;
+        for u in &mut self.units {
+            if u.is_active() && u.side == side && u.id != target {
+                u.morale = (u.morale - 10).max(0);
+            }
+        }
+        // Heads don't grow back.
+        if part == BodyPart::Head {
+            self.kill_unit(target, events);
+        }
+    }
+
+    /// Overkill death: the unit bursts. No corpse to eat, carry, or hatch.
+    fn gib_unit(&mut self, target: UnitId, events: &mut Vec<Event>) {
+        let tile = self.unit(target).tile;
+        self.unit_mut(target).gibbed = true;
+        events.push(Event::Gibbed { unit: target });
+        self.kill_unit(target, events);
+        // Viscera across the tile and its neighbors.
+        self.spatter(tile, 8, MAT_GORE);
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let n = tile + IVec3::new(dx, dy, 0);
+            self.spatter(n, 2, MAT_BLOOD);
+        }
+        // Watching a comrade come apart is worse than watching one fall.
+        let side = self.unit(target).side;
+        for u in &mut self.units {
+            if u.is_active() && u.side == side && u.id != target {
+                u.morale = (u.morale - (12 - u.bravery / 10).max(4)).max(0);
+            }
+        }
+    }
+
     /// The Taking: the victim's body stands back up on the other side.
     fn take_unit(&mut self, victim: UnitId, events: &mut Vec<Event>) {
-        let (name, tile) = {
+        self.convert_to_husk(victim);
+        events.push(Event::Taken { unit: victim });
+        self.check_victory(events);
+    }
+
+    /// The shared horror: a body (dead or living) becomes a Husk on the
+    /// demons' side, and everyone who knew them watches it stand up.
+    fn convert_to_husk(&mut self, victim: UnitId) {
+        let (name, tile, side) = {
             let v = self.unit(victim);
-            (v.name.clone(), v.tile)
+            (v.name.clone(), v.tile, v.side)
         };
-        // Squadmates witness something worse than a death.
-        let side = self.unit(victim).side;
         for u in &mut self.units {
             if u.alive && u.side == side && u.id != victim {
                 u.morale = (u.morale - 20).max(0);
@@ -1370,8 +1607,6 @@ impl Battle {
         }
         let husk = Unit::husk(victim.0, &format!("{name} (Taken)"), tile);
         *self.unit_mut(victim) = husk;
-        events.push(Event::Taken { unit: victim });
-        self.check_victory(events);
     }
 
     fn kill_unit(&mut self, target: UnitId, events: &mut Vec<Event>) {
@@ -1399,8 +1634,9 @@ impl Battle {
             }
         }
 
-        // A destroyed Husk splits open and something new crawls out.
-        if dead_species == Species::Husk && self.winner.is_none() {
+        // A destroyed Husk splits open and something new crawls out —
+        // unless overkill left nothing intact enough to hatch from.
+        if dead_species == Species::Husk && !self.unit(target).gibbed && self.winner.is_none() {
             let id = self.units.len() as u32;
             self.units.push(Unit::taker(id, "Hatched Taker", tile));
             self.xp.push(Experience::default());
@@ -1563,6 +1799,8 @@ impl Battle {
             let wounds = self.unit(id).wounds;
             if wounds > 0 {
                 self.unit_mut(id).health -= wounds;
+                let tile = self.unit(id).tile;
+                self.spatter(tile, 1, MAT_BLOOD);
                 events.push(Event::Bled {
                     unit: id,
                     health_left: self.unit(id).health.max(0),
@@ -1574,6 +1812,20 @@ impl Battle {
                     }
                     continue;
                 }
+            }
+
+            // Demonic rot festers a turn deeper — and finishes its work.
+            if let Some((part, turns)) = self.unit(id).infected {
+                if turns + 1 >= INFECTION_TURNS {
+                    events.push(Event::InfectionTurned { unit: id });
+                    self.convert_to_husk(id);
+                    self.check_victory(&mut events);
+                    if self.winner.is_some() {
+                        return events;
+                    }
+                    continue;
+                }
+                self.unit_mut(id).infected = Some((part, turns + 1));
             }
 
             let morale = self.unit(id).morale;
@@ -2167,10 +2419,12 @@ mod tests {
         assert_eq!(husk.species, Species::Husk);
         assert!(husk.alive);
 
-        // Now destroy the Husk and watch what crawls out.
+        // Now destroy the Husk — cleanly, so there is something left to
+        // hatch from (overkill gibbing forecloses the hatching, by design).
         let unit_count = b.units.len();
         let mut events = Vec::new();
-        b.apply_damage(UnitId(0), 999, None, &mut events);
+        let clean_kill = b.unit(UnitId(0)).health + 5;
+        b.apply_damage(UnitId(0), clean_kill, None, &mut events);
         assert!(events.iter().any(|e| matches!(e, Event::Hatched { .. })), "{events:?}");
         assert_eq!(b.units.len(), unit_count + 1, "a fresh Taker joins the field");
         assert_eq!(b.units.last().unwrap().species, Species::Taker);
@@ -2472,5 +2726,177 @@ mod tests {
         // Imps cannot burst-fire.
         let i = Unit::imp(1, "Y", IVec3::ZERO);
         assert_eq!(i.fire_cost(FireMode::Auto), None);
+    }
+
+    #[test]
+    fn crippled_parts_hit_again_come_off() {
+        let mut b = open_field(duelists(), 7);
+        b.units[1].injuries.push(crate::body::BodyPart::RightArm);
+        let morale_before = b.unit(UnitId(1)).morale;
+        let mut events = Vec::new();
+        b.sever_part(UnitId(1), crate::body::BodyPart::RightArm, &mut events);
+        assert!(matches!(events[0], Event::PartSevered { .. }));
+        assert!(b.unit(UnitId(1)).severed.contains(&crate::body::BodyPart::RightArm));
+        assert!(b.unit(UnitId(1)).morale < morale_before, "losing a limb shakes anyone");
+        assert!(b.unit(UnitId(1)).alive, "an arm is not a life");
+
+        // A severed leg reduces movement to a crawl.
+        b.units[1].injuries.push(crate::body::BodyPart::LeftLeg);
+        let mut events = Vec::new();
+        b.sever_part(UnitId(1), crate::body::BodyPart::LeftLeg, &mut events);
+        assert_eq!(b.unit(UnitId(1)).move_cost_mult(), 3);
+
+        // Heads do not grow back.
+        b.units[1].injuries.push(crate::body::BodyPart::Head);
+        let mut events = Vec::new();
+        b.sever_part(UnitId(1), crate::body::BodyPart::Head, &mut events);
+        assert!(!b.unit(UnitId(1)).alive, "decapitation is final");
+    }
+
+    #[test]
+    fn overkill_gibs_and_gibs_leave_no_corpse() {
+        let mut units = duelists();
+        units.push(Unit::soldier(2, "Witness", IVec3::new(1, 7, 0)));
+        let mut b = open_field(units, 9);
+        let mut events = Vec::new();
+        let obliterate = b.unit(UnitId(1)).health + 50;
+        b.apply_damage(UnitId(1), obliterate, None, &mut events);
+        assert!(events.iter().any(|e| matches!(e, Event::Gibbed { unit } if *unit == UnitId(1))));
+        assert!(!b.unit(UnitId(1)).is_corpse(), "nothing left to recover");
+    }
+
+    #[test]
+    fn infection_festers_and_turns_the_soldier() {
+        let mut units = duelists();
+        units.push(Unit::soldier(2, "Anchor", IVec3::new(1, 9, 0)));
+        let mut b = open_field(units, 11);
+        b.units[0].infected = Some((crate::body::BodyPart::RightArm, 0));
+        let mut turned = false;
+        for _ in 0..12 {
+            if b.winner.is_some() {
+                break;
+            }
+            let events = b.perform(Action::EndTurn).unwrap();
+            if events
+                .iter()
+                .any(|e| matches!(e, Event::InfectionTurned { unit } if *unit == UnitId(0)))
+            {
+                turned = true;
+                break;
+            }
+        }
+        assert!(turned, "untreated rot finishes its work");
+        let u = b.unit(UnitId(0));
+        assert_eq!(u.side, Side::Demons, "the soldier is a soldier no longer");
+        assert_eq!(u.species, Species::Husk);
+    }
+
+    #[test]
+    fn amputation_beats_the_rot() {
+        let mut b = open_field(duelists(), 13);
+        b.units[0].infected = Some((crate::body::BodyPart::LeftArm, 2));
+        let events = b
+            .perform(Action::Amputate { medic: UnitId(0), target: UnitId(0) })
+            .unwrap();
+        assert!(matches!(events[0], Event::Amputated { .. }));
+        assert!(events.iter().any(|e| matches!(e, Event::PartSevered { .. })));
+        let u = b.unit(UnitId(0));
+        assert!(u.infected.is_none(), "the rot went with the limb");
+        assert!(u.alive);
+        assert!(u.severed.contains(&crate::body::BodyPart::LeftArm));
+        // Nothing left to amputate.
+        assert_eq!(
+            b.perform(Action::Amputate { medic: UnitId(0), target: UnitId(0) }),
+            Err(ActionError::BadTarget)
+        );
+    }
+
+    #[test]
+    fn demons_eat_the_dead() {
+        let mut units = duelists();
+        units[1].tile = IVec3::new(3, 5, 0); // imp beside the doomed soldier
+        units.push(Unit::soldier(2, "Survivor", IVec3::new(1, 9, 0)));
+        let mut b = open_field(units, 15);
+        // Kill the first soldier cleanly (no gib), then wound the imp.
+        let mut events = Vec::new();
+        let clean = b.unit(UnitId(0)).health + 2;
+        b.units[0].tile = IVec3::new(2, 5, 0);
+        b.apply_damage(UnitId(0), clean, None, &mut events);
+        assert!(b.unit(UnitId(0)).is_corpse());
+        b.units[1].health = 5;
+
+        b.perform(Action::EndTurn).unwrap(); // demons to move
+        let events = b
+            .perform(Action::Devour { unit: UnitId(1), corpse: UnitId(0) })
+            .unwrap();
+        assert!(matches!(events[0], Event::CorpseEaten { .. }));
+        assert_eq!(b.unit(UnitId(1)).health, 15, "flesh knits");
+        assert!(!b.unit(UnitId(0)).is_corpse(), "the body is spent");
+        assert_eq!(
+            b.perform(Action::Devour { unit: UnitId(1), corpse: UnitId(0) }),
+            Err(ActionError::BadTarget)
+        );
+    }
+
+    #[test]
+    fn takers_raise_the_fallen() {
+        let mut units = duelists();
+        units.push(Unit::taker(2, "The Taker", IVec3::new(3, 5, 0)));
+        units.push(Unit::soldier(3, "Survivor", IVec3::new(1, 9, 0)));
+        let mut b = open_field(units, 17);
+        b.units[0].tile = IVec3::new(2, 5, 0);
+        let mut events = Vec::new();
+        let clean = b.unit(UnitId(0)).health + 2;
+        b.apply_damage(UnitId(0), clean, None, &mut events);
+        assert!(b.unit(UnitId(0)).is_corpse());
+
+        b.perform(Action::EndTurn).unwrap();
+        let events = b
+            .perform(Action::Defile { unit: UnitId(2), corpse: UnitId(0) })
+            .unwrap();
+        assert!(matches!(events[0], Event::Defiled { .. }));
+        let raised = b.unit(UnitId(0));
+        assert!(raised.alive);
+        assert_eq!(raised.species, Species::Husk);
+        assert_eq!(raised.side, Side::Demons, "the dead fight for the other side now");
+    }
+
+    #[test]
+    fn the_dead_can_be_carried_home() {
+        let mut units = duelists();
+        units.push(Unit::soldier(2, "Bearer", IVec3::new(2, 6, 0)));
+        let mut b = open_field(units, 19);
+        b.units[0].tile = IVec3::new(2, 5, 0);
+        let mut events = Vec::new();
+        let clean = b.unit(UnitId(0)).health + 2;
+        b.apply_damage(UnitId(0), clean, None, &mut events);
+        assert!(b.unit(UnitId(0)).is_corpse());
+        b.perform(Action::PickUp { unit: UnitId(2), target: UnitId(0) }).unwrap();
+        assert_eq!(b.unit(UnitId(2)).carrying, Some(UnitId(0)));
+    }
+
+    #[test]
+    fn wounds_paint_the_ground() {
+        // A proper map with a full ground slab (open_field's is too thin).
+        let mut b = crate::scenario::incursion(
+            3,
+            vec![Unit::soldier(0, "S", IVec3::ZERO)],
+            2,
+            1,
+        );
+        let tile = b.units[0].tile;
+        let mut events = Vec::new();
+        b.apply_damage(UnitId(0), 9, None, &mut events);
+        let o = tile * TILE_VOXELS;
+        let mut stains = 0;
+        for y in 0..TILE_VOXELS {
+            for x in 0..TILE_VOXELS {
+                let p = o + IVec3::new(x, y, crate::scenario::GROUND_TOP - 1);
+                if b.world.voxel(p) == crate::scenario::MAT_BLOOD {
+                    stains += 1;
+                }
+            }
+        }
+        assert!(stains > 0, "serious wounds leave blood on the ground");
     }
 }

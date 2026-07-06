@@ -196,6 +196,15 @@ pub struct Unit {
     /// Crippled body parts (battle-local; the campaign turns them into
     /// longer convalescence).
     pub injuries: Vec<BodyPart>,
+    /// Parts severed outright — gone for good, on the ground somewhere.
+    pub severed: Vec<BodyPart>,
+    /// Demonic rot in a crippled part: (part, turns festering). Amputate
+    /// before it finishes, or the soldier stops being a soldier.
+    pub infected: Option<(BodyPart, u32)>,
+    /// This corpse has been eaten or defiled — no longer recoverable.
+    pub consumed: bool,
+    /// Death by overkill left nothing whole to bury (or to hatch from).
+    pub gibbed: bool,
     /// Turns remaining under a Prince's control (acts for the enemy).
     pub possessed: u32,
     /// Smoke grenades carried.
@@ -246,6 +255,10 @@ impl Unit {
             armor_rear: 0,
             suppression: 0,
             injuries: Vec::new(),
+            severed: Vec::new(),
+            infected: None,
+            consumed: false,
+            gibbed: false,
             possessed: 0,
             smoke_grenades: 0,
             civilian: false,
@@ -406,6 +419,12 @@ impl Unit {
                 _ => chance,
             };
         }
+        // A missing arm is worse than a mangled one.
+        for lost in &self.severed {
+            if matches!(lost, BodyPart::LeftArm | BodyPart::RightArm) {
+                chance = chance * 60 / 100;
+            }
+        }
         chance = chance * (100 - (self.suppression * 5).min(30)) / 100;
         Some(chance.clamp(5, 95))
     }
@@ -426,9 +445,16 @@ impl Unit {
         }
     }
 
-    /// Movement cost multiplier from crippled legs.
+    /// Movement cost multiplier from leg damage: crippled legs hobble,
+    /// severed legs reduce a soldier to a crawl.
     pub fn move_cost_mult(&self) -> i32 {
         if self
+            .severed
+            .iter()
+            .any(|p| matches!(p, BodyPart::LeftLeg | BodyPart::RightLeg))
+        {
+            3
+        } else if self
             .injuries
             .iter()
             .any(|p| matches!(p, BodyPart::LeftLeg | BodyPart::RightLeg))
@@ -437,6 +463,12 @@ impl Unit {
         } else {
             1
         }
+    }
+
+    /// A body the field teams could still bring home (and demons could
+    /// still put to their own uses).
+    pub fn is_corpse(&self) -> bool {
+        !self.alive && !self.gibbed && !self.consumed
     }
 
     pub fn rounds_per_action(&self, mode: FireMode) -> u32 {

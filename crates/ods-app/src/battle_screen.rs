@@ -226,8 +226,7 @@ impl BattleScreen {
                             .units
                             .iter()
                             .find(|u| {
-                                u.alive
-                                    && !u.conscious
+                                ((u.alive && !u.conscious) || u.is_corpse())
                                     && u.side == Side::Order
                                     && (u.tile - me).abs().max_element() <= 1
                             })
@@ -248,6 +247,7 @@ impl BattleScreen {
                 }
             }
             KeyCode::KeyH => self.heal_selected(renderer, audio),
+            KeyCode::KeyX => self.amputate_selected(renderer, audio),
             KeyCode::Tab => {
                 self.select_next_soldier();
                 self.refresh_scene(renderer);
@@ -320,6 +320,23 @@ impl BattleScreen {
                 if ui.button("✚ Dress wounds [H]").clicked() {
                     self.heal_selected(renderer, audio);
                 }
+                let rot_near = self.selected.is_some_and(|id| {
+                    let me = self.battle.unit(id).tile;
+                    self.battle.units.iter().any(|u| {
+                        u.alive
+                            && u.side == Side::Order
+                            && u.infected.is_some()
+                            && (u.tile - me).abs().max_element() <= 1
+                    })
+                });
+                if rot_near
+                    && ui
+                        .button(egui::RichText::new("🪚 Amputate [X]").color(egui::Color32::from_rgb(150, 220, 90)))
+                        .on_hover_text("demonic rot festers in a crippled limb: saw it off before it turns them")
+                        .clicked()
+                {
+                    self.amputate_selected(renderer, audio);
+                }
                 if ui.button("🧎 Kneel [K]").clicked()
                     && let Some(id) = self.selected
                 {
@@ -375,7 +392,7 @@ impl BattleScreen {
                     }
                 }
                 ui.separator();
-                ui.weak("[F] floor cutaway  [O] door  [V] smoke  [B] bind  [K] kneel");
+                ui.weak("[F] floor cutaway  [O] door  [V] smoke  [B] bind  [K] kneel  [X] amputate");
             });
         });
 
@@ -440,6 +457,31 @@ impl BattleScreen {
         let Some(id) = self.selected else { return };
         let result = self.battle.perform(Action::Heal { medic: id, target: id });
         self.apply(renderer, audio, result);
+    }
+
+    /// The saw: take the rot off yourself or an adjacent squadmate.
+    fn amputate_selected(&mut self, renderer: &mut Renderer, audio: Option<&Audio>) {
+        let Some(id) = self.selected else { return };
+        let me = self.battle.unit(id).tile;
+        let target = self
+            .battle
+            .units
+            .iter()
+            .filter(|u| {
+                u.alive
+                    && u.side == Side::Order
+                    && u.infected.is_some()
+                    && (u.tile - me).abs().max_element() <= 1
+            })
+            .min_by_key(|u| if u.id == id { 0 } else { 1 })
+            .map(|u| u.id);
+        match target {
+            Some(target) => {
+                let result = self.battle.perform(Action::Amputate { medic: id, target });
+                self.apply(renderer, audio, result);
+            }
+            None => self.log.push("nobody in reach has the rot".to_string()),
+        }
     }
 
     fn end_turn(&mut self, renderer: &mut Renderer, audio: Option<&Audio>) {
@@ -547,6 +589,31 @@ impl BattleScreen {
                     egui::Color32::from_rgb(255, 120, 120),
                 );
             }
+            Event::PartSevered { unit, part } => {
+                self.float(
+                    *unit,
+                    format!("{} SEVERED", part.name().to_uppercase()),
+                    egui::Color32::from_rgb(200, 30, 30),
+                );
+            }
+            Event::Gibbed { unit } => {
+                self.float(*unit, "OBLITERATED", egui::Color32::from_rgb(180, 20, 20));
+            }
+            Event::Infected { unit, .. } => {
+                self.float(*unit, "INFECTED", egui::Color32::from_rgb(150, 220, 90));
+            }
+            Event::Amputated { target, .. } => {
+                self.float(*target, "AMPUTATED", egui::Color32::from_rgb(230, 200, 120));
+            }
+            Event::InfectionTurned { unit } => {
+                self.float(*unit, "TURNED", egui::Color32::from_rgb(190, 90, 240));
+            }
+            Event::Defiled { corpse } => {
+                self.float(*corpse, "THE DEAD RISE", egui::Color32::from_rgb(190, 90, 240));
+            }
+            Event::CorpseEaten { corpse, .. } => {
+                self.float(*corpse, "DEVOURED", egui::Color32::from_rgb(200, 120, 60));
+            }
             Event::Panicked { unit } => {
                 self.float(*unit, "PANIC", egui::Color32::from_rgb(255, 210, 90));
             }
@@ -631,6 +698,31 @@ impl BattleScreen {
                     life: 0.5,
                 });
                 play(Sound::Death);
+            }
+            Event::Gibbed { unit } => {
+                let p = self.unit_pos(*unit, 6.0);
+                self.fx.push(Fx {
+                    kind: FxKind::Blast,
+                    from: p,
+                    to: p,
+                    color: [0.8, 0.08, 0.08, 0.9],
+                    age: 0.0,
+                    life: 0.7,
+                });
+                self.shake += 4.0;
+                play(Sound::Death);
+            }
+            Event::Defiled { corpse } => {
+                let p = self.unit_pos(*corpse, 8.0);
+                self.fx.push(Fx {
+                    kind: FxKind::Flash,
+                    from: p,
+                    to: p,
+                    color: [0.6, 0.15, 0.7, 0.8],
+                    age: 0.0,
+                    life: 0.8,
+                });
+                play(Sound::Dread);
             }
             Event::Taken { unit } | Event::Hatched { unit } => {
                 let p = self.unit_pos(*unit, 8.0);
@@ -1085,6 +1177,27 @@ fn describe(event: &Event, battle: &Battle) -> String {
             format!("{} takes {amount} ({health_left} HP left)", name(unit))
         }
         Event::Died { unit } => format!("*** {} is down ***", name(unit)),
+        Event::PartSevered { unit, part } => {
+            format!("!!! {}'s {} is SEVERED", name(unit), part.name())
+        }
+        Event::Gibbed { unit } => {
+            format!("!!! {} comes apart — nothing left to bury", name(unit))
+        }
+        Event::CorpseEaten { unit, corpse } => {
+            format!("{} feeds on the body of {}", name(unit), name(corpse))
+        }
+        Event::Defiled { corpse } => {
+            format!("!!! {} rises — the Taker's work", name(corpse))
+        }
+        Event::Infected { unit, part } => {
+            format!("{}'s {} festers with demonic rot — amputate before it turns", name(unit), part.name())
+        }
+        Event::Amputated { medic, target, part } => {
+            format!("{} saws {}'s {} off — the rot dies with it", name(medic), name(target), part.name())
+        }
+        Event::InfectionTurned { unit } => {
+            format!("!!! the rot finishes its work: {} is one of THEM now", name(unit))
+        }
         Event::TerrainDestroyed { voxels, .. } => {
             format!("terrain shattered ({voxels} voxels)")
         }

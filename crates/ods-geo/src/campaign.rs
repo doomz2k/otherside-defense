@@ -92,6 +92,8 @@ pub enum Quirk {
     PackMule,
     /// +5 TU.
     Swift,
+    /// -8 bravery: some people are not built for viscera.
+    Squeamish,
 }
 
 impl Quirk {
@@ -102,7 +104,18 @@ impl Quirk {
             Quirk::IronNerves => "Iron Nerves",
             Quirk::PackMule => "Pack Mule",
             Quirk::Swift => "Swift",
+            Quirk::Squeamish => "Squeamish",
         }
+    }
+}
+
+/// A severed part's permanent cost — heavier than any scar.
+fn apply_loss(stats: &mut SoldierStats, part: ods_sim::body::BodyPart) {
+    use ods_sim::body::BodyPart as P;
+    match part {
+        P::LeftArm | P::RightArm | P::Weapon => stats.accuracy = (stats.accuracy - 12).max(20),
+        P::LeftLeg | P::RightLeg => stats.tu = (stats.tu - 8).max(30),
+        _ => stats.health = (stats.health - 5).max(12),
     }
 }
 
@@ -183,6 +196,10 @@ pub struct Soldier {
     /// Wounds that never healed right (permanent until grafted).
     #[serde(default)]
     pub scars: Vec<ods_sim::body::BodyPart>,
+    /// Parts the war took outright. Deployed maimed until a graft replaces
+    /// them (severed limbs do not convalesce back).
+    #[serde(default)]
+    pub lost_parts: Vec<ods_sim::body::BodyPart>,
     /// The quirk this one was born with.
     #[serde(default)]
     pub quirk: Option<Quirk>,
@@ -445,6 +462,10 @@ pub struct Campaign {
     /// Which chapterhouse the next Reckoning falls on.
     #[serde(default)]
     reckoning_target: usize,
+    /// Missions remaining under burial honors (+4 bravery): the dead were
+    /// brought home from a held field, and the living remember it.
+    #[serde(default)]
+    pub burial_honors: u32,
     /// Squads in the air (or camped at distant rifts).
     #[serde(default)]
     pub sorties: Vec<Sortie>,
@@ -497,6 +518,7 @@ impl Campaign {
             region_panic: HashMap::new(),
             stats: CampaignStats::default(),
             reckoning_target: 0,
+            burial_honors: 0,
             sorties: Vec::new(),
             month_score: 0,
             bad_months: 0,
@@ -593,12 +615,14 @@ impl Campaign {
             warding: None,
             aboard: None,
             scars: Vec::new(),
+            lost_parts: Vec::new(),
             quirk: match self.rng.roll(10) {
                 0 => Some(Quirk::Marksman),
                 1 => Some(Quirk::Jumpy),
                 2 => Some(Quirk::IronNerves),
                 3 => Some(Quirk::PackMule),
                 4 => Some(Quirk::Swift),
+                5 => Some(Quirk::Squeamish),
                 _ => None,
             },
         }
@@ -1100,6 +1124,14 @@ impl Campaign {
             MissionKind::Reckoning => 14, // your own halls, lamplit
             MissionKind::FinalAssault | MissionKind::FinalSanctum => 9,
         };
+        // Burial honors: the last rites still echo in the ranks.
+        if self.burial_honors > 0 {
+            self.burial_honors -= 1;
+            for i in 0..squad_idx.len() {
+                let u = &mut battle.units[i];
+                u.bravery = (u.bravery + 4).min(95);
+            }
+        }
         Ok((battle, MissionToken { kind, squad_idx, base }))
     }
 
@@ -1117,6 +1149,12 @@ impl Campaign {
         if report.victory {
             self.prisoners.grunts += report.captured_grunts;
             self.prisoners.overseers += report.captured_overseers;
+        }
+
+        // A held field means the fallen come home for burial; the rites
+        // steel the squads that follow.
+        if report.victory && !report.dead.is_empty() {
+            self.burial_honors = 2;
         }
 
         // The codex learns what the squads met — and what they took alive.
@@ -1264,6 +1302,18 @@ impl Campaign {
             s.missions += 1;
             s.kills += xp.kills;
             apply_growth(&mut s.stats, xp);
+        }
+        // Severed parts are simply gone: the roster records the loss.
+        for (squad_pos, parts) in &report.severed {
+            let idx = squad_idx[*squad_pos];
+            for part in parts {
+                let s = &mut self.soldiers[idx];
+                s.recovery_days += 10;
+                if !s.lost_parts.contains(part) {
+                    s.lost_parts.push(*part);
+                    apply_loss(&mut s.stats, *part);
+                }
+            }
         }
         // Crippled parts may never heal right: lasting scars.
         for (squad_pos, parts) in &report.injuries {

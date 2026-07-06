@@ -24,6 +24,8 @@ pub struct BattleReport {
     pub demons_slain: u32,
     /// Crippled parts per surviving squad member (squad index, parts).
     pub injuries: Vec<(usize, Vec<ods_sim::body::BodyPart>)>,
+    /// Parts severed outright per surviving squad member — gone for good.
+    pub severed: Vec<(usize, Vec<ods_sim::body::BodyPart>)>,
     /// Unconscious demons on a held field: bound and dragged home.
     pub captured_grunts: u32,
     pub captured_overseers: u32,
@@ -124,13 +126,24 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
     let mut dead = Vec::new();
     let mut survivors = Vec::new();
     let mut injuries = Vec::new();
+    let mut severed = Vec::new();
     for i in 0..squad_len {
         let u = &battle.units[i];
         // A Taken soldier is alive, walking, and lost forever.
         if u.alive && u.side == Side::Order {
             survivors.push((i, u.health, battle.experience(UnitId(i as u32))));
-            if !u.injuries.is_empty() {
-                injuries.push((i, u.injuries.clone()));
+            // Crippled-but-attached parts convalesce; severed ones don't.
+            let crippled: Vec<_> = u
+                .injuries
+                .iter()
+                .copied()
+                .filter(|p| !u.severed.contains(p))
+                .collect();
+            if !crippled.is_empty() {
+                injuries.push((i, crippled));
+            }
+            if !u.severed.is_empty() {
+                severed.push((i, u.severed.clone()));
             }
         } else {
             dead.push(i);
@@ -178,6 +191,7 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
         dead,
         survivors,
         injuries,
+        severed,
         demons_slain: demons_total.saturating_sub(battle.living(Side::Demons).count() as u32),
         captured_grunts,
         captured_overseers,
@@ -215,8 +229,15 @@ fn make_unit(id: u32, s: &Soldier, kit: (u32, u32), research: &ResearchState) ->
     } else if research.is_complete(Project::BlessedArms) {
         u.weapon.power += 8;
     }
+    for &part in &s.lost_parts {
+        if !u.injuries.contains(&part) {
+            u.injuries.push(part);
+        }
+        u.severed.push(part);
+    }
     match s.quirk {
         Some(crate::campaign::Quirk::Marksman) => u.accuracy += 8,
+        Some(crate::campaign::Quirk::Squeamish) => u.bravery = (u.bravery - 8).max(5),
         Some(crate::campaign::Quirk::Jumpy) => {
             u.bravery = (u.bravery - 10).max(5);
             u.reactions += 8;
