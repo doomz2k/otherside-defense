@@ -6,4 +6,7 @@ edition.workspace = true
 [dependencies]
 ods-voxel = { workspace = true }
 ods-sim = { workspace = true }
+ods-render = { workspace = true }
 glam = { workspace = true }
+winit = { workspace = true }
+anyhow = { workspace = true }

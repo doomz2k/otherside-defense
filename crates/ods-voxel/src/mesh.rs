@@ -23,6 +23,45 @@ impl MeshData {
     pub fn quad_count(&self) -> usize {
         self.indices.len() / 6
     }
+
+    /// Append an axis-aligned box (used for unit markers and debug shapes).
+    /// Winding matches `mesh_chunk`: CCW seen from outside.
+    pub fn push_box(&mut self, min: glam::Vec3, max: glam::Vec3, material: u8) {
+        for d in 0..3 {
+            let u = (d + 1) % 3;
+            let v = (d + 2) % 3;
+            for front in [true, false] {
+                let plane = if front { max[d] } else { min[d] };
+                let corner = |cu: f32, cv: f32| -> [f32; 3] {
+                    let mut p = [0.0f32; 3];
+                    p[d] = plane;
+                    p[u] = cu;
+                    p[v] = cv;
+                    p
+                };
+                let (p00, p10, p11, p01) = (
+                    corner(min[u], min[v]),
+                    corner(max[u], min[v]),
+                    corner(max[u], max[v]),
+                    corner(min[u], max[v]),
+                );
+                let mut normal = [0.0f32; 3];
+                normal[d] = if front { 1.0 } else { -1.0 };
+                let first = self.positions.len() as u32;
+                let quad = if front {
+                    [p00, p10, p11, p01]
+                } else {
+                    [p00, p01, p11, p10]
+                };
+                for p in quad {
+                    self.positions.push(p);
+                    self.normals.push(normal);
+                    self.materials.push(material as u32);
+                }
+                self.indices.extend([0, 1, 2, 0, 2, 3].map(|k| first + k));
+            }
+        }
+    }
 }
 
 /// Greedy-mesh one chunk.

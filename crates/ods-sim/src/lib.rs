@@ -6,6 +6,12 @@
 //!   battle is a pure function of (initial state, seed, action list). Replays,
 //!   save/load, and reproducible bug reports depend on this.
 
+pub mod ai;
+pub mod battle;
+pub mod scenario;
+pub mod tiles;
+pub mod units;
+
 use glam::IVec3;
 use rand::Rng;
 use rand::SeedableRng;

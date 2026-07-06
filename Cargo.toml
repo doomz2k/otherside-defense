@@ -17,6 +17,9 @@ rand = "0.9"
 rand_pcg = "0.9"
 bytemuck = { version = "1", features = ["derive"] }
 wgpu = "26"
+winit = "0.30"
+pollster = "0.4"
+anyhow = "1"
 
 ods-voxel = { path = "crates/ods-voxel" }
 ods-sim = { path = "crates/ods-sim" }

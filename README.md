@@ -18,9 +18,25 @@ hell's own weapons back against it.
 Rust stable (1.85+ for edition 2024). Custom voxel engine on wgpu.
 
 ```sh
-cargo test --workspace   # headless: voxel core + sim tests
-cargo run -p ods-app     # currently a headless voxel-engine smoke test
+cargo test --workspace              # headless: voxel core + sim tests
+cargo run -p ods-app                # the skirmish (needs a display + GPU)
+cargo run -p ods-app -- --headless  # sim-only smoke test (CI / cloud)
 ```
+
+## The first skirmish
+
+Four Order soldiers vs four imps in a ruined chapel yard. Fully destructible
+voxel terrain: misses chip walls, and a breached wall changes line of sight
+and pathing.
+
+| Input | Action |
+|---|---|
+| Left click soldier / ground / imp | select / move / fire |
+| `1` / `2` | snap / aimed fire mode |
+| Tab | next soldier |
+| Space or Enter | end turn (demons play) |
+| Right-drag / scroll / WASD | orbit / zoom / pan camera |
+| Esc | deselect |
 
 ## Workspace
 

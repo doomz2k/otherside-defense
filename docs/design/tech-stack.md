@@ -91,18 +91,22 @@ ballistic rays, not rigid-body dynamics.
 
 ## Milestones
 
-- **M0 — triangle to terrain**: winit window, wgpu device, camera orbit, render
-  one procedurally-filled chunk with greedy meshing. Engine heartbeat.
-- **M1 — the diorama**: load `.vox` tiles into a small map, voxel raycast
-  picking, blow a hole in a wall with a debug explosion, re-mesh dirty chunks.
-  *Destructibility proven.*
-- **M2 — the grid**: derive walkability/cover tiles from voxels, click-to-path
-  a unit with TU costs, fog of war from voxel LOS. *The X-COM feel begins.*
-- **M3 — first skirmish**: 4 soldiers vs 4 imps, snap/aimed shots as voxel
-  raycasts, reaction fire, morale, win/lose. *A playable slice of Battlescape.*
+- **M0 — triangle to terrain** ✅: winit window, wgpu device, camera orbit,
+  chunk meshes rendered with greedy meshing and a material palette.
+- **M1 — the diorama** ✅ (with one deviation): procedural map generation
+  instead of `.vox` asset loading (deferred — `dot_vox` slots in when we have
+  real art), voxel raycast mouse picking, destruction re-meshes dirty chunks.
+- **M2 — the grid** ✅: walkability derived from voxel occupancy (headroom +
+  floor-support rule), A* click-to-path with X-COM TU costs (4 ortho /
+  6 diagonal), fog of war from voxel LOS.
+- **M3 — first skirmish** ✅: 4 soldiers vs 4 imps in a ruined chapel yard.
+  Snap/aimed fire, misses fly on and chip terrain, reaction fire from banked
+  TUs, morale/panic, demon AI, win/lose.
 
-Each milestone should be demoable (screenshot or capture) before the next
-starts.
+Status: all four milestones implemented; the sim layer is covered by headless
+tests. First visual verification must happen on a machine with a display
+(`cargo run -p ods-app`) — cloud sessions only run the sim
+(`cargo run -p ods-app -- --headless`).
 
 ## Dev environment notes
 

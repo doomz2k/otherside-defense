@@ -1,0 +1,175 @@
+//! Map generation and battle setup for the first playable skirmish:
+//! a ruined chapel yard, four Order soldiers, four imps.
+
+use glam::IVec3;
+use ods_voxel::{Voxel, VoxelWorld};
+
+use crate::TILE_VOXELS;
+use crate::battle::Battle;
+use crate::units::Unit;
+
+pub const MAP_TILES: IVec3 = IVec3::new(24, 24, 1);
+
+/// Ground fills voxels z 0..4 (the tile's foot band), so shallow craters
+/// don't punch through to the void.
+pub const GROUND_TOP: i32 = 4;
+/// Walls rise from the ground to torso/head height.
+const WALL_TOP: i32 = 14;
+
+pub const MAT_GROUND: Voxel = Voxel(1);
+pub const MAT_WALL: Voxel = Voxel(2);
+pub const MAT_RUBBLE: Voxel = Voxel(3);
+
+pub fn skirmish(seed: u64) -> Battle {
+    let mut world = VoxelWorld::new();
+
+    // Ground slab across the whole map.
+    world.fill_box(
+        IVec3::ZERO,
+        IVec3::new(MAP_TILES.x * TILE_VOXELS, MAP_TILES.y * TILE_VOXELS, GROUND_TOP),
+        MAT_GROUND,
+    );
+
+    // The chapel: a walled rectangle with a doorway on each long side.
+    // Tile ring at x 9..=14, y 8..=15.
+    for tx in 9..=14 {
+        for ty in 8..=15 {
+            let on_ring = tx == 9 || tx == 14 || ty == 8 || ty == 15;
+            let doorway = (tx == 9 && ty == 11) || (tx == 14 && ty == 12);
+            if on_ring && !doorway {
+                fill_tile_walls(&mut world, IVec3::new(tx, ty, 0), MAT_WALL);
+            }
+        }
+    }
+
+    // Freestanding ruin wall in the west approach, with a collapsed gap.
+    for ty in 3..=6 {
+        fill_tile_walls(&mut world, IVec3::new(6, ty, 0), MAT_WALL);
+    }
+    for ty in 17..=20 {
+        fill_tile_walls(&mut world, IVec3::new(6, ty, 0), MAT_WALL);
+    }
+
+    // Scattered rubble heaps: low cover that blocks movement but not sight.
+    for (tx, ty) in [(3, 8), (4, 15), (11, 3), (12, 20), (17, 7), (18, 16), (8, 11)] {
+        let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
+        world.fill_box(
+            o + IVec3::new(3, 3, GROUND_TOP),
+            o + IVec3::new(13, 13, GROUND_TOP + 4),
+            MAT_RUBBLE,
+        );
+    }
+
+    let units = vec![
+        Unit::soldier(0, "Sgt. Vasquez", IVec3::new(2, 9, 0)),
+        Unit::soldier(1, "Kowalski", IVec3::new(2, 11, 0)),
+        Unit::soldier(2, "Ito", IVec3::new(2, 13, 0)),
+        Unit::soldier(3, "Moreau", IVec3::new(3, 15, 0)),
+        Unit::imp(4, "Imp of Wrath", IVec3::new(21, 8, 0)),
+        Unit::imp(5, "Imp of Envy", IVec3::new(21, 11, 0)),
+        Unit::imp(6, "Imp of Gluttony", IVec3::new(21, 14, 0)),
+        Unit::imp(7, "Imp of Sloth", IVec3::new(20, 16, 0)),
+    ];
+
+    Battle::new(world, IVec3::ZERO, MAP_TILES, units, seed)
+}
+
+/// Fill a tile's footprint with wall from the ground to `WALL_TOP`.
+fn fill_tile_walls(world: &mut VoxelWorld, tile: IVec3, material: Voxel) {
+    let o = tile * TILE_VOXELS;
+    world.fill_box(
+        o + IVec3::new(0, 0, GROUND_TOP),
+        o + IVec3::new(TILE_VOXELS, TILE_VOXELS, WALL_TOP),
+        material,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::units::Side;
+
+    #[test]
+    fn skirmish_is_sane() {
+        let b = skirmish(1);
+        assert_eq!(b.living(Side::Order).count(), 4);
+        assert_eq!(b.living(Side::Demons).count(), 4);
+        for u in &b.units {
+            assert!(
+                b.tiles.is_walkable(u.tile),
+                "{} spawns on unwalkable tile {}",
+                u.name,
+                u.tile
+            );
+        }
+        // Chapel walls block, doorways don't.
+        assert!(!b.tiles.is_walkable(IVec3::new(9, 9, 0)));
+        assert!(b.tiles.is_walkable(IVec3::new(9, 11, 0)), "west doorway");
+        assert!(b.tiles.is_walkable(IVec3::new(14, 12, 0)), "east doorway");
+        // Interior is open.
+        assert!(b.tiles.is_walkable(IVec3::new(11, 11, 0)));
+    }
+
+    #[test]
+    fn opposing_lines_start_hidden_by_distance_or_ruins() {
+        let b = skirmish(1);
+        assert!(
+            b.visible_enemies(Side::Order).is_empty(),
+            "the yard should start quiet — imps out of sight"
+        );
+    }
+
+    #[test]
+    fn full_ai_battle_runs_to_completion_or_stalemate_guard() {
+        use crate::ai::run_demon_turn;
+        use crate::battle::Action;
+        use crate::units::{FireMode, UnitId};
+
+        // Order AI stand-in: every soldier shoots the nearest visible imp or
+        // advances east; then the demon AI plays. The battle must resolve
+        // (someone wins) well within 40 turns.
+        let mut b = skirmish(2024);
+        for _turn in 0..40 {
+            if b.winner.is_some() {
+                break;
+            }
+            for id in b.living(Side::Order).map(|u| u.id).collect::<Vec<_>>() {
+                loop {
+                    if b.winner.is_some() || !b.unit(id).alive {
+                        break;
+                    }
+                    let me = b.unit(id);
+                    let targets: Vec<UnitId> = b
+                        .visible_enemies(Side::Order)
+                        .into_iter()
+                        .filter(|&t| b.can_see(id, t))
+                        .collect();
+                    if let Some(&t) = targets.first() {
+                        if me.tu >= me.fire_cost(FireMode::Snap) {
+                            let _ = b.perform(Action::Fire {
+                                unit: id,
+                                target: t,
+                                mode: FireMode::Snap,
+                            });
+                            continue;
+                        }
+                        break;
+                    }
+                    let goal = me.tile + IVec3::new(3, 0, 0);
+                    match b.perform(Action::Move { unit: id, to: goal }) {
+                        Ok(ev) if !ev.is_empty() => continue,
+                        _ => break,
+                    }
+                }
+            }
+            if b.winner.is_none() {
+                b.perform(Action::EndTurn).unwrap();
+                run_demon_turn(&mut b);
+            }
+        }
+        assert!(
+            b.winner.is_some(),
+            "a 4v4 in a courtyard must not last 40 turns"
+        );
+    }
+}

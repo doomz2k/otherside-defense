@@ -1,9 +1,13 @@
 //! wgpu presentation layer.
 //!
 //! Consumes sim state and mesh data from the other crates; must never feed
-//! anything back into the rules. Window + render loop arrive with milestone
-//! M0 — for now this crate defines the GPU vertex format and mesh upload so
-//! the boundary with `ods-voxel` is pinned down early.
+//! anything back into the rules.
+
+mod camera;
+mod renderer;
+
+pub use camera::OrbitCamera;
+pub use renderer::{OverlayVertex, Renderer};
 
 use bytemuck::{Pod, Zeroable};
 use ods_voxel::MeshData;
