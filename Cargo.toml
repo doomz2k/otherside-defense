@@ -26,6 +26,7 @@ serde_json = "1"
 egui = "0.33"
 egui-wgpu = "0.33"
 egui-winit = "0.33"
+rodio = "0.19"
 
 ods-voxel = { path = "crates/ods-voxel" }
 ods-sim = { path = "crates/ods-sim" }

@@ -3,6 +3,7 @@
 
 use glam::{Mat4, Vec3, Vec4};
 
+#[derive(Clone)]
 pub struct OrbitCamera {
     /// Point the camera orbits around and looks at.
     pub target: Vec3,

@@ -1,16 +1,32 @@
 //! The interactive Battlescape: the 3D voxel view plus its egui HUD.
 
-use glam::{IVec3, Vec3};
+use glam::{IVec3, Mat4, Vec3};
 use ods_geo::MissionToken;
 use ods_render::{OrbitCamera, OverlayVertex, Renderer};
 use ods_sim::battle::{Action, Battle, Event};
 use ods_sim::units::{FireMode, Side, UnitId};
 use ods_sim::{TILE_VOXELS, ai, scenario, voxel_to_tile};
-use ods_voxel::{MeshData, mesh_chunk};
+use ods_voxel::mesh_chunk;
 use winit::keyboard::KeyCode;
 
-const MAT_SOLDIER: u8 = 6;
-const MAT_IMP: u8 = 7;
+use crate::audio::{Audio, Sound};
+use crate::figures;
+
+/// A transient battlefield effect.
+struct Fx {
+    kind: FxKind,
+    from: Vec3,
+    to: Vec3,
+    color: [f32; 4],
+    age: f32,
+    life: f32,
+}
+
+enum FxKind {
+    Tracer,
+    Blast,
+    Flash,
+}
 
 pub struct BattleScreen {
     pub battle: Battle,
@@ -21,6 +37,9 @@ pub struct BattleScreen {
     selected: Option<UnitId>,
     fire_mode: FireMode,
     grenade_armed: bool,
+    fx: Vec<Fx>,
+    shake: f32,
+    fx_clock: f32,
     pub cursor: (f32, f32),
     pub right_drag: bool,
     pub last_cursor: (f32, f32),
@@ -38,6 +57,9 @@ impl BattleScreen {
             selected: None,
             fire_mode: FireMode::Snap,
             grenade_armed: false,
+            fx: Vec::new(),
+            shake: 0.0,
+            fx_clock: 0.0,
             cursor: (0.0, 0.0),
             right_drag: false,
             last_cursor: (0.0, 0.0),
@@ -51,7 +73,7 @@ impl BattleScreen {
     // ------------------------------------------------------------------
     // Input from the window (only reaches us when egui didn't consume it)
 
-    pub fn click(&mut self, renderer: &mut Renderer, width: f32, height: f32) {
+    pub fn click(&mut self, renderer: &mut Renderer, audio: Option<&Audio>, width: f32, height: f32) {
         if self.battle.winner.is_some() {
             return;
         }
@@ -66,7 +88,7 @@ impl BattleScreen {
             self.grenade_armed = false;
             let Some(thrower) = self.selected else { return };
             let result = self.battle.perform(Action::Throw { unit: thrower, at: tile });
-            self.apply(renderer, result);
+            self.apply(renderer, audio, result);
             return;
         }
 
@@ -83,17 +105,17 @@ impl BattleScreen {
                         target: id,
                         mode: self.fire_mode,
                     });
-                    self.apply(renderer, result);
+                    self.apply(renderer, audio, result);
                 }
             }
         } else {
             let Some(mover) = self.selected else { return };
             let result = self.battle.perform(Action::Move { unit: mover, to: tile });
-            self.apply(renderer, result);
+            self.apply(renderer, audio, result);
         }
     }
 
-    pub fn key(&mut self, renderer: &mut Renderer, code: KeyCode) {
+    pub fn key(&mut self, renderer: &mut Renderer, audio: Option<&Audio>, code: KeyCode) {
         match code {
             KeyCode::Escape => {
                 if self.grenade_armed {
@@ -107,12 +129,40 @@ impl BattleScreen {
             KeyCode::Digit2 => self.fire_mode = FireMode::Aimed,
             KeyCode::Digit3 => self.fire_mode = FireMode::Auto,
             KeyCode::KeyG => self.grenade_armed = !self.grenade_armed,
-            KeyCode::KeyH => self.heal_selected(renderer),
+            KeyCode::KeyK => {
+                if let Some(id) = self.selected {
+                    let result = self.battle.perform(Action::Kneel { unit: id });
+                    self.apply(renderer, audio, result);
+                }
+            }
+            KeyCode::KeyB => {
+                // Bind: strike the adjacent demon with the rod.
+                if let Some(id) = self.selected {
+                    let me = self.battle.unit(id).tile;
+                    let target = self
+                        .battle
+                        .units
+                        .iter()
+                        .find(|u| {
+                            u.is_active()
+                                && u.side == Side::Demons
+                                && (u.tile - me).abs().max_element() <= 1
+                        })
+                        .map(|u| u.id);
+                    if let Some(target) = target {
+                        let result = self.battle.perform(Action::Bind { unit: id, target });
+                        self.apply(renderer, audio, result);
+                    } else {
+                        self.log.push("no demon within reach of the rod".to_string());
+                    }
+                }
+            }
+            KeyCode::KeyH => self.heal_selected(renderer, audio),
             KeyCode::Tab => {
                 self.select_next_soldier();
                 self.refresh_scene(renderer);
             }
-            KeyCode::Space | KeyCode::Enter => self.end_turn(renderer),
+            KeyCode::Space | KeyCode::Enter => self.end_turn(renderer, audio),
             KeyCode::KeyW => self.camera.pan(0.0, 12.0),
             KeyCode::KeyS => self.camera.pan(0.0, -12.0),
             KeyCode::KeyA => self.camera.pan(-12.0, 0.0),
@@ -129,7 +179,7 @@ impl BattleScreen {
     // HUD
 
     /// Returns true when the player asked to leave the battle.
-    pub fn hud(&mut self, ctx: &egui::Context, renderer: &mut Renderer) -> bool {
+    pub fn hud(&mut self, ctx: &egui::Context, renderer: &mut Renderer, audio: Option<&Audio>) -> bool {
         let mut leave = false;
 
         egui::TopBottomPanel::top("battle-top").show(ctx, |ui| {
@@ -174,7 +224,13 @@ impl BattleScreen {
                     self.grenade_armed = !self.grenade_armed;
                 }
                 if ui.button("✚ Dress wounds [H]").clicked() {
-                    self.heal_selected(renderer);
+                    self.heal_selected(renderer, audio);
+                }
+                if ui.button("🧎 Kneel [K]").clicked()
+                    && let Some(id) = self.selected
+                {
+                    let result = self.battle.perform(Action::Kneel { unit: id });
+                    self.apply(renderer, audio, result);
                 }
                 if ui.button("Next [Tab]").clicked() {
                     self.select_next_soldier();
@@ -182,7 +238,7 @@ impl BattleScreen {
                 }
                 ui.separator();
                 if ui.button("⏭ End turn [Space]").clicked() {
-                    self.end_turn(renderer);
+                    self.end_turn(renderer, audio);
                 }
                 if self.grenade_armed {
                     ui.colored_label(egui::Color32::ORANGE, "CHARGE ARMED — click a tile");
@@ -222,44 +278,191 @@ impl BattleScreen {
     // ------------------------------------------------------------------
     // Actions & scene upkeep
 
-    fn heal_selected(&mut self, renderer: &mut Renderer) {
+    fn heal_selected(&mut self, renderer: &mut Renderer, audio: Option<&Audio>) {
         let Some(id) = self.selected else { return };
         let result = self.battle.perform(Action::Heal { medic: id, target: id });
-        self.apply(renderer, result);
+        self.apply(renderer, audio, result);
     }
 
-    fn end_turn(&mut self, renderer: &mut Renderer) {
+    fn end_turn(&mut self, renderer: &mut Renderer, audio: Option<&Audio>) {
         if self.battle.winner.is_some() {
             return;
         }
         match self.battle.perform(Action::EndTurn) {
-            Ok(events) => self.consume(renderer, &events),
+            Ok(events) => self.consume(renderer, audio, &events),
             Err(e) => {
                 self.log.push(format!("cannot end turn: {e:?}"));
                 return;
             }
         }
         let events = ai::run_demon_turn(&mut self.battle);
-        self.consume(renderer, &events);
+        self.consume(renderer, audio, &events);
     }
 
     fn apply(
         &mut self,
         renderer: &mut Renderer,
+        audio: Option<&Audio>,
         result: Result<Vec<Event>, ods_sim::battle::ActionError>,
     ) {
         match result {
-            Ok(events) => self.consume(renderer, &events),
+            Ok(events) => self.consume(renderer, audio, &events),
             Err(e) => self.log.push(format!("cannot: {e:?}")),
         }
     }
 
-    fn consume(&mut self, renderer: &mut Renderer, events: &[Event]) {
+    fn consume(&mut self, renderer: &mut Renderer, audio: Option<&Audio>, events: &[Event]) {
         for e in events {
             self.log.push(describe(e, &self.battle));
+            self.spawn_fx(e, audio);
         }
         self.refresh_chunks(renderer);
         self.refresh_scene(renderer);
+    }
+
+    // ------------------------------------------------------------------
+    // Effects
+
+    fn unit_pos(&self, id: UnitId, z: f32) -> Vec3 {
+        (self.battle.unit(id).tile * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, z)
+    }
+
+    fn tile_pos(at: IVec3, z: f32) -> Vec3 {
+        (at * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, z)
+    }
+
+    fn spawn_fx(&mut self, event: &Event, audio: Option<&Audio>) {
+        let play = |s: Sound| {
+            if let Some(a) = audio {
+                a.play(s);
+            }
+        };
+        match event {
+            Event::Fired { unit, target, .. } => {
+                let side = self.battle.unit(*unit).side;
+                let color = if side == Side::Order {
+                    [1.0, 0.9, 0.4, 0.9]
+                } else {
+                    [0.9, 0.4, 0.2, 0.9]
+                };
+                self.fx.push(Fx {
+                    kind: FxKind::Tracer,
+                    from: self.unit_pos(*unit, 13.0),
+                    to: self.unit_pos(*target, 9.0),
+                    color,
+                    age: 0.0,
+                    life: 0.22,
+                });
+                play(Sound::Shot);
+            }
+            Event::Exploded { at, .. } => {
+                let p = Self::tile_pos(*at, 5.0);
+                self.fx.push(Fx {
+                    kind: FxKind::Blast,
+                    from: p,
+                    to: p,
+                    color: [1.0, 0.55, 0.15, 0.8],
+                    age: 0.0,
+                    life: 0.55,
+                });
+                self.shake += 5.0;
+                play(Sound::Blast);
+            }
+            Event::TerrainDestroyed { center, .. } => {
+                self.fx.push(Fx {
+                    kind: FxKind::Blast,
+                    from: *center,
+                    to: *center,
+                    color: [0.9, 0.8, 0.5, 0.5],
+                    age: 0.0,
+                    life: 0.3,
+                });
+            }
+            Event::Died { unit } => {
+                let p = self.unit_pos(*unit, 6.0);
+                self.fx.push(Fx {
+                    kind: FxKind::Flash,
+                    from: p,
+                    to: p,
+                    color: [0.9, 0.1, 0.1, 0.7],
+                    age: 0.0,
+                    life: 0.5,
+                });
+                play(Sound::Death);
+            }
+            Event::Taken { unit } | Event::Hatched { unit } => {
+                let p = self.unit_pos(*unit, 8.0);
+                self.fx.push(Fx {
+                    kind: FxKind::Flash,
+                    from: p,
+                    to: p,
+                    color: [0.6, 0.15, 0.7, 0.8],
+                    age: 0.0,
+                    life: 0.8,
+                });
+                play(Sound::Dread);
+            }
+            Event::Panicked { .. } | Event::Berserked { .. } => play(Sound::Dread),
+            Event::Terrified { morale_lost, .. } if *morale_lost > 0 => play(Sound::Dread),
+            Event::Subdued { .. } => play(Sound::Click),
+            _ => {}
+        }
+    }
+
+    /// Advance effect ages and camera shake; rebuild the fx mesh.
+    pub fn update_fx(&mut self, dt: f32, renderer: &mut Renderer) {
+        self.fx_clock += dt;
+        self.shake *= (-6.0 * dt).exp();
+        if self.shake < 0.05 {
+            self.shake = 0.0;
+        }
+        for fx in &mut self.fx {
+            fx.age += dt;
+        }
+        self.fx.retain(|f| f.age < f.life);
+
+        let mut verts: Vec<OverlayVertex> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        for fx in &self.fx {
+            let t = (fx.age / fx.life).clamp(0.0, 1.0);
+            let fade = 1.0 - t;
+            let mut color = fx.color;
+            color[3] *= fade;
+            match fx.kind {
+                FxKind::Tracer => {
+                    let dir = fx.to - fx.from;
+                    let perp = dir.cross(Vec3::Z).normalize_or(Vec3::X) * 0.5;
+                    push_quad(
+                        &mut verts,
+                        &mut indices,
+                        [fx.from - perp, fx.from + perp, fx.to + perp, fx.to - perp],
+                        color,
+                    );
+                }
+                FxKind::Blast => {
+                    let r = 3.0 + 26.0 * t;
+                    push_flat_square(&mut verts, &mut indices, fx.from, r, color);
+                }
+                FxKind::Flash => {
+                    push_flat_square(&mut verts, &mut indices, fx.from, 6.0, color);
+                }
+            }
+        }
+        renderer.set_fx(&verts, &indices);
+    }
+
+    /// The battle camera's matrix, with explosion shake applied.
+    pub fn camera_vp(&self, aspect: f32) -> Mat4 {
+        let mut cam = self.camera.clone();
+        if self.shake > 0.0 {
+            let s = self.shake;
+            cam.target += Vec3::new(
+                (self.fx_clock * 71.0).sin() * s,
+                (self.fx_clock * 63.0).cos() * s,
+                0.0,
+            );
+        }
+        cam.view_proj(aspect)
     }
 
     fn select_next_soldier(&mut self) {
@@ -289,23 +492,9 @@ impl BattleScreen {
     fn refresh_scene(&mut self, renderer: &mut Renderer) {
         let visible = self.battle.visible_tiles(Side::Order);
 
-        let mut units = MeshData::default();
-        for u in &self.battle.units {
-            if !u.alive {
-                continue;
-            }
-            if u.side == Side::Demons && !visible.contains(&u.tile) {
-                continue;
-            }
-            let base = (u.tile * TILE_VOXELS).as_vec3();
-            let material = if u.side == Side::Order { MAT_SOLDIER } else { MAT_IMP };
-            units.push_box(
-                base + Vec3::new(5.0, 5.0, 4.0),
-                base + Vec3::new(11.0, 11.0, 15.0),
-                material,
-            );
-        }
-        renderer.set_units(&units);
+        // Body-part voxel figures for every visible unit.
+        let (fig_verts, fig_indices) = figures::build_figures(&self.battle, &visible);
+        renderer.set_figures(&fig_verts, &fig_indices);
 
         let mut verts: Vec<OverlayVertex> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
@@ -328,6 +517,39 @@ impl BattleScreen {
         }
         renderer.set_overlay(&verts, &indices);
     }
+}
+
+fn push_quad(
+    verts: &mut Vec<OverlayVertex>,
+    indices: &mut Vec<u32>,
+    corners: [Vec3; 4],
+    color: [f32; 4],
+) {
+    let first = verts.len() as u32;
+    for c in corners {
+        verts.push(OverlayVertex { position: c.to_array(), color });
+    }
+    indices.extend([0, 1, 2, 0, 2, 3].map(|k| first + k));
+}
+
+fn push_flat_square(
+    verts: &mut Vec<OverlayVertex>,
+    indices: &mut Vec<u32>,
+    center: Vec3,
+    r: f32,
+    color: [f32; 4],
+) {
+    push_quad(
+        verts,
+        indices,
+        [
+            center + Vec3::new(-r, -r, 0.4),
+            center + Vec3::new(r, -r, 0.4),
+            center + Vec3::new(r, r, 0.4),
+            center + Vec3::new(-r, r, 0.4),
+        ],
+        color,
+    );
 }
 
 fn push_tile_quad(

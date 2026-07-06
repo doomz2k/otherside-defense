@@ -14,7 +14,7 @@ use winit::window::Window;
 use crate::{GpuMesh, Vertex, upload_mesh};
 
 const VOXEL_SHADER: &str = r#"
-struct Camera { view_proj: mat4x4<f32> };
+struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 var<private> PALETTE: array<vec3<f32>, 8> = array<vec3<f32>, 8>(
@@ -50,8 +50,7 @@ fn vs_main(in: VsIn) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let sun = normalize(vec3<f32>(0.35, 0.5, 0.8));
-    let ndl = max(dot(normalize(in.normal), sun), 0.0);
+    let ndl = max(dot(normalize(in.normal), camera.sun.xyz), 0.0);
     let base = PALETTE[min(in.material, 7u)];
     let lit = base * (0.35 + 0.65 * ndl);
     return vec4<f32>(lit, 1.0);
@@ -59,7 +58,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 "#;
 
 const OVERLAY_SHADER: &str = r#"
-struct Camera { view_proj: mat4x4<f32> };
+struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 struct VsIn {
@@ -86,7 +85,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 "#;
 
 const LIT_SHADER: &str = r#"
-struct Camera { view_proj: mat4x4<f32> };
+struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 struct VsIn {
@@ -111,8 +110,7 @@ fn vs_main(in: VsIn) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let sun = normalize(vec3<f32>(0.6, -0.5, 0.45));
-    let ndl = max(dot(normalize(in.normal), sun), 0.0);
+    let ndl = max(dot(normalize(in.normal), camera.sun.xyz), 0.0);
     let lit = in.color.rgb * (0.22 + 0.78 * ndl);
     return vec4<f32>(lit, in.color.a);
 }
@@ -162,6 +160,7 @@ impl OverlayVertex {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
+    sun: [f32; 4],
 }
 
 /// One frame's worth of egui output, ready to paint over the 3D scene.
@@ -187,6 +186,8 @@ pub struct Renderer {
     overlay_mesh: Option<GpuMesh>,
     globe_mesh: Option<GpuMesh>,
     marker_mesh: Option<GpuMesh>,
+    figure_mesh: Option<GpuMesh>,
+    fx_mesh: Option<GpuMesh>,
     ui_renderer: egui_wgpu::Renderer,
 }
 
@@ -216,6 +217,7 @@ impl Renderer {
             label: Some("camera"),
             contents: bytemuck::bytes_of(&CameraUniform {
                 view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                sun: [0.35, 0.5, 0.8, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -223,7 +225,7 @@ impl Renderer {
             label: Some("camera-layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -379,6 +381,8 @@ impl Renderer {
             overlay_mesh: None,
             globe_mesh: None,
             marker_mesh: None,
+            figure_mesh: None,
+            fx_mesh: None,
             ui_renderer,
         })
     }
@@ -390,6 +394,8 @@ impl Renderer {
         self.overlay_mesh = None;
         self.globe_mesh = None;
         self.marker_mesh = None;
+        self.figure_mesh = None;
+        self.fx_mesh = None;
     }
 
     fn upload_lit(&self, vertices: &[LitVertex], indices: &[u32]) -> Option<GpuMesh> {
@@ -419,6 +425,30 @@ impl Renderer {
         self.marker_mesh = self.upload_lit(vertices, indices);
     }
 
+    /// Install the battle's unit figures (body-part voxel models).
+    pub fn set_figures(&mut self, vertices: &[LitVertex], indices: &[u32]) {
+        self.figure_mesh = self.upload_lit(vertices, indices);
+    }
+
+    /// Install transient battle effects (tracers, blasts) — translucent.
+    pub fn set_fx(&mut self, vertices: &[OverlayVertex], indices: &[u32]) {
+        self.fx_mesh = if indices.is_empty() {
+            None
+        } else {
+            let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fx-vertices"),
+                contents: bytemuck::cast_slice(vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fx-indices"),
+                contents: bytemuck::cast_slice(indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            Some(GpuMesh { vertices: vb, indices: ib, index_count: indices.len() as u32 })
+        };
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
@@ -434,12 +464,14 @@ impl Renderer {
         (self.config.width as f32, self.config.height as f32)
     }
 
-    pub fn set_camera(&mut self, view_proj: Mat4) {
+    pub fn set_camera(&mut self, view_proj: Mat4, sun: glam::Vec3) {
+        let sun = sun.normalize_or(glam::Vec3::Z);
         self.queue.write_buffer(
             &self.camera_buffer,
             0,
             bytemuck::bytes_of(&CameraUniform {
                 view_proj: view_proj.to_cols_array_2d(),
+                sun: [sun.x, sun.y, sun.z, 0.0],
             }),
         );
     }
@@ -554,22 +586,32 @@ impl Renderer {
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
 
-            if self.globe_mesh.is_some() || self.marker_mesh.is_some() {
+            let lit_meshes: Vec<&GpuMesh> = self
+                .globe_mesh
+                .iter()
+                .chain(self.marker_mesh.iter())
+                .chain(self.figure_mesh.iter())
+                .collect();
+            if !lit_meshes.is_empty() {
                 pass.set_pipeline(&self.lit_pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                for mesh in self.globe_mesh.iter().chain(self.marker_mesh.iter()) {
+                for mesh in lit_meshes {
                     pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                     pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                 }
             }
 
-            if let Some(overlay) = &self.overlay_mesh {
+            let overlays: Vec<&GpuMesh> =
+                self.overlay_mesh.iter().chain(self.fx_mesh.iter()).collect();
+            if !overlays.is_empty() {
                 pass.set_pipeline(&self.overlay_pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                pass.set_vertex_buffer(0, overlay.vertices.slice(..));
-                pass.set_index_buffer(overlay.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..overlay.index_count, 0, 0..1);
+                for mesh in overlays {
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
             }
         }
 

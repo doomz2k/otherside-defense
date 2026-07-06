@@ -9,8 +9,10 @@
 //!   --headless       tactical smoke test
 //!   --campaign [N]   N-month narrated campaign
 
+mod audio;
 mod battle_screen;
 mod chronicle;
+mod figures;
 mod geoscape;
 mod globe;
 
@@ -70,6 +72,7 @@ pub struct Core {
     pub build_choice: Facility,
     pub selected_base: usize,
     pub difficulty_choice: ods_geo::Difficulty,
+    audio: Option<audio::Audio>,
     /// The big spinning world.
     geo_camera: OrbitCamera,
     geo_drag: bool,
@@ -78,6 +81,7 @@ pub struct Core {
     cursor: (f32, f32),
     last_cursor: (f32, f32),
     last_frame: Instant,
+    sun_drift: f32,
 }
 
 impl ApplicationHandler for App {
@@ -135,6 +139,7 @@ impl Core {
             build_choice: Facility::Quarters,
             selected_base: 0,
             difficulty_choice: ods_geo::Difficulty::Veteran,
+            audio: audio::Audio::new(),
             geo_camera,
             geo_drag: false,
             selected_region: None,
@@ -142,6 +147,7 @@ impl Core {
             cursor: (0.0, 0.0),
             last_cursor: (0.0, 0.0),
             last_frame: Instant::now(),
+            sun_drift: 0.0,
         })
     }
 
@@ -228,7 +234,7 @@ impl Core {
                     match button {
                         MouseButton::Right => b.right_drag = state == ElementState::Pressed,
                         MouseButton::Left if state == ElementState::Pressed => {
-                            b.click(&mut self.renderer, w, h);
+                            b.click(&mut self.renderer, self.audio.as_ref(), w, h);
                         }
                         _ => {}
                     }
@@ -252,7 +258,7 @@ impl Core {
                     && let PhysicalKey::Code(code) = event.physical_key
                     && let Some(b) = self.battle.as_mut()
                 {
-                    b.key(&mut self.renderer, code);
+                    b.key(&mut self.renderer, self.audio.as_ref(), code);
                 }
             }
             _ => {}
@@ -273,9 +279,16 @@ impl Core {
 
         match self.screen {
             Screen::Battle => {
-                if let Some(b) = &self.battle {
-                    let vp = b.camera.view_proj(self.renderer.aspect());
-                    self.renderer.set_camera(vp);
+                if let Some(b) = self.battle.as_mut() {
+                    b.update_fx(dt, &mut self.renderer);
+                    let vp = b.camera_vp(self.renderer.aspect());
+                    // Night fights are lit low and flat.
+                    let sun = if b.battle.vision_tiles < 14 {
+                        Vec3::new(-0.2, -0.3, 0.35)
+                    } else {
+                        Vec3::new(0.35, 0.5, 0.8)
+                    };
+                    self.renderer.set_camera(vp, sun);
                 }
             }
             Screen::Geoscape => {
@@ -288,12 +301,21 @@ impl Core {
                     self.renderer.set_globe(&vertices, &indices);
                     self.globe_built_for = Some(self.selected_region);
                 }
+                // The terminator: the sun tracks the campaign calendar and
+                // drifts in real time, sweeping day across the globe.
+                self.sun_drift += dt * 1.5;
+                let sun_lon = self
+                    .campaign
+                    .as_ref()
+                    .map_or(0.0, |c| c.sun_lon())
+                    + self.sun_drift;
+                let sun = globe::latlon_to_pos(12.0, sun_lon, 1.0);
                 if let Some(c) = &self.campaign {
                     let (vertices, indices) = globe::build_markers(c);
                     self.renderer.set_markers(&vertices, &indices);
                 }
                 let vp = self.geo_camera.view_proj(self.renderer.aspect());
-                self.renderer.set_camera(vp);
+                self.renderer.set_camera(vp, sun);
             }
             Screen::Menu => {}
         }
@@ -334,7 +356,7 @@ impl Core {
 
     fn battle_ui(&mut self, ctx: &egui::Context) {
         let leave = match self.battle.as_mut() {
-            Some(b) => b.hud(ctx, &mut self.renderer),
+            Some(b) => b.hud(ctx, &mut self.renderer, self.audio.as_ref()),
             None => {
                 self.screen = Screen::Menu;
                 return;

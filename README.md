@@ -38,14 +38,38 @@ and pathing.
 
 | Input | Action |
 |---|---|
-| Left click soldier / ground / imp | select / move / fire |
+| Left click soldier / ground / demon | select / move / fire |
 | `1` / `2` / `3` | snap / aimed / auto fire mode |
 | `G` then click | throw a hellfire charge (arcs over walls) |
+| `B` | bind: stun an adjacent demon with the rod (captures!) |
+| `K` | kneel (+15% accuracy until you move) |
 | `H` | field-dress the selected soldier (staunch bleeding) |
 | Tab | next soldier |
 | Space or Enter | end turn (demons play) |
 | Right-drag / scroll / WASD | orbit / zoom / pan camera |
 | Esc | disarm charge / deselect |
+
+## The bestiary
+
+Imps swarm; **Overseers** whisper Terrify through walls; **Hellhounds** charge
+on 70 TU; **Bile-wisps** lob acid over cover; and the **Taker** kills soldiers
+into Husks that stand up on the wrong side — and hatch a fresh Taker when
+destroyed. Packs escalate by campaign month. Every creature is drawn as a
+voxel figure assembled from named body parts (head, torso, each limb, horns,
+maws, tails — declared in `ods-sim`'s anatomy, built in `ods-app/figures.rs`)
+so location-based damage and customisation can hook in per-part later.
+
+## The campaign arc
+
+Bind demons in battle (`B`), drag them home, and the interrogation chain —
+Interrogation → the Herald's Confession → **The Name of the Enemy** — unlocks
+the final assault: burn 50 brimstone, breach the Otherside, and end it.
+Difficulty (Novice/Veteran/Legend) scales hell's monthly plan and garrisons.
+Workshops manufacture charges, dressings, and trade arms; loadouts draw from
+real stock; the fallen go on a memorial wall with rank and cause. The globe
+carries a day/night terminator — assaults on the night side fight at 9 tiles
+of vision instead of 14. Tracers, blasts, camera shake, and synthesized sound
+round out the battle.
 
 ## Workspace
 

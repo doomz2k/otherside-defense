@@ -353,6 +353,27 @@ impl Campaign {
             .sum()
     }
 
+    // ------------------------------------------------------------------
+    // The sun (drives the globe's terminator and night assaults)
+
+    pub fn total_days(&self) -> u32 {
+        (self.month - 1) * DAYS_PER_MONTH + self.day
+    }
+
+    /// Longitude the sun currently stands over, in degrees.
+    pub fn sun_lon(&self) -> f32 {
+        ((self.total_days() * 137) % 360) as f32 - 180.0
+    }
+
+    /// Is it daylight at this longitude today?
+    pub fn is_daylight(&self, lon: f32) -> bool {
+        let mut d = (lon - self.sun_lon()).abs() % 360.0;
+        if d > 180.0 {
+            d = 360.0 - d;
+        }
+        d < 90.0
+    }
+
     fn roll_recruit(&mut self) -> Soldier {
         let name = format!(
             "{} {}",
@@ -644,7 +665,7 @@ impl Campaign {
 
         let squad: Vec<&Soldier> = squad_idx.iter().map(|&i| &self.soldiers[i]).collect();
         let seed = (self.rng.roll(1 << 30) as u64) << 30 | self.rng.roll(1 << 30) as u64;
-        let battle = if defense {
+        let mut battle = if defense {
             missions::build_defense(
                 seed,
                 &squad,
@@ -656,6 +677,21 @@ impl Campaign {
             )
         } else {
             missions::build_assault(seed, &squad, &kits, garrison, strength, &self.research)
+        };
+
+        // Vision: assaults on the night side of the world are fought at
+        // 9 tiles instead of 14. The Otherside has no sun at all.
+        battle.vision_tiles = match kind {
+            MissionKind::Rift(id) => {
+                let lon = self.rifts.iter().find(|r| r.id == id).map_or(0.0, |r| r.lon);
+                if self.is_daylight(lon) { 14 } else { 9 }
+            }
+            MissionKind::Nest(id) => {
+                let lon = self.nests.iter().find(|n| n.id == id).map_or(0.0, |n| n.lon);
+                if self.is_daylight(lon) { 14 } else { 9 }
+            }
+            MissionKind::Reckoning => 14, // your own halls, lamplit
+            MissionKind::FinalAssault => 9,
         };
         Ok((battle, MissionToken { kind, squad_idx }))
     }
