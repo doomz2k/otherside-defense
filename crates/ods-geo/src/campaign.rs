@@ -109,6 +109,28 @@ impl Quirk {
     }
 }
 
+/// What a broken mind fixates on. Earned, not born with — and permanent
+/// until the chapel can talk them down from the worst of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Phobia {
+    /// -15 bravery whenever a Taker or Husk walks the same field.
+    FearOfTheTaken,
+    /// -5 TU on night missions: they know what the dark is for.
+    NightTerrors,
+    /// -15 reactions, always: the hands remember hesitating.
+    TriggerFreeze,
+}
+
+impl Phobia {
+    pub fn name(self) -> &'static str {
+        match self {
+            Phobia::FearOfTheTaken => "Fear of the Taken",
+            Phobia::NightTerrors => "Night Terrors",
+            Phobia::TriggerFreeze => "Trigger Freeze",
+        }
+    }
+}
+
 /// A severed part's permanent cost — heavier than any scar.
 fn apply_loss(stats: &mut SoldierStats, part: ods_sim::body::BodyPart) {
     use ods_sim::body::BodyPart as P;
@@ -200,6 +222,13 @@ pub struct Soldier {
     /// them (severed limbs do not convalesce back).
     #[serde(default)]
     pub lost_parts: Vec<ods_sim::body::BodyPart>,
+    /// 0..=100. Morale resets every battle; sanity doesn't. At 20 or below
+    /// the soldier is broken and unfit until the chapel does its work.
+    #[serde(default = "default_sanity")]
+    pub sanity: i32,
+    /// The fixation a broken stretch left behind.
+    #[serde(default)]
+    pub phobia: Option<Phobia>,
     /// The quirk this one was born with.
     #[serde(default)]
     pub quirk: Option<Quirk>,
@@ -207,7 +236,15 @@ pub struct Soldier {
 
 impl Soldier {
     pub fn is_fit(&self) -> bool {
-        self.recovery_days == 0 && self.warding.is_none() && self.aboard.is_none()
+        self.recovery_days == 0
+            && self.warding.is_none()
+            && self.aboard.is_none()
+            && !self.is_broken()
+    }
+
+    /// Sanity gone: confined to quarters (or the chapel) until it climbs.
+    pub fn is_broken(&self) -> bool {
+        self.sanity <= 20
     }
 
     /// Rank grows from deeds; higher ranks steady the squad's nerves.
@@ -383,6 +420,10 @@ pub struct CampaignStats {
 
 /// Panic at or above this boils over: terror rifts and fleeing patrons.
 pub const PANIC_BREAKPOINT: i64 = 60;
+
+fn default_sanity() -> i32 {
+    100
+}
 
 fn default_brim_price() -> i64 {
     15
@@ -616,6 +657,8 @@ impl Campaign {
             aboard: None,
             scars: Vec::new(),
             lost_parts: Vec::new(),
+            sanity: 100,
+            phobia: None,
             quirk: match self.rng.roll(10) {
                 0 => Some(Quirk::Marksman),
                 1 => Some(Quirk::Jumpy),
@@ -1124,6 +1167,28 @@ impl Campaign {
             MissionKind::Reckoning => 14, // your own halls, lamplit
             MissionKind::FinalAssault | MissionKind::FinalSanctum => 9,
         };
+        // Phobias answer the conditions of THIS field.
+        let night = battle.vision_tiles < 14;
+        let taken_present = battle
+            .units
+            .iter()
+            .any(|u| matches!(u.species, ods_sim::units::Species::Taker | ods_sim::units::Species::Husk));
+        for (i, &ri) in squad_idx.iter().enumerate() {
+            match self.soldiers[ri].phobia {
+                Some(Phobia::FearOfTheTaken) if taken_present => {
+                    battle.units[i].bravery = (battle.units[i].bravery - 15).max(5);
+                }
+                Some(Phobia::NightTerrors) if night => {
+                    battle.units[i].tu_max = (battle.units[i].tu_max - 5).max(30);
+                    battle.units[i].tu = battle.units[i].tu_max;
+                }
+                Some(Phobia::TriggerFreeze) => {
+                    battle.units[i].reactions = (battle.units[i].reactions - 15).max(10);
+                }
+                _ => {}
+            }
+        }
+
         // Burial honors: the last rites still echo in the ranks.
         if self.burial_honors > 0 {
             self.burial_honors -= 1;
@@ -1196,6 +1261,8 @@ impl Campaign {
                     if report.victory {
                         self.rifts.retain(|r| r.id != id);
                         self.score(region, kind.banish_score());
+                        // Every gibbet cut down counts for something.
+                        self.score(region, report.atrocities_found as i64 * 3);
                         self.shift_panic(region, -10);
                         self.collect_salvage(kind, report.demons_slain);
                         self.reckoning_heat += 1;
@@ -1303,6 +1370,29 @@ impl Campaign {
             s.kills += xp.kills;
             apply_growth(&mut s.stats, xp);
         }
+        // Horror outlives the battle: sanity bleeds, and a mind pushed too
+        // far picks up a fixation it will carry forever.
+        for &(squad_pos, horror) in &report.horrors {
+            let idx = squad_idx[squad_pos];
+            let s = &mut self.soldiers[idx];
+            s.sanity = (s.sanity - horror as i32 * 3).max(0);
+            if s.sanity < 40 && s.phobia.is_none() && self.rng.roll(100) < 35 {
+                let phobia = match self.rng.roll(3) {
+                    0 => Phobia::FearOfTheTaken,
+                    1 => Phobia::NightTerrors,
+                    _ => Phobia::TriggerFreeze,
+                };
+                self.soldiers[idx].phobia = Some(phobia);
+            }
+        }
+        // A lost field weighs on everyone who walked off it.
+        if !report.victory {
+            for &(squad_pos, _, _) in &report.survivors {
+                let s = &mut self.soldiers[squad_idx[squad_pos]];
+                s.sanity = (s.sanity - 5).max(0);
+            }
+        }
+
         // Severed parts are simply gone: the roster records the loss.
         for (squad_pos, parts) in &report.severed {
             let idx = squad_idx[*squad_pos];
@@ -1442,6 +1532,22 @@ impl Campaign {
             if s.recovery_days > 0 {
                 s.recovery_days -= 1;
                 if s.recovery_days == 0 {
+                    events.push(GeoEvent::SoldierRecovered { name: s.name.clone() });
+                }
+            }
+        }
+
+        // Minds knit slower than flesh; candlelight and psalms help.
+        let chapel = self
+            .bases
+            .iter()
+            .any(|b| b.count_active(Facility::Chapel) > 0);
+        let mend = if chapel { 3 } else { 1 };
+        for s in &mut self.soldiers {
+            if s.sanity < 100 {
+                let was_broken = s.is_broken();
+                s.sanity = (s.sanity + mend).min(100);
+                if was_broken && !s.is_broken() {
                     events.push(GeoEvent::SoldierRecovered { name: s.name.clone() });
                 }
             }
@@ -2647,5 +2753,59 @@ mod tests {
             // It landed on the manned founding house instead: a real fight.
             assert_eq!(c.bases.len(), 2);
         }
+    }
+
+    #[test]
+    fn horror_erodes_sanity_and_the_chapel_mends_it() {
+        let mut c = Campaign::new(50);
+        c.month_plan.clear();
+        c.rifts.clear();
+        // A soldier comes home from something terrible.
+        c.soldiers[0].sanity = 18;
+        assert!(c.soldiers[0].is_broken());
+        assert!(!c.soldiers[0].is_fit(), "the broken don't muster");
+
+        // Without a chapel: one point a day.
+        c.advance_day();
+        assert_eq!(c.soldiers[0].sanity, 19);
+
+        // With a chapel: three.
+        c.bases[0].start_build(Facility::Chapel, 5, 5);
+        for _ in 0..Facility::Chapel.build_days() {
+            c.advance_day();
+        }
+        let before = c.soldiers[0].sanity;
+        c.advance_day();
+        assert_eq!(c.soldiers[0].sanity, before + 3, "psalms work");
+    }
+
+    #[test]
+    fn survivors_of_horror_can_come_home_with_phobias() {
+        // Drive the roll deterministically: heavy horror, low sanity.
+        let mut c = Campaign::new(51);
+        for s in &mut c.soldiers {
+            s.sanity = 45;
+        }
+        let mut phobia_seen = false;
+        for _ in 0..12 {
+            let id = detected_rift(&mut c, RiftKind::Harvest, Region::Europe);
+            let _ = c.assault_rift(id);
+            for s in &mut c.soldiers {
+                s.recovery_days = 0;
+                if s.sanity <= 20 {
+                    s.sanity = 30; // keep them mustering for the test
+                }
+            }
+            if c.soldiers.iter().any(|s| s.phobia.is_some()) {
+                phobia_seen = true;
+                break;
+            }
+            if c.soldiers.len() < 2 {
+                return; // a doomed seed proves nothing
+            }
+        }
+        // Phobias are a chance, not a promise — but across a dozen bloody
+        // missions at sub-40 sanity, someone should have cracked.
+        assert!(phobia_seen || c.soldiers.iter().all(|s| s.sanity > 40));
     }
 }

@@ -35,6 +35,10 @@ pub struct BattleReport {
     /// Breeds encountered / dragged home bound — feeds the codex.
     pub species_seen: Vec<ods_sim::units::Species>,
     pub species_captured: Vec<ods_sim::units::Species>,
+    /// Horrors witnessed per survivor (squad index, count) — sanity damage.
+    pub horrors: Vec<(usize, u32)>,
+    /// Atrocity sites the squad discovered (cleansed if the field was held).
+    pub atrocities_found: u32,
 }
 
 const MAX_AUTO_TURNS: u32 = 40;
@@ -127,6 +131,7 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
     let mut survivors = Vec::new();
     let mut injuries = Vec::new();
     let mut severed = Vec::new();
+    let mut horrors = Vec::new();
     for i in 0..squad_len {
         let u = &battle.units[i];
         // A Taken soldier is alive, walking, and lost forever.
@@ -144,6 +149,9 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
             }
             if !u.severed.is_empty() {
                 severed.push((i, u.severed.clone()));
+            }
+            if u.horror > 0 {
+                horrors.push((i, u.horror));
             }
         } else {
             dead.push(i);
@@ -199,6 +207,8 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
         civilians_dead,
         species_seen,
         species_captured,
+        horrors,
+        atrocities_found: battle.atrocities.iter().filter(|(_, found)| *found).count() as u32,
     }
 }
 

@@ -204,7 +204,20 @@ pub fn build_figures(
     visible: &std::collections::HashSet<IVec3>,
     visual: &std::collections::HashMap<u32, Vec3>,
 ) -> (Vec<LitVertex>, Vec<u32>) {
-    use ods_sim::units::Side;
+    use ods_sim::units::{Side, Species};
+
+    let night = battle.vision_tiles < 14;
+    let soldier_tiles: Vec<IVec3> = battle
+        .units
+        .iter()
+        .filter(|u| u.is_active() && u.side == Side::Order)
+        .map(|u| u.tile)
+        .collect();
+    let near_soldier = |tile: IVec3, range: i32| {
+        soldier_tiles
+            .iter()
+            .any(|s| (s.x - tile.x).abs().max((s.y - tile.y).abs()) <= range)
+    };
 
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
@@ -215,12 +228,42 @@ pub fn build_figures(
             continue;
         }
         if u.side == Side::Demons && !visible.contains(&u.tile) {
+            // At night, the pack beyond your lamplight is a pair of eyes.
+            if night && u.is_active() && near_soldier(u.tile, battle.vision_tiles + 4) {
+                push_eyes(&mut vertices, &mut indices, u);
+            }
             continue; // hidden in the fog
+        }
+        // The Taker is never truly seen: at arm's length, or lit by open
+        // flame — otherwise only its footprints and the noises it makes.
+        if u.species == Species::Taker
+            && u.is_active()
+            && !near_soldier(u.tile, 2)
+            && !battle.clouds.iter().any(|(t, k, _)| {
+                *k == ods_sim::battle::CloudKind::Fire
+                    && (t.x - u.tile.x).abs().max((t.y - u.tile.y).abs()) <= 1
+            })
+        {
+            if night {
+                push_eyes(&mut vertices, &mut indices, u);
+            }
+            continue;
         }
         let feet = visual.get(&u.id.0).copied();
         push_unit(&mut vertices, &mut indices, u, feet);
     }
     (vertices, indices)
+}
+
+/// Two burning points at head height: the shape of a demon you can't see.
+fn push_eyes(vertices: &mut Vec<LitVertex>, indices: &mut Vec<u32>, unit: &ods_sim::units::Unit) {
+    let feet = (unit.tile * ods_sim::TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, 4.0);
+    // Over-unit color: survives the diffuse term and reads as glow.
+    let glow = [3.0, 0.35, 0.2, 1.0];
+    for dx in [-1.4f32, 1.4] {
+        let c = feet + Vec3::new(dx, 0.0, 10.5);
+        push_box(vertices, indices, c - Vec3::splat(0.45), c + Vec3::splat(0.45), glow);
+    }
 }
 
 fn push_unit(
@@ -241,6 +284,8 @@ fn push_unit(
         0.22
     } else if unit.kneeling {
         0.72
+    } else if unit.morale < 35 {
+        0.9 // the shoulders go first
     } else {
         1.0
     };
@@ -258,6 +303,16 @@ fn push_unit(
         // Corpses drain toward grave-grey.
         if !unit.alive {
             color = [color[0] * 0.3, color[1] * 0.3, color[2] * 0.3, 1.0];
+        } else {
+            // The hurt wear it: blood-darkened toward the end.
+            let vitality =
+                (unit.health.max(0) as f32 / unit.health_max.max(1) as f32).clamp(0.0, 1.0);
+            let dim = 0.55 + 0.45 * vitality;
+            color = [color[0] * dim, color[1] * dim, color[2] * dim, color[3]];
+        }
+        // Rot glows from inside the part it holds.
+        if unit.infected.map(|(p, _)| p) == Some(part.part) {
+            color = [0.35, 0.9, 0.25, 1.0];
         }
         // Townsfolk wear homespun, not armor.
         if unit.civilian && part.part != BodyPart::Head {

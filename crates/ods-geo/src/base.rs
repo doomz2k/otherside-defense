@@ -20,15 +20,18 @@ pub enum Facility {
     Infirmary,
     /// Hosts 5 artificers' production each.
     Workshop,
+    /// Candles, psalms, and quiet: where broken minds are mended.
+    Chapel,
 }
 
 impl Facility {
-    pub const BUILDABLE: [Facility; 5] = [
+    pub const BUILDABLE: [Facility; 6] = [
         Facility::Quarters,
         Facility::AugurArray,
         Facility::Library,
         Facility::Infirmary,
         Facility::Workshop,
+        Facility::Chapel,
     ];
 
     pub fn cost(self) -> i64 {
@@ -39,6 +42,7 @@ impl Facility {
             Facility::Library => 150,
             Facility::Infirmary => 200,
             Facility::Workshop => 150,
+            Facility::Chapel => 180,
         }
     }
 
@@ -50,6 +54,7 @@ impl Facility {
             Facility::Library => 10,
             Facility::Infirmary => 12,
             Facility::Workshop => 10,
+            Facility::Chapel => 12,
         }
     }
 
@@ -61,6 +66,7 @@ impl Facility {
             Facility::Library => 10,
             Facility::Infirmary => 15,
             Facility::Workshop => 10,
+            Facility::Chapel => 8,
         }
     }
 
@@ -72,6 +78,7 @@ impl Facility {
             Facility::Library => "Library",
             Facility::Infirmary => "Infirmary",
             Facility::Workshop => "Workshop",
+            Facility::Chapel => "Chapel",
         }
     }
 }

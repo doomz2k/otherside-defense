@@ -467,7 +467,53 @@ pub fn incursion_in_biome(
         door_tiles.push(IVec3::new(tx, ty, 0));
     }
 
+    // Terror sites are dressed with what the demons did before you came:
+    // gibbet posts ringed in gore and scrawled sigils. Finding one is a
+    // horror; cleansing the site is why you're here.
+    let mut atrocity_tiles = Vec::new();
+    if civilians > 0 {
+        let mut arng = crate::SimRng::from_seed(seed ^ 0x0A7770C1);
+        for _ in 0..3 {
+            for _try in 0..10 {
+                let t = IVec3::new(6 + arng.roll(12) as i32, 2 + arng.roll(20) as i32, 0);
+                // Never inside the shelter yard where the living still hide.
+                if (9..=14).contains(&t.x) && (8..=15).contains(&t.y) {
+                    continue;
+                }
+                let probe = t * TILE_VOXELS + IVec3::new(8, 8, GROUND_TOP + 1);
+                if world.voxel(probe) != Voxel::EMPTY {
+                    continue;
+                }
+                let o = t * TILE_VOXELS;
+                // The post.
+                world.fill_box(
+                    o + IVec3::new(7, 7, GROUND_TOP),
+                    o + IVec3::new(9, 9, GROUND_TOP + 12),
+                    MAT_TIMBER,
+                );
+                // What hangs from it.
+                world.fill_box(
+                    o + IVec3::new(6, 6, GROUND_TOP + 6),
+                    o + IVec3::new(10, 10, GROUND_TOP + 9),
+                    MAT_GORE,
+                );
+                // The ground around it, painted and scrawled.
+                for (dx, dy) in [(3, 4), (11, 5), (5, 11), (12, 12), (8, 3), (4, 8)] {
+                    world.set_voxel(o + IVec3::new(dx, dy, GROUND_TOP - 1), MAT_BLOOD);
+                }
+                for (dx, dy) in [(2, 2), (13, 2), (2, 13), (13, 13)] {
+                    world.set_voxel(o + IVec3::new(dx, dy, GROUND_TOP - 1), MAT_SIGIL);
+                }
+                atrocity_tiles.push(t);
+                break;
+            }
+        }
+    }
+
     let mut battle = Battle::new(world, IVec3::ZERO, MAP_TILES, units, seed);
+    for tile in atrocity_tiles {
+        battle.register_atrocity(tile);
+    }
     for tile in door_tiles {
         battle.doors.push((tile, false));
     }

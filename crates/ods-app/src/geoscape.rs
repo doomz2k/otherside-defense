@@ -419,7 +419,7 @@ impl Core {
                         let mut lance_toggle: Option<(usize, bool)> = None;
                         let mut transfer: Option<usize> = None;
                         egui::Grid::new("roster").striped(true).show(ui, |ui| {
-                            for h in ["Name", "Rank", "Quirk", "TU", "HP", "Acc", "K", "🧨", "✚", "Lance", "Status"] {
+                            for h in ["Name", "Rank", "Quirk", "Mind", "TU", "HP", "Acc", "K", "🧨", "✚", "Lance", "Status"] {
                                 ui.strong(h);
                             }
                             ui.end_row();
@@ -445,6 +445,15 @@ impl Core {
                                 }
                                 ui.label(s.rank());
                                 ui.label(s.quirk.map_or("–", |q| q.name()));
+                                let mind_color = match s.sanity {
+                                    0..=20 => egui::Color32::from_rgb(220, 60, 60),
+                                    21..=50 => egui::Color32::from_rgb(230, 180, 70),
+                                    _ => egui::Color32::from_rgb(140, 200, 140),
+                                };
+                                let mind = ui.colored_label(mind_color, s.sanity.to_string());
+                                if let Some(phobia) = s.phobia {
+                                    mind.on_hover_text(format!("phobia: {}", phobia.name()));
+                                }
                                 ui.label(s.stats.tu.to_string());
                                 ui.label(s.stats.health.to_string());
                                 ui.label(s.stats.accuracy.to_string());
@@ -475,8 +484,16 @@ impl Core {
                                 } else {
                                     ui.label("–");
                                 }
-                                if s.warding.is_some() {
+                                if s.is_broken() {
+                                    ui.colored_label(egui::Color32::from_rgb(220, 60, 60), "broken")
+                                        .on_hover_text(
+                                            "sanity gone: unfit until it climbs past 20 \
+                                             (a Chapel mends minds three times as fast)",
+                                        );
+                                } else if s.warding.is_some() {
                                     ui.colored_label(egui::Color32::YELLOW, "warding");
+                                } else if s.aboard.is_some() {
+                                    ui.colored_label(egui::Color32::LIGHT_BLUE, "aboard");
                                 } else if s.is_fit() {
                                     if ui.small_button(format!("fit @{}", s.home)).clicked() {
                                         transfer = Some(si);

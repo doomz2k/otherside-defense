@@ -141,6 +141,8 @@ pub enum Event {
     CorruptionSpread { at: IVec3 },
     /// Standing on corrupted ground, a soldier hears the ground talk.
     Whispered { unit: UnitId },
+    /// A soldier stumbles onto what the demons did here before you came.
+    AtrocityFound { unit: UnitId, at: IVec3 },
     /// A Prince seizes a mind outright.
     Possessed { unit: UnitId, by: UnitId },
     PossessionEnds { unit: UnitId },
@@ -296,6 +298,8 @@ pub struct Battle {
     pub wards: Vec<IVec3>,
     /// Ground the obelisk has veined with glowing corruption.
     pub corruption: Vec<IVec3>,
+    /// Atrocity sites on terror maps: (tile, discovered).
+    pub atrocities: Vec<(IVec3, bool)>,
     /// Unseen demon movement this enemy turn (flushed as cues).
     heard: Vec<IVec3>,
     xp: Vec<Experience>,
@@ -330,6 +334,7 @@ impl Battle {
             summons: Vec::new(),
             wards: Vec::new(),
             corruption: Vec::new(),
+            atrocities: Vec::new(),
             heard: Vec::new(),
             xp,
             rng: SimRng::from_seed(seed),
@@ -917,6 +922,20 @@ impl Battle {
         Ok(vec![Event::WardInscribed { at }])
     }
 
+    /// Register an atrocity site (terror maps): discovering it is a horror.
+    pub fn register_atrocity(&mut self, tile: IVec3) {
+        self.atrocities.push((tile, false));
+    }
+
+    /// Every active squadmate of `side` marks a horror on their record.
+    fn witness_horror(&mut self, side: Side, except: UnitId) {
+        for u in &mut self.units {
+            if u.is_active() && u.side == side && u.id != except && !u.civilian {
+                u.horror += 1;
+            }
+        }
+    }
+
     /// Register a fuel cask hazard (counts its shell voxels).
     pub fn register_cask(&mut self, tile: IVec3) {
         let o = tile * TILE_VOXELS;
@@ -1251,6 +1270,25 @@ impl Battle {
                 tu_left: self.unit(id).tu,
             });
             here = next;
+
+            // The Taker leaves bloody footprints between the screams.
+            if self.unit(id).species == Species::Taker {
+                self.spatter(next, 1, MAT_BLOOD);
+            }
+
+            // Soldiers stumbling onto atrocity sites see what was done here.
+            if self.unit(id).side == Side::Order && !self.unit(id).civilian {
+                for i in 0..self.atrocities.len() {
+                    let (at, found) = self.atrocities[i];
+                    if !found && cheb(next, at) <= 2 {
+                        self.atrocities[i].1 = true;
+                        events.push(Event::AtrocityFound { unit: id, at });
+                        let u = self.unit_mut(id);
+                        u.morale = (u.morale - 10).max(0);
+                        u.horror += 1;
+                    }
+                }
+            }
 
             // A demon crossing a ward line is answered by it.
             if self.unit(id).side == Side::Demons
@@ -1706,6 +1744,8 @@ impl Battle {
                 u.morale = (u.morale - 10).max(0);
             }
         }
+        self.unit_mut(target).horror += 2;
+        self.witness_horror(side, target);
         // Heads don't grow back.
         if part == BodyPart::Head {
             self.kill_unit(target, events);
@@ -1731,6 +1771,7 @@ impl Battle {
                 u.morale = (u.morale - (12 - u.bravery / 10).max(4)).max(0);
             }
         }
+        self.witness_horror(side, target);
     }
 
     /// The Taking: the victim's body stands back up on the other side.
@@ -1750,6 +1791,9 @@ impl Battle {
         for u in &mut self.units {
             if u.alive && u.side == side && u.id != victim {
                 u.morale = (u.morale - 20).max(0);
+                if u.is_active() && !u.civilian {
+                    u.horror += 2;
+                }
             }
         }
         let husk = Unit::husk(victim.0, &format!("{name} (Taken)"), tile);
@@ -1897,6 +1941,7 @@ impl Battle {
                 for id in standing {
                     let u = self.unit_mut(id);
                     u.morale = (u.morale - 8).max(0);
+                    u.horror += 1;
                     events.push(Event::Whispered { unit: id });
                 }
             }
@@ -3233,5 +3278,37 @@ mod tests {
             }
         }
         assert!(runes > 20, "the obelisk is written on: {runes}");
+    }
+
+    #[test]
+    fn atrocities_horrify_their_discoverer() {
+        let mut b = open_field(duelists(), 27);
+        b.register_atrocity(IVec3::new(4, 5, 0));
+        let morale = b.unit(UnitId(0)).morale;
+        let events = b
+            .perform(Action::Move { unit: UnitId(0), to: IVec3::new(3, 5, 0) })
+            .unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, Event::AtrocityFound { .. })),
+            "{events:?}"
+        );
+        assert!(b.unit(UnitId(0)).morale < morale);
+        assert_eq!(b.unit(UnitId(0)).horror, 1, "seeing it marks you");
+        // Walking past again finds nothing new.
+        let events = b
+            .perform(Action::Move { unit: UnitId(0), to: IVec3::new(4, 6, 0) })
+            .unwrap();
+        assert!(!events.iter().any(|e| matches!(e, Event::AtrocityFound { .. })));
+    }
+
+    #[test]
+    fn gibs_mark_the_witnesses() {
+        let mut units = duelists();
+        units.push(Unit::soldier(2, "Witness", IVec3::new(1, 7, 0)));
+        let mut b = open_field(units, 29);
+        let mut events = Vec::new();
+        let obliterate = b.unit(UnitId(0)).health + 50;
+        b.apply_damage(UnitId(0), obliterate, None, &mut events);
+        assert!(b.unit(UnitId(2)).horror > 0, "the witness carries it home");
     }
 }

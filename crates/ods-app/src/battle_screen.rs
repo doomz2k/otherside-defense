@@ -667,6 +667,9 @@ impl BattleScreen {
             Event::Whispered { unit } => {
                 self.float(*unit, "whispers...", egui::Color32::from_rgb(190, 120, 230));
             }
+            Event::AtrocityFound { unit, .. } => {
+                self.float(*unit, "ATROCITY", egui::Color32::from_rgb(220, 60, 40));
+            }
             Event::Panicked { unit } => {
                 self.float(*unit, "PANIC", egui::Color32::from_rgb(255, 210, 90));
             }
@@ -790,6 +793,7 @@ impl BattleScreen {
                 play(Sound::Dread);
             }
             Event::Panicked { .. } | Event::Berserked { .. } => play(Sound::Dread),
+            Event::AtrocityFound { .. } => play(Sound::Dread),
             Event::Whispered { .. } | Event::Possessed { .. } => play(Sound::Whisper),
             Event::SummoningScribed { at } | Event::SummoningDisrupted { at } => {
                 let p = Self::tile_pos(*at, 5.0);
@@ -1312,6 +1316,9 @@ fn describe(event: &Event, battle: &Battle) -> String {
         }
         Event::Whispered { unit } => {
             format!("{} stands on corrupted ground... the ground knows their name", name(unit))
+        }
+        Event::AtrocityFound { unit, at } => {
+            format!("!!! {} finds what the demons left at {at}. Nobody should see this.", name(unit))
         }
         Event::TerrainDestroyed { voxels, .. } => {
             format!("terrain shattered ({voxels} voxels)")

@@ -205,6 +205,9 @@ pub struct Unit {
     pub consumed: bool,
     /// Death by overkill left nothing whole to bury (or to hatch from).
     pub gibbed: bool,
+    /// Horrors witnessed this battle (gibs, Takings, atrocities...). The
+    /// campaign turns these into lasting sanity damage.
+    pub horror: u32,
     /// Turns remaining under a Prince's control (acts for the enemy).
     pub possessed: u32,
     /// Smoke grenades carried.
@@ -261,6 +264,7 @@ impl Unit {
             infected: None,
             consumed: false,
             gibbed: false,
+            horror: 0,
             possessed: 0,
             smoke_grenades: 0,
             ward_kits: 0,
