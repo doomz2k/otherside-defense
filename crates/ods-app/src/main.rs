@@ -12,13 +12,16 @@
 mod battle_screen;
 mod chronicle;
 mod geoscape;
+mod globe;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use battle_screen::BattleScreen;
 use geoscape::GeoAction;
-use ods_geo::{Campaign, Facility};
-use ods_render::{Renderer, UiFrame};
+use glam::Vec3;
+use ods_geo::{Campaign, Facility, Region};
+use ods_render::{OrbitCamera, Renderer, UiFrame};
 use ods_sim::scenario;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -65,6 +68,14 @@ pub struct Core {
     pub log: Vec<String>,
     pub status: Option<String>,
     pub build_choice: Facility,
+    /// The big spinning world.
+    geo_camera: OrbitCamera,
+    geo_drag: bool,
+    pub selected_region: Option<Region>,
+    globe_built_for: Option<Option<Region>>,
+    cursor: (f32, f32),
+    last_cursor: (f32, f32),
+    last_frame: Instant,
 }
 
 impl ApplicationHandler for App {
@@ -105,6 +116,10 @@ impl Core {
             None,
             None,
         );
+        let mut geo_camera = OrbitCamera::new(Vec3::ZERO);
+        geo_camera.distance = 640.0;
+        geo_camera.pitch = 0.35;
+
         Ok(Self {
             window,
             renderer,
@@ -116,7 +131,23 @@ impl Core {
             log: Vec::new(),
             status: None,
             build_choice: Facility::Quarters,
+            geo_camera,
+            geo_drag: false,
+            selected_region: None,
+            globe_built_for: None,
+            cursor: (0.0, 0.0),
+            last_cursor: (0.0, 0.0),
+            last_frame: Instant::now(),
         })
+    }
+
+    /// Switch to the Geoscape and (re)install the globe scene.
+    pub fn enter_geoscape(&mut self) {
+        self.renderer.clear_scene();
+        let (vertices, indices) = globe::build_globe(self.selected_region);
+        self.renderer.set_globe(&vertices, &indices);
+        self.globe_built_for = Some(self.selected_region);
+        self.screen = Screen::Geoscape;
     }
 
     pub fn start_skirmish(&mut self) {
@@ -142,6 +173,13 @@ impl Core {
                 self.redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x as f32, position.y as f32);
+                if self.screen == Screen::Geoscape && self.geo_drag && !response.consumed {
+                    let dx = self.cursor.0 - self.last_cursor.0;
+                    let dy = self.cursor.1 - self.last_cursor.1;
+                    self.geo_camera.orbit(dx * -0.006, dy * 0.006);
+                }
+                self.last_cursor = self.cursor;
                 if let Some(b) = self.battle.as_mut() {
                     b.cursor = (position.x as f32, position.y as f32);
                     if b.right_drag && !response.consumed {
@@ -151,6 +189,32 @@ impl Core {
                     }
                     b.last_cursor = b.cursor;
                 }
+            }
+            WindowEvent::MouseInput { state, button, .. }
+                if self.screen == Screen::Geoscape && !response.consumed =>
+            {
+                match button {
+                    MouseButton::Right | MouseButton::Middle => {
+                        self.geo_drag = state == ElementState::Pressed;
+                    }
+                    MouseButton::Left if state == ElementState::Pressed => {
+                        let (w, h) = self.renderer.size();
+                        let (origin, dir) =
+                            self.geo_camera.screen_ray(self.cursor.0, self.cursor.1, w, h);
+                        self.selected_region = globe::pick_region(origin, dir);
+                    }
+                    _ => {}
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. }
+                if self.screen == Screen::Geoscape && !response.consumed =>
+            {
+                let scroll = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                };
+                self.geo_camera.zoom(1.0 - scroll * 0.1);
+                self.geo_camera.distance = self.geo_camera.distance.max(320.0);
             }
             WindowEvent::MouseInput { state, button, .. }
                 if self.screen == Screen::Battle && !response.consumed =>
@@ -193,6 +257,9 @@ impl Core {
     }
 
     fn redraw(&mut self) {
+        let dt = self.last_frame.elapsed().as_secs_f32().min(0.1);
+        self.last_frame = Instant::now();
+
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let ctx = self.egui_ctx.clone();
         let full_output = ctx.run(raw_input, |ctx| self.ui(ctx));
@@ -200,9 +267,31 @@ impl Core {
             .handle_platform_output(&self.window, full_output.platform_output);
         let primitives = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
 
-        if let Some(b) = &self.battle {
-            let vp = b.camera.view_proj(self.renderer.aspect());
-            self.renderer.set_camera(vp);
+        match self.screen {
+            Screen::Battle => {
+                if let Some(b) = &self.battle {
+                    let vp = b.camera.view_proj(self.renderer.aspect());
+                    self.renderer.set_camera(vp);
+                }
+            }
+            Screen::Geoscape => {
+                // The world turns on its own until the player grabs it.
+                if !self.geo_drag {
+                    self.geo_camera.yaw += dt * 0.08;
+                }
+                if self.globe_built_for != Some(self.selected_region) {
+                    let (vertices, indices) = globe::build_globe(self.selected_region);
+                    self.renderer.set_globe(&vertices, &indices);
+                    self.globe_built_for = Some(self.selected_region);
+                }
+                if let Some(c) = &self.campaign {
+                    let (vertices, indices) = globe::build_markers(c);
+                    self.renderer.set_markers(&vertices, &indices);
+                }
+                let vp = self.geo_camera.view_proj(self.renderer.aspect());
+                self.renderer.set_camera(vp);
+            }
+            Screen::Menu => {}
         }
 
         if let Err(e) = self.renderer.render(Some(UiFrame {
@@ -265,7 +354,7 @@ impl Core {
                             report.dead.len()
                         )
                     });
-                    self.screen = Screen::Geoscape;
+                    self.enter_geoscape();
                 }
                 _ => {
                     self.screen = Screen::Menu;

@@ -85,6 +85,60 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+const LIT_SHADER: &str = r#"
+struct Camera { view_proj: mat4x4<f32> };
+@group(0) @binding(0) var<uniform> camera: Camera;
+
+struct VsIn {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) color: vec4<f32>,
+};
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VsIn) -> VsOut {
+    var out: VsOut;
+    out.clip = camera.view_proj * vec4<f32>(in.position, 1.0);
+    out.normal = in.normal;
+    out.color = in.color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let sun = normalize(vec3<f32>(0.6, -0.5, 0.45));
+    let ndl = max(dot(normalize(in.normal), sun), 0.0);
+    let lit = in.color.rgb * (0.22 + 0.78 * ndl);
+    return vec4<f32>(lit, in.color.a);
+}
+"#;
+
+/// Opaque lit vertex with a free RGBA color — the Geoscape globe and its
+/// markers use this (the voxel palette is too small for a planet).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct LitVertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub color: [f32; 4],
+}
+
+impl LitVertex {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 3] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
+
+    const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<LitVertex>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &Self::ATTRIBUTES,
+    };
+}
+
 /// Vertex for the translucent overlay pass (fog, selection, markers).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -127,9 +181,12 @@ pub struct Renderer {
     overlay_pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    lit_pipeline: wgpu::RenderPipeline,
     chunk_meshes: HashMap<IVec3, GpuMesh>,
     unit_mesh: Option<GpuMesh>,
     overlay_mesh: Option<GpuMesh>,
+    globe_mesh: Option<GpuMesh>,
+    marker_mesh: Option<GpuMesh>,
     ui_renderer: egui_wgpu::Renderer,
 }
 
@@ -265,6 +322,41 @@ impl Renderer {
             cache: None,
         });
 
+        let lit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("lit-shader"),
+            source: wgpu::ShaderSource::Wgsl(LIT_SHADER.into()),
+        });
+        let lit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("lit-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &lit_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[LitVertex::LAYOUT],
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &lit_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(config.format.into())],
+            }),
+            multiview: None,
+            cache: None,
+        });
+
         let ui_renderer = egui_wgpu::Renderer::new(
             &device,
             config.format,
@@ -281,9 +373,12 @@ impl Renderer {
             overlay_pipeline,
             camera_buffer,
             camera_bind_group,
+            lit_pipeline,
             chunk_meshes: HashMap::new(),
             unit_mesh: None,
             overlay_mesh: None,
+            globe_mesh: None,
+            marker_mesh: None,
             ui_renderer,
         })
     }
@@ -293,6 +388,35 @@ impl Renderer {
         self.chunk_meshes.clear();
         self.unit_mesh = None;
         self.overlay_mesh = None;
+        self.globe_mesh = None;
+        self.marker_mesh = None;
+    }
+
+    fn upload_lit(&self, vertices: &[LitVertex], indices: &[u32]) -> Option<GpuMesh> {
+        if indices.is_empty() {
+            return None;
+        }
+        let vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lit-vertices"),
+            contents: bytemuck::cast_slice(vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lit-indices"),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        Some(GpuMesh { vertices: vb, indices: ib, index_count: indices.len() as u32 })
+    }
+
+    /// Install the Geoscape globe (rebuilt only when its look changes).
+    pub fn set_globe(&mut self, vertices: &[LitVertex], indices: &[u32]) {
+        self.globe_mesh = self.upload_lit(vertices, indices);
+    }
+
+    /// Install the globe's surface markers (rifts, nests, the chapterhouse).
+    pub fn set_markers(&mut self, vertices: &[LitVertex], indices: &[u32]) {
+        self.marker_mesh = self.upload_lit(vertices, indices);
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -428,6 +552,16 @@ impl Renderer {
                 pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
+
+            if self.globe_mesh.is_some() || self.marker_mesh.is_some() {
+                pass.set_pipeline(&self.lit_pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                for mesh in self.globe_mesh.iter().chain(self.marker_mesh.iter()) {
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
             }
 
             if let Some(overlay) = &self.overlay_mesh {

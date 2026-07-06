@@ -19,5 +19,6 @@ pub use campaign::{
     SOLDIER_HIRE_COST, Soldier, SoldierStats,
 };
 pub use director::{Nest, Rift, RiftKind};
+pub use geography::Region;
 pub use missions::BattleReport;
 pub use research::Project;

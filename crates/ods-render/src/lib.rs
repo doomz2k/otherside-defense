@@ -7,7 +7,7 @@ mod camera;
 mod renderer;
 
 pub use camera::OrbitCamera;
-pub use renderer::{OverlayVertex, Renderer, UiFrame};
+pub use renderer::{LitVertex, OverlayVertex, Renderer, UiFrame};
 
 use bytemuck::{Pod, Zeroable};
 use ods_voxel::MeshData;

@@ -23,7 +23,7 @@ impl Core {
                 if ui.button(egui::RichText::new("New campaign").size(18.0)).clicked() {
                     self.campaign = Some(Campaign::new(seed_from_clock()));
                     self.log = vec!["The Order convenes.".to_string()];
-                    self.screen = Screen::Geoscape;
+                    self.enter_geoscape();
                 }
                 ui.add_space(8.0);
                 let has_save = std::path::Path::new(SAVE_PATH).exists();
@@ -41,7 +41,7 @@ impl Core {
                                 c.month, c.day, c.funds
                             )];
                             self.campaign = Some(c);
-                            self.screen = Screen::Geoscape;
+                            self.enter_geoscape();
                         }
                         Err(e) => self.status = Some(format!("load failed: {e}")),
                     }
@@ -173,6 +173,37 @@ impl Core {
                     let _ = c.sell_hellsteel(1);
                 }
             });
+
+            ui.add_space(6.0);
+            egui::CollapsingHeader::new("Roster")
+                .default_open(true)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                        egui::Grid::new("roster").striped(true).show(ui, |ui| {
+                            for h in ["Name", "TU", "HP", "Acc", "Msn", "Kills", "Status"] {
+                                ui.strong(h);
+                            }
+                            ui.end_row();
+                            for s in &c.soldiers {
+                                ui.label(&s.name);
+                                ui.label(s.stats.tu.to_string());
+                                ui.label(s.stats.health.to_string());
+                                ui.label(s.stats.accuracy.to_string());
+                                ui.label(s.missions.to_string());
+                                ui.label(s.kills.to_string());
+                                if s.is_fit() {
+                                    ui.label("fit");
+                                } else {
+                                    ui.colored_label(
+                                        egui::Color32::LIGHT_RED,
+                                        format!("{}d", s.recovery_days),
+                                    );
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    });
+                });
         });
 
         // ------------------------------------------------- chapterhouse
@@ -294,37 +325,48 @@ impl Core {
                 });
             });
 
-        // ------------------------------------------------------ roster
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Roster");
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                egui::Grid::new("roster").striped(true).show(ui, |ui| {
-                    for h in ["Name", "TU", "HP", "React", "Acc", "Brave", "Missions", "Kills", "Status"] {
-                        ui.strong(h);
-                    }
-                    ui.end_row();
-                    for s in &c.soldiers {
-                        ui.label(&s.name);
-                        ui.label(s.stats.tu.to_string());
-                        ui.label(s.stats.health.to_string());
-                        ui.label(s.stats.reactions.to_string());
-                        ui.label(s.stats.accuracy.to_string());
-                        ui.label(s.stats.bravery.to_string());
-                        ui.label(s.missions.to_string());
-                        ui.label(s.kills.to_string());
-                        if s.is_fit() {
-                            ui.label("fit");
-                        } else {
-                            ui.colored_label(
-                                egui::Color32::LIGHT_RED,
-                                format!("wounded ({}d)", s.recovery_days),
-                            );
-                        }
-                        ui.end_row();
+        // ------------------------------------------- the world itself
+        // Transparent center: the spinning globe renders underneath.
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new("right-drag: turn the world · scroll: zoom · click: inspect region")
+                        .weak()
+                        .small(),
+                );
+            });
+
+        if let Some(region) = self.selected_region {
+            egui::Window::new(region.name())
+                .anchor(egui::Align2::LEFT_BOTTOM, [12.0, -160.0])
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "Monthly funding: {}k",
+                        c.region_funding.get(&region).copied().unwrap_or(0)
+                    ));
+                    let rifts_here = c
+                        .rifts
+                        .iter()
+                        .filter(|r| r.detected && r.region == region)
+                        .count();
+                    let hidden_hint = if c.base.region == region {
+                        " (chapterhouse here)"
+                    } else {
+                        ""
+                    };
+                    ui.label(format!("Detected rifts: {rifts_here}{hidden_hint}"));
+                    ui.label(format!(
+                        "Standing nests: {}",
+                        c.nests.iter().filter(|n| n.region == region).count()
+                    ));
+                    if ui.button("Close").clicked() {
+                        self.selected_region = None;
                     }
                 });
-            });
-        });
+        }
 
         // -------------------------------------------------- game over
         if let Some(outcome) = c.over {
