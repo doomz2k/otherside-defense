@@ -60,6 +60,7 @@ pub(crate) fn build_otherside(
     scenario::otherside(seed, make_units(squad, kits, research), demon_count, strength)
 }
 
+#[allow(clippy::too_many_arguments)] // a mission brief simply has this many parts
 pub(crate) fn build_assault(
     seed: u64,
     squad: &[&Soldier],
@@ -67,14 +68,16 @@ pub(crate) fn build_assault(
     demon_count: u32,
     strength: u32,
     civilians: u32,
+    biome: scenario::Biome,
     research: &ResearchState,
 ) -> Battle {
-    scenario::incursion_with_civilians(
+    scenario::incursion_in_biome(
         seed,
         make_units(squad, kits, research),
         demon_count,
         strength,
         civilians,
+        biome,
     )
 }
 

@@ -117,6 +117,17 @@ fn apply_scar(stats: &mut SoldierStats, part: ods_sim::body::BodyPart) {
     }
 }
 
+/// A squad in the air: flying to a distant rift aboard the Order's
+/// consecrated zeppelin. The soldiers carry the matching `aboard` mark.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Sortie {
+    pub rift_id: u32,
+    /// Days of flight left; 0 means the squad is on site, holding the perimeter.
+    pub days_left: u32,
+    /// Wait for the player to lead on arrival instead of auto-resolving.
+    pub lead: bool,
+}
+
 /// A funding nation's demand: banish rifts in their region this month.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouncilRequest {
@@ -166,6 +177,9 @@ pub struct Soldier {
     /// Rift id this soldier is warding (unavailable for squads).
     #[serde(default)]
     pub warding: Option<u32>,
+    /// Rift id this soldier is flying toward (or camped at) on a sortie.
+    #[serde(default)]
+    pub aboard: Option<u32>,
     /// Wounds that never healed right (permanent until grafted).
     #[serde(default)]
     pub scars: Vec<ods_sim::body::BodyPart>,
@@ -176,7 +190,7 @@ pub struct Soldier {
 
 impl Soldier {
     pub fn is_fit(&self) -> bool {
-        self.recovery_days == 0 && self.warding.is_none()
+        self.recovery_days == 0 && self.warding.is_none() && self.aboard.is_none()
     }
 
     /// Rank grows from deeds; higher ranks steady the squad's nerves.
@@ -254,6 +268,12 @@ pub enum GeoEvent {
     RegionPanicking { region: Region, panic: i64 },
     /// A secondary chapterhouse was overrun and lost.
     ChapterhouseLost { region: Region },
+    /// A dispatched squad reaches its distant rift.
+    SortieArrived { rift_id: u32, region: Region },
+    /// An auto-resolve sortie fought on arrival.
+    SortieFought { region: Region, victory: bool, demons_slain: u32, dead: usize },
+    /// The rift closed (or expired) before the squad could engage.
+    SortieRecalled { region: Region },
     CampaignOver { outcome: CampaignOutcome },
 }
 
@@ -283,6 +303,12 @@ pub enum GeoError {
     NoLances,
     /// That soldier can't take this assignment.
     BadAssignment,
+    /// No chapterhouse in the region and no squad on site: dispatch first.
+    NotOnSite,
+    /// The squad is still in the air.
+    SquadInTransit,
+    /// A sortie is already flying for that rift.
+    SortieAlready,
 }
 
 /// A ground mission the campaign can stage.
@@ -419,6 +445,9 @@ pub struct Campaign {
     /// Which chapterhouse the next Reckoning falls on.
     #[serde(default)]
     reckoning_target: usize,
+    /// Squads in the air (or camped at distant rifts).
+    #[serde(default)]
+    pub sorties: Vec<Sortie>,
     /// Rises with every banishment; at 5+, hell schedules a Reckoning.
     reckoning_heat: u32,
     reckoning_day: Option<u32>,
@@ -468,6 +497,7 @@ impl Campaign {
             region_panic: HashMap::new(),
             stats: CampaignStats::default(),
             reckoning_target: 0,
+            sorties: Vec::new(),
             month_score: 0,
             bad_months: 0,
             over: None,
@@ -561,6 +591,7 @@ impl Campaign {
             has_lance: false,
             home: 0,
             warding: None,
+            aboard: None,
             scars: Vec::new(),
             quirk: match self.rng.roll(10) {
                 0 => Some(Quirk::Marksman),
@@ -763,7 +794,7 @@ impl Campaign {
             return Err(GeoError::UnknownRift);
         }
         let s = self.soldiers.get_mut(soldier).ok_or(GeoError::BadAssignment)?;
-        if s.recovery_days > 0 || s.warding.is_some() {
+        if s.recovery_days > 0 || s.warding.is_some() || s.aboard.is_some() {
             return Err(GeoError::BadAssignment);
         }
         s.warding = Some(rift_id);
@@ -800,7 +831,7 @@ impl Campaign {
             return Err(GeoError::UnknownBase);
         }
         let s = self.soldiers.get_mut(soldier).ok_or(GeoError::BadAssignment)?;
-        if s.warding.is_some() || s.home == base {
+        if s.warding.is_some() || s.aboard.is_some() || s.home == base {
             return Err(GeoError::BadAssignment);
         }
         s.home = base;
@@ -813,6 +844,66 @@ impl Campaign {
     /// the interactive Battlescape uses.
     pub fn assault_rift(&mut self, rift_id: u32) -> Result<BattleReport, GeoError> {
         self.fight(MissionKind::Rift(rift_id))
+    }
+
+    /// Days of zeppelin flight from the nearest chapterhouse to a detected
+    /// rift. Zero when a chapterhouse stands in the rift's region — those
+    /// strikes roll out the same day.
+    pub fn travel_days(&self, rift_id: u32) -> Result<u32, GeoError> {
+        let rift = self
+            .rifts
+            .iter()
+            .find(|r| r.id == rift_id && r.detected)
+            .ok_or(GeoError::UnknownRift)?;
+        if self.bases.iter().any(|b| b.region == rift.region) {
+            return Ok(0);
+        }
+        let arc = self
+            .bases
+            .iter()
+            .map(|b| Region::arc_degrees(b.region.centroid(), (rift.lat, rift.lon)))
+            .fold(f32::MAX, f32::min);
+        // ~60 degrees of arc a day, always at least a day when it's abroad.
+        Ok((1 + (arc / 60.0) as u32).min(3))
+    }
+
+    /// Put a squad on the zeppelin toward a distant rift. They are locked
+    /// aboard until arrival; `lead` keeps the fight for the player, otherwise
+    /// it auto-resolves the day the squad lands. Same-region strikes don't
+    /// need this — assault directly.
+    pub fn dispatch_squad(&mut self, rift_id: u32, lead: bool) -> Result<u32, GeoError> {
+        self.guard_over()?;
+        let days = self.travel_days(rift_id)?;
+        if self.sorties.iter().any(|s| s.rift_id == rift_id) {
+            return Err(GeoError::SortieAlready);
+        }
+        let squad: Vec<usize> = self
+            .soldiers
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_fit())
+            .map(|(i, _)| i)
+            .take(SQUAD_SIZE)
+            .collect();
+        if squad.is_empty() {
+            return Err(GeoError::NoSquadFit);
+        }
+        for &i in &squad {
+            self.soldiers[i].aboard = Some(rift_id);
+        }
+        self.sorties.push(Sortie { rift_id, days_left: days, lead });
+        Ok(days)
+    }
+
+    /// Unmark a rift's flying squad and drop the sortie (post-battle or on
+    /// recall). The soldiers are home again — flights back are abstracted.
+    fn end_sortie(&mut self, rift_id: u32) {
+        for s in &mut self.soldiers {
+            if s.aboard == Some(rift_id) {
+                s.aboard = None;
+            }
+        }
+        self.sorties.retain(|s| s.rift_id != rift_id);
     }
 
     /// What the field teams drag back from a banished incursion.
@@ -857,8 +948,17 @@ impl Campaign {
                 if !rift.detected {
                     return Err(GeoError::NotDetected);
                 }
-                let distant =
-                    if self.bases.iter().any(|b| b.region == rift.region) { 0 } else { 1 };
+                // Presence: strike from a local chapterhouse, or have a
+                // dispatched squad already on the ground out there.
+                let local = self.bases.iter().any(|b| b.region == rift.region);
+                let distant = if local { 0 } else { 1 };
+                if !local {
+                    match self.sorties.iter().find(|s| s.rift_id == id) {
+                        Some(s) if s.days_left == 0 => {}
+                        Some(_) => return Err(GeoError::SquadInTransit),
+                        None => return Err(GeoError::NotOnSite),
+                    }
+                }
                 (rift.effective_garrison() + bonus + distant, self.month, false)
             }
             MissionKind::Nest(id) => {
@@ -886,14 +986,29 @@ impl Campaign {
             }
         };
 
-        let squad_idx: Vec<usize> = self
-            .soldiers
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.is_fit() && (!defense || s.home == base))
-            .map(|(i, _)| i)
-            .take(SQUAD_SIZE)
-            .collect();
+        // A sortie's squad is whoever flew out; otherwise muster the fit
+        // (for Reckonings, only those stationed at the struck house).
+        let aboard: Vec<usize> = match kind {
+            MissionKind::Rift(id) => self
+                .soldiers
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.aboard == Some(id))
+                .map(|(i, _)| i)
+                .collect(),
+            _ => Vec::new(),
+        };
+        let squad_idx: Vec<usize> = if aboard.is_empty() {
+            self.soldiers
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.is_fit() && (!defense || s.home == base))
+                .map(|(i, _)| i)
+                .take(SQUAD_SIZE)
+                .collect()
+        } else {
+            aboard
+        };
         if squad_idx.is_empty() {
             return Err(GeoError::NoSquadFit);
         }
@@ -949,6 +1064,14 @@ impl Campaign {
                         }
                         _ => 0,
                     };
+                    let biome = match kind {
+                        MissionKind::Rift(id) => self
+                            .rifts
+                            .iter()
+                            .find(|r| r.id == id)
+                            .map_or(ods_sim::scenario::Biome::Temperate, |r| r.region.biome()),
+                        _ => ods_sim::scenario::Biome::Temperate,
+                    };
                     missions::build_assault(
                         seed,
                         &squad,
@@ -956,6 +1079,7 @@ impl Campaign {
                         garrison,
                         strength,
                         civilians,
+                        biome,
                         &self.research,
                     )
                 }
@@ -1020,6 +1144,9 @@ impl Campaign {
 
         match token.kind {
             MissionKind::Rift(id) => {
+                // Win or lose, the engagement ends the sortie: the squad
+                // flies home with whatever the field left of it.
+                self.end_sortie(id);
                 if let Some(rift) = self.rifts.iter().find(|r| r.id == id) {
                     let (kind, region) = (rift.kind, rift.region);
                     // Every townsperson matters, win or lose.
@@ -1330,6 +1457,34 @@ impl Campaign {
             }
         }
 
+        // Sorties fly on. Arrivals either fight at once (auto) or hold the
+        // perimeter for the player's order (lead).
+        let mut arrivals = Vec::new();
+        for s in &mut self.sorties {
+            if s.days_left > 0 {
+                s.days_left -= 1;
+                if s.days_left == 0 {
+                    arrivals.push((s.rift_id, s.lead));
+                }
+            }
+        }
+        for (rift_id, lead) in arrivals {
+            let Some(region) = self.rifts.iter().find(|r| r.id == rift_id).map(|r| r.region)
+            else {
+                self.end_sortie(rift_id);
+                continue;
+            };
+            events.push(GeoEvent::SortieArrived { rift_id, region });
+            if !lead && let Ok(report) = self.fight(MissionKind::Rift(rift_id)) {
+                events.push(GeoEvent::SortieFought {
+                    region,
+                    victory: report.victory,
+                    demons_slain: report.demons_slain,
+                    dead: report.dead.len(),
+                });
+            }
+        }
+
         // Ward pickets skirmish at the rifts' edges: risk, for time.
         let warded: Vec<u32> = self.soldiers.iter().filter_map(|s| s.warding).collect();
         for i in 0..self.soldiers.len() {
@@ -1361,6 +1516,11 @@ impl Campaign {
         }
         self.rifts.retain(|r| r.days_left > 0);
         for (id, kind, region, lat, lon) in expired {
+            // A sortie caught mid-flight (or camped) turns for home.
+            if self.sorties.iter().any(|s| s.rift_id == id) {
+                self.end_sortie(id);
+                events.push(GeoEvent::SortieRecalled { region });
+            }
             let penalty = kind.expire_penalty();
             self.score(region, -penalty);
             // An incursion that ran its full course leaves a terrified populace.
@@ -1856,7 +2016,7 @@ mod tests {
         // Muddy the state first: build, research, take a fight.
         original.start_build(0, Facility::Quarters, 0, 0).unwrap();
         original.start_research(Project::RiftAugury).unwrap();
-        let id = detected_rift(&mut original, RiftKind::Scouting, Region::Africa);
+        let id = detected_rift(&mut original, RiftKind::Scouting, Region::Europe);
         original.assault_rift(id).unwrap();
         for _ in 0..10 {
             original.advance_day();
@@ -2127,11 +2287,34 @@ mod tests {
         assert_eq!(c.soldiers[0].home, 1);
         assert!(c.soldiers[0].recovery_days > 0, "the road takes its toll");
 
-        // A rift where no chapterhouse stands gets an extra defender.
+        // A rift where no chapterhouse stands can't be struck cold...
         let far = detected_rift(&mut c, RiftKind::Scouting, Region::Oceania);
         let near = detected_rift(&mut c, RiftKind::Scouting, Region::Europe);
+        assert_eq!(
+            c.begin_mission(MissionKind::Rift(far)).err(),
+            Some(GeoError::NotOnSite),
+            "distant strikes need a dispatched squad"
+        );
+        // ...so fly one out (lead, so arrival waits for orders).
+        let eta = c.dispatch_squad(far, true).unwrap();
+        assert!((1..=3).contains(&eta), "Oceania is days away: {eta}");
+        assert_eq!(
+            c.begin_mission(MissionKind::Rift(far)).err(),
+            Some(GeoError::SquadInTransit)
+        );
+        c.month_plan.clear();
+        for _ in 0..eta {
+            c.advance_day();
+        }
+        // The extra defender for fighting far from any chapterhouse.
         let (b_far, t_far) = c.begin_mission(MissionKind::Rift(far)).unwrap();
         let far_demons = b_far.units.len() - token_len(&t_far);
+        // Conclude the far fight so its squad disembarks before the next,
+        // and patch everyone up — this test is about head-counts, not luck.
+        c.conclude_mission(t_far, &b_far);
+        for s in &mut c.soldiers {
+            s.recovery_days = 0;
+        }
         let (b_near, t_near) = c.begin_mission(MissionKind::Rift(near)).unwrap();
         let near_demons = b_near.units.len() - token_len(&t_near);
         assert_eq!(far_demons, near_demons + 1, "distance costs a garrison slot");
@@ -2340,6 +2523,58 @@ mod tests {
         assert_eq!(token.base, 1);
         assert!(token.squad_idx.iter().all(|&i| c.soldiers[i].home == 1));
         assert_eq!(token.squad_idx.len(), 3);
+    }
+
+    #[test]
+    fn sorties_fly_lock_the_squad_and_fight_on_arrival() {
+        let mut c = Campaign::new(40);
+        c.month_plan.clear();
+        let id = detected_rift(&mut c, RiftKind::Harvest, Region::Oceania);
+        // Long-lived rift so the flight can't outlive it.
+        c.rifts.iter_mut().for_each(|r| r.days_left = 30);
+
+        let eta = c.dispatch_squad(id, false).unwrap();
+        assert!((1..=3).contains(&eta));
+        let aboard = c.soldiers.iter().filter(|s| s.aboard == Some(id)).count();
+        assert!(aboard > 0, "the squad is on the zeppelin");
+        assert!(
+            c.soldiers.iter().filter(|s| s.is_fit()).count() < c.soldiers.len(),
+            "flying soldiers are unavailable"
+        );
+        assert_eq!(c.dispatch_squad(id, false), Err(GeoError::SortieAlready));
+
+        let mut fought = false;
+        for _ in 0..eta {
+            for e in c.advance_day() {
+                if let GeoEvent::SortieFought { region, .. } = e {
+                    assert_eq!(region, Region::Oceania);
+                    fought = true;
+                }
+            }
+        }
+        assert!(fought, "an auto sortie fights the day it lands");
+        assert!(c.sorties.is_empty(), "the engagement ends the sortie");
+        assert!(c.soldiers.iter().all(|s| s.aboard.is_none()), "everyone disembarked");
+    }
+
+    #[test]
+    fn sorties_recall_when_the_rift_closes_first() {
+        let mut c = Campaign::new(41);
+        c.month_plan.clear();
+        let id = detected_rift(&mut c, RiftKind::Scouting, Region::Oceania);
+        // The rift dies tomorrow; the flight takes longer than that.
+        c.rifts.iter_mut().for_each(|r| r.days_left = 1);
+        c.dispatch_squad(id, true).unwrap();
+
+        let events = c.advance_day();
+        assert!(
+            events.iter().any(|e| matches!(e, GeoEvent::SortieRecalled { .. })),
+            "{events:?}"
+        );
+        assert!(c.sorties.is_empty());
+        assert!(c.soldiers.iter().all(|s| s.aboard.is_none()));
+        // Nobody died on a flight to nowhere.
+        assert_eq!(c.soldiers.len(), 6);
     }
 
     #[test]

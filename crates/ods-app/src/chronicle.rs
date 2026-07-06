@@ -71,6 +71,26 @@ pub fn narrate(c: &Campaign, event: &GeoEvent) -> String {
         E::ChapterhouseLost { region } => {
             format!("{stamp} !!! the chapterhouse in {} is overrun and lost", region.name())
         }
+        E::SortieArrived { region, .. } => {
+            format!("{stamp} the zeppelin sets down in {} — squad on site", region.name())
+        }
+        E::SortieFought { region, victory, demons_slain, dead } => {
+            if *victory {
+                format!(
+                    "{stamp} sortie in {}: VICTORY — {demons_slain} slain, {dead} lost",
+                    region.name()
+                )
+            } else {
+                format!(
+                    "{stamp} sortie in {}: REPELLED — {dead} lost, the rift holds",
+                    region.name()
+                )
+            }
+        }
+        E::SortieRecalled { region } => format!(
+            "{stamp} the rift in {} closed before the squad landed — turning for home",
+            region.name()
+        ),
         E::CampaignOver { outcome } => match outcome {
             ods_geo::CampaignOutcome::Victory => {
                 format!("{stamp} ### THE NAME IS BROKEN — THE ORDER PREVAILS ###")
@@ -152,6 +172,14 @@ pub fn campaign_chronicle(months: u32) -> anyhow::Result<()> {
                         region.name(),
                         r.dead.len()
                     ),
+                    // No chapterhouse there: put the squad on the zeppelin.
+                    Err(ods_geo::GeoError::NotOnSite) => match c.dispatch_squad(id, false) {
+                        Ok(days) => println!(
+                            "    >> squad dispatched to {} — {days} day(s) of flight",
+                            region.name()
+                        ),
+                        Err(e) => println!("    >> cannot dispatch: {e:?}"),
+                    },
                     Err(e) => println!("    >> cannot assault: {e:?}"),
                 }
             }

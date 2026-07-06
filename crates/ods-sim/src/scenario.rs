@@ -31,6 +31,39 @@ pub const MAT_FLESH: Voxel = Voxel(8);
 pub const MAT_OBSIDIAN: Voxel = Voxel(9);
 /// The rift obelisk: hell's anchor into the world. Demolish it to win.
 pub const MAT_OBELISK: Voxel = Voxel(4);
+/// Desert sand.
+pub const MAT_SAND: Voxel = Voxel(10);
+/// Snow and ice.
+pub const MAT_SNOW: Voxel = Voxel(11);
+/// Living green: canopy, hedgerows.
+pub const MAT_FOLIAGE: Voxel = Voxel(12);
+/// Tree trunks and timber.
+pub const MAT_TIMBER: Voxel = Voxel(13);
+
+/// The kind of country a rift opens into. Chosen by the campaign from the
+/// rift's world region; drives ground material and terrain generation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub enum Biome {
+    /// Fields, chapels, hedgerows — the old default.
+    Temperate,
+    /// Dunes and dry-stone ruins under a hard sun.
+    Desert,
+    /// Trees with climbable canopies; the understory is dark work.
+    Jungle,
+    /// Snowdrifts and ice boulders; open ground, long sightlines.
+    Tundra,
+}
+
+impl Biome {
+    pub fn name(self) -> &'static str {
+        match self {
+            Biome::Temperate => "temperate",
+            Biome::Desert => "desert",
+            Biome::Jungle => "jungle",
+            Biome::Tundra => "tundra",
+        }
+    }
+}
 
 pub fn skirmish(seed: u64) -> Battle {
     let mut world = VoxelWorld::new();
@@ -139,16 +172,35 @@ pub fn incursion(seed: u64, soldiers: Vec<Unit>, demon_count: u32, strength: u32
 /// Massacre sites have townsfolk still alive in the chapel — for now.
 pub fn incursion_with_civilians(
     seed: u64,
-    mut soldiers: Vec<Unit>,
+    soldiers: Vec<Unit>,
     demon_count: u32,
     strength: u32,
     civilians: u32,
 ) -> Battle {
+    incursion_in_biome(seed, soldiers, demon_count, strength, civilians, Biome::Temperate)
+}
+
+/// The full generator: one of three structural layouts (seeded), dressed by
+/// the biome — ground material and a seeded scatter of biome features, so no
+/// two sites in the same country fight the same.
+pub fn incursion_in_biome(
+    seed: u64,
+    mut soldiers: Vec<Unit>,
+    demon_count: u32,
+    strength: u32,
+    civilians: u32,
+    biome: Biome,
+) -> Battle {
+    let ground = match biome {
+        Biome::Temperate | Biome::Jungle => MAT_GROUND,
+        Biome::Desert => MAT_SAND,
+        Biome::Tundra => MAT_SNOW,
+    };
     let mut world = VoxelWorld::new();
     world.fill_box(
         IVec3::ZERO,
         IVec3::new(MAP_TILES.x * TILE_VOXELS, MAP_TILES.y * TILE_VOXELS, GROUND_TOP),
-        MAT_GROUND,
+        ground,
     );
     match seed % 3 {
         0 => {
@@ -239,6 +291,136 @@ pub fn incursion_with_civilians(
     let obelisk_min = IVec3::new(22 * TILE_VOXELS, 11 * TILE_VOXELS, GROUND_TOP);
     let obelisk_max = IVec3::new(23 * TILE_VOXELS, 13 * TILE_VOXELS, 24);
     world.fill_box(obelisk_min, obelisk_max, MAT_OBELISK);
+
+    // ------------------------------------------------------------------
+    // Biome dressing: seeded scatter over whatever ground the fixed
+    // structures left open. Both deployment strips, the watchtower, the
+    // casks, and the shelter yard stay clear so every map stays winnable.
+    let mut rng = crate::SimRng::from_seed(seed ^ 0x00B1_05E5);
+    let is_open = |world: &VoxelWorld, tile: IVec3| -> bool {
+        if !(5..=19).contains(&tile.x) || !(1..=22).contains(&tile.y) {
+            return false;
+        }
+        if (14..=20).contains(&tile.x) && (2..=6).contains(&tile.y) {
+            return false; // watchtower and its mound
+        }
+        if [(8, 7), (13, 16)].contains(&(tile.x, tile.y)) {
+            return false; // fuel casks
+        }
+        if (9..=14).contains(&tile.x) && (8..=15).contains(&tile.y) {
+            return false; // the shelter yard where civilians hide
+        }
+        let probe = tile * TILE_VOXELS + IVec3::new(8, 8, GROUND_TOP + 1);
+        world.voxel(probe) == Voxel::EMPTY
+    };
+    // A climbable mound of loose material: walkable high ground (a ramp).
+    let mound_at = |world: &mut VoxelWorld, tile: IVec3, mat: Voxel| {
+        let o = tile * TILE_VOXELS;
+        world.fill_box(
+            o + IVec3::new(0, 0, GROUND_TOP),
+            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, 10),
+            mat,
+        );
+    };
+    // A solid obstacle from ground to shoulder height.
+    let block_at = |world: &mut VoxelWorld, tile: IVec3, mat: Voxel, top: i32| {
+        let o = tile * TILE_VOXELS;
+        world.fill_box(
+            o + IVec3::new(0, 0, GROUND_TOP),
+            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, top),
+            mat,
+        );
+    };
+    let roll_open = |world: &VoxelWorld, rng: &mut crate::SimRng| -> Option<IVec3> {
+        for _ in 0..12 {
+            let tile = IVec3::new(5 + rng.roll(15) as i32, 1 + rng.roll(22) as i32, 0);
+            if is_open(world, tile) {
+                return Some(tile);
+            }
+        }
+        None
+    };
+    match biome {
+        Biome::Temperate => {
+            // Hedgerows (short foliage walls) and old rubble.
+            for _ in 0..4 {
+                if let Some(t) = roll_open(&world, &mut rng) {
+                    let step =
+                        if rng.roll(2) == 0 { IVec3::new(1, 0, 0) } else { IVec3::new(0, 1, 0) };
+                    for i in 0..2 + rng.roll(2) as i32 {
+                        let seg = t + step * i;
+                        if is_open(&world, seg) {
+                            block_at(&mut world, seg, MAT_FOLIAGE, 11);
+                        }
+                    }
+                }
+            }
+            for _ in 0..3 {
+                if let Some(t) = roll_open(&world, &mut rng) {
+                    mound_at(&mut world, t, MAT_RUBBLE);
+                }
+            }
+        }
+        Biome::Desert => {
+            // Dunes to climb and dry-stone stubs to hide behind.
+            for _ in 0..7 {
+                if let Some(t) = roll_open(&world, &mut rng) {
+                    mound_at(&mut world, t, MAT_SAND);
+                }
+            }
+            for _ in 0..3 {
+                if let Some(t) = roll_open(&world, &mut rng) {
+                    let step =
+                        if rng.roll(2) == 0 { IVec3::new(1, 0, 0) } else { IVec3::new(0, 1, 0) };
+                    for i in 0..2 {
+                        let seg = t + step * i;
+                        if is_open(&world, seg) {
+                            block_at(&mut world, seg, MAT_WALL, 12);
+                        }
+                    }
+                }
+            }
+        }
+        Biome::Jungle => {
+            // Trees: a blocking trunk with a walkable canopy roof above head
+            // height — gargoyles perch on treetops, soldiers slip beneath.
+            for _ in 0..8 {
+                let Some(t) = roll_open(&world, &mut rng) else { continue };
+                let o = t * TILE_VOXELS;
+                world.fill_box(
+                    o + IVec3::new(6, 6, GROUND_TOP),
+                    o + IVec3::new(10, 10, TILE_VOXELS),
+                    MAT_TIMBER,
+                );
+                for cy in -1..=1 {
+                    for cx in -1..=1 {
+                        let c = t + IVec3::new(cx, cy, 0);
+                        if (0..MAP_TILES.x).contains(&c.x) && (0..MAP_TILES.y).contains(&c.y) {
+                            let co = c * TILE_VOXELS;
+                            world.fill_box(
+                                co + IVec3::new(2, 2, TILE_VOXELS),
+                                co + IVec3::new(14, 14, TILE_VOXELS + GROUND_TOP),
+                                MAT_FOLIAGE,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Biome::Tundra => {
+            // Snowdrifts and ice boulders on hard white ground.
+            for _ in 0..5 {
+                if let Some(t) = roll_open(&world, &mut rng) {
+                    mound_at(&mut world, t, MAT_SNOW);
+                }
+            }
+            for _ in 0..4 {
+                if let Some(t) = roll_open(&world, &mut rng) {
+                    block_at(&mut world, t, MAT_SNOW, 13);
+                }
+            }
+        }
+    }
 
     soldiers.truncate(ORDER_SPAWNS.len());
     let mut units = Vec::new();
@@ -800,6 +982,74 @@ mod tests {
         for u in &b.units {
             assert!(b.tiles.is_walkable(u.tile), "{} in obsidian", u.name);
         }
+    }
+
+    #[test]
+    fn every_biome_deploys_sane_and_the_obelisk_stays_reachable() {
+        use std::collections::HashSet;
+        for biome in [Biome::Temperate, Biome::Desert, Biome::Jungle, Biome::Tundra] {
+            for seed in [3, 7, 20] {
+                // Three seeds x three structural variants x each biome.
+                let squad: Vec<Unit> = (0..4)
+                    .map(|i| Unit::soldier(i, &format!("S{i}"), glam::IVec3::ZERO))
+                    .collect();
+                let b = super::incursion_in_biome(seed, squad, 4, 3, 0, biome);
+                assert!(b.objective.is_some());
+                for u in &b.units {
+                    let ok = if u.flies {
+                        b.tiles.is_open_air(u.tile) || b.tiles.is_walkable(u.tile)
+                    } else {
+                        b.tiles.is_walkable(u.tile)
+                    };
+                    assert!(ok, "{biome:?} seed {seed}: {} spawns badly at {}", u.name, u.tile);
+                }
+                // The scatter must never wall off the advance: a soldier can
+                // still reach the obelisk's doorstep.
+                let path = b.tiles.path(
+                    glam::IVec3::new(2, 11, 0),
+                    glam::IVec3::new(21, 12, 0),
+                    &HashSet::new(),
+                );
+                assert!(path.is_some(), "{biome:?} seed {seed}: the way east is sealed");
+            }
+        }
+    }
+
+    #[test]
+    fn jungle_canopies_are_perches_not_ceilings() {
+        // Find a tree in a jungle map and check its shape: the trunk tile is
+        // blocked at ground level, its neighbor stays walkable underneath,
+        // and the canopy above that neighbor is walkable roof.
+        for seed in 0..6u64 {
+            let b = super::incursion_in_biome(
+                seed,
+                vec![Unit::soldier(0, "S", glam::IVec3::ZERO)],
+                0,
+                1,
+                0,
+                Biome::Jungle,
+            );
+            for y in 1..23 {
+                for x in 5..20 {
+                    let trunk = glam::IVec3::new(x, y, 0);
+                    let probe = trunk * crate::TILE_VOXELS + glam::IVec3::new(8, 8, GROUND_TOP + 1);
+                    if b.world.voxel(probe) == MAT_TIMBER {
+                        assert!(!b.tiles.is_walkable(trunk), "trunks block");
+                        let above = glam::IVec3::new(x, y, 1);
+                        // Somewhere in the 3x3 canopy there is a walkable top.
+                        let mut perch = b.tiles.is_walkable(above);
+                        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                            perch |= b
+                                .tiles
+                                .is_walkable(glam::IVec3::new(x + dx, y + dy, 1));
+                        }
+                        assert!(perch, "seed {seed}: canopy at {trunk} has no perch");
+                        return;
+                    }
+                }
+            }
+        }
+        panic!("no tree found across six jungle seeds");
     }
 
     #[test]

@@ -75,6 +75,26 @@ All weapon and species numbers live in RON tables
 (`crates/ods-sim/data/*.ron`), embedded at build time and overridable by
 dropping edited copies in `./data/` next to the executable — the modding hook.
 
+## Where you fight, and how you get there
+
+Rift battlemaps are procedurally generated from the rift's **biome** — the
+world region decides the country, the seed decides the map. Temperate ground
+(Europe, the Americas' north, Asia) gets chapels, hedgerows, and rubble;
+deserts (Africa, Middle East) get climbable dunes and dry-stone ruins;
+jungles (South America, Oceania) grow trees soldiers slip beneath and
+gargoyles perch on; the Arctic is snowdrifts and ice boulders with long,
+cold sightlines. Structural layouts and feature scatter are seeded, so no
+two sites fight the same — while the deployment strips, the obelisk, and
+the approach always stay open.
+
+Squads travel by the Order's consecrated **zeppelin**. A rift in a region
+with a chapterhouse is struck the same day; anywhere else the squad must be
+**dispatched** — one to three days of flight by great-circle distance, the
+soldiers locked aboard, while the rift digs in and its garrison hardens.
+Fly-and-lead holds on arrival for your order; fly-and-auto fights the day
+it lands. If the rift closes mid-flight the sortie turns for home. Founding
+chapterhouses abroad is how you shorten the war.
+
 ## The campaign arc
 
 Bind demons in battle (`B`), drag them home, and the interrogation chain —

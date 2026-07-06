@@ -52,4 +52,39 @@ impl Region {
             Region::Arctic => "the Arctic",
         }
     }
+
+    /// The ground the squads actually fight on there: drives battlemap
+    /// generation for rift assaults in this region.
+    pub fn biome(self) -> ods_sim::scenario::Biome {
+        use ods_sim::scenario::Biome;
+        match self {
+            Region::NorthAmerica | Region::Europe | Region::Asia => Biome::Temperate,
+            Region::Africa | Region::MiddleEast => Biome::Desert,
+            Region::SouthAmerica | Region::Oceania => Biome::Jungle,
+            Region::Arctic => Biome::Tundra,
+        }
+    }
+
+    /// Marker anchor / squad-departure point per region (lat, lon).
+    pub fn centroid(self) -> (f32, f32) {
+        match self {
+            Region::NorthAmerica => (45.0, -100.0),
+            Region::SouthAmerica => (-15.0, -60.0),
+            Region::Europe => (50.0, 15.0),
+            Region::Africa => (5.0, 20.0),
+            Region::MiddleEast => (28.0, 45.0),
+            Region::Asia => (45.0, 90.0),
+            Region::Oceania => (-25.0, 135.0),
+            Region::Arctic => (75.0, -40.0),
+        }
+    }
+
+    /// Great-circle angular distance in degrees between two (lat, lon)
+    /// points — the yardstick for squad travel time.
+    pub fn arc_degrees(a: (f32, f32), b: (f32, f32)) -> f32 {
+        let (la, lo) = (a.0.to_radians(), a.1.to_radians());
+        let (lb, lp) = (b.0.to_radians(), b.1.to_radians());
+        let cos = la.sin() * lb.sin() + la.cos() * lb.cos() * (lo - lp).cos();
+        cos.clamp(-1.0, 1.0).acos().to_degrees()
+    }
 }

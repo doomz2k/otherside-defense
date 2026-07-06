@@ -232,20 +232,74 @@ impl Core {
                     ui.label("No detected rifts. The augurs keep watch.");
                 }
                 for (id, kind, region, days_left, stabilized) in rifts {
+                    let local = c.bases.iter().any(|b| b.region == region);
+                    let sortie = c.sorties.iter().find(|s| s.rift_id == id).copied();
                     ui.horizontal_wrapped(|ui| {
                         ui.label(format!(
-                            "{} in {} — {days_left}d{}",
+                            "{} in {} ({}) — {days_left}d{}",
                             kind.name(),
                             region.name(),
+                            region.biome().name(),
                             if stabilized { " (DUG IN)" } else { " (unstable)" }
                         ));
-                        if ui.button("⚔ Lead").clicked() {
-                            action = GeoAction::LeadMission(MissionKind::Rift(id));
-                        }
-                        if ui.button("🎲 Auto").clicked() {
-                            match c.assault_rift(id) {
-                                Ok(r) => self.log.push(report_line("assault", r)),
-                                Err(e) => self.log.push(format!("cannot assault: {e:?}")),
+                        match sortie {
+                            // In the air: nothing to do but watch the clock.
+                            Some(s) if s.days_left > 0 => {
+                                ui.colored_label(
+                                    egui::Color32::LIGHT_BLUE,
+                                    format!("🛫 squad en route — {}d", s.days_left),
+                                );
+                            }
+                            // Boots on the ground, holding for the order.
+                            Some(_) => {
+                                ui.colored_label(egui::Color32::LIGHT_GREEN, "on site");
+                                if ui.button("⚔ Lead").clicked() {
+                                    action = GeoAction::LeadMission(MissionKind::Rift(id));
+                                }
+                                if ui.button("🎲 Auto").clicked() {
+                                    match c.assault_rift(id) {
+                                        Ok(r) => self.log.push(report_line("assault", r)),
+                                        Err(e) => {
+                                            self.log.push(format!("cannot assault: {e:?}"))
+                                        }
+                                    }
+                                }
+                            }
+                            // Local rifts strike same-day; distant ones fly.
+                            None if local => {
+                                if ui.button("⚔ Lead").clicked() {
+                                    action = GeoAction::LeadMission(MissionKind::Rift(id));
+                                }
+                                if ui.button("🎲 Auto").clicked() {
+                                    match c.assault_rift(id) {
+                                        Ok(r) => self.log.push(report_line("assault", r)),
+                                        Err(e) => {
+                                            self.log.push(format!("cannot assault: {e:?}"))
+                                        }
+                                    }
+                                }
+                            }
+                            None => {
+                                let eta = c.travel_days(id).unwrap_or(0);
+                                if ui
+                                    .button(format!("🛫 Fly & lead ({eta}d)"))
+                                    .on_hover_text(
+                                        "no chapterhouse in the region: the squad flies out \
+                                         and holds on arrival for your order",
+                                    )
+                                    .clicked()
+                                    && let Err(e) = c.dispatch_squad(id, true)
+                                {
+                                    self.log.push(format!("cannot dispatch: {e:?}"));
+                                }
+                                if ui
+                                    .button(format!("🛫 Fly & auto ({eta}d)"))
+                                    .on_hover_text("auto-resolves the day the squad lands")
+                                    .clicked()
+                                    && let Err(e) = c.dispatch_squad(id, false)
+                                {
+                                    self.log.push(format!("cannot dispatch: {e:?}"));
+                                }
                             }
                         }
                         if ui
