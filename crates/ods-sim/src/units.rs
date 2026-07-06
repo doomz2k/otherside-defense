@@ -26,6 +26,16 @@ pub struct UnitId(pub u32);
 pub enum FireMode {
     Snap,
     Aimed,
+    /// Burst fire: several rounds for one action, each rolled separately.
+    Auto,
+}
+
+/// Burst-fire behaviour, for weapons that support it.
+#[derive(Clone, Copy, Debug)]
+pub struct AutoFire {
+    pub cost_pct: i32,
+    pub acc: i32,
+    pub rounds: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -39,6 +49,7 @@ pub struct Weapon {
     /// Accuracy multipliers per fire mode, in percent.
     pub snap_acc: i32,
     pub aimed_acc: i32,
+    pub auto: Option<AutoFire>,
     /// Radius of terrain destroyed where a stray shot lands.
     pub breach_radius: f32,
 }
@@ -51,6 +62,7 @@ pub fn rifle() -> Weapon {
         aimed_cost_pct: 50,
         snap_acc: 60,
         aimed_acc: 110,
+        auto: Some(AutoFire { cost_pct: 35, acc: 35, rounds: 3 }),
         breach_radius: 1.6,
     }
 }
@@ -63,6 +75,7 @@ pub fn hellspit() -> Weapon {
         aimed_cost_pct: 60,
         snap_acc: 55,
         aimed_acc: 100,
+        auto: None,
         breach_radius: 1.2,
     }
 }
@@ -77,12 +90,18 @@ pub struct Unit {
     pub tu: i32,
     pub health_max: i32,
     pub health: i32,
-    /// 0..=100; low morale risks panic at turn start.
+    /// 0..=100; low morale risks panic or berserk at turn start.
     pub morale: i32,
     pub reactions: i32,
     pub accuracy: i32,
     pub bravery: i32,
     pub weapon: Weapon,
+    /// Open fatal wounds; each bleeds 1 health at the unit's turn start.
+    pub wounds: i32,
+    /// Hellfire charges carried (thrown explosives).
+    pub grenades: u32,
+    /// Field-dressing uses left (staunches wounds, restores some health).
+    pub heal_charges: u32,
     pub alive: bool,
 }
 
@@ -102,6 +121,9 @@ impl Unit {
             accuracy: 60,
             bravery: 30,
             weapon: rifle(),
+            wounds: 0,
+            grenades: 2,
+            heal_charges: 3,
             alive: true,
         }
     }
@@ -121,24 +143,38 @@ impl Unit {
             accuracy: 45,
             bravery: 50,
             weapon: hellspit(),
+            wounds: 0,
+            grenades: 0,
+            heal_charges: 0,
             alive: true,
         }
     }
 
-    pub fn fire_cost(&self, mode: FireMode) -> i32 {
+    /// TU cost for a fire mode; None when the weapon lacks the mode.
+    pub fn fire_cost(&self, mode: FireMode) -> Option<i32> {
         let pct = match mode {
             FireMode::Snap => self.weapon.snap_cost_pct,
             FireMode::Aimed => self.weapon.aimed_cost_pct,
+            FireMode::Auto => self.weapon.auto.as_ref()?.cost_pct,
         };
-        self.tu_max * pct / 100
+        Some(self.tu_max * pct / 100)
     }
 
     /// Hit chance in percent, clamped to 5..=95 so nothing is ever certain.
-    pub fn hit_chance(&self, mode: FireMode) -> i32 {
+    /// None when the weapon lacks the mode.
+    pub fn hit_chance(&self, mode: FireMode) -> Option<i32> {
         let mode_acc = match mode {
             FireMode::Snap => self.weapon.snap_acc,
             FireMode::Aimed => self.weapon.aimed_acc,
+            FireMode::Auto => self.weapon.auto.as_ref()?.acc,
         };
-        (self.accuracy * mode_acc / 100).clamp(5, 95)
+        Some((self.accuracy * mode_acc / 100).clamp(5, 95))
+    }
+
+    pub fn rounds_per_action(&self, mode: FireMode) -> u32 {
+        match mode {
+            FireMode::Auto => self.weapon.auto.as_ref().map_or(1, |a| a.rounds),
+            _ => 1,
+        }
     }
 }

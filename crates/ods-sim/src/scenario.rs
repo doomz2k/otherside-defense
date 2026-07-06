@@ -145,7 +145,7 @@ mod tests {
                         .filter(|&t| b.can_see(id, t))
                         .collect();
                     if let Some(&t) = targets.first() {
-                        if me.tu >= me.fire_cost(FireMode::Snap) {
+                        if me.fire_cost(FireMode::Snap).is_some_and(|c| me.tu >= c) {
                             let _ = b.perform(Action::Fire {
                                 unit: id,
                                 target: t,

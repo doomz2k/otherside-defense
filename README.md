@@ -32,11 +32,13 @@ and pathing.
 | Input | Action |
 |---|---|
 | Left click soldier / ground / imp | select / move / fire |
-| `1` / `2` | snap / aimed fire mode |
+| `1` / `2` / `3` | snap / aimed / auto fire mode |
+| `G` then click | throw a hellfire charge (arcs over walls) |
+| `H` | field-dress the selected soldier (staunch bleeding) |
 | Tab | next soldier |
 | Space or Enter | end turn (demons play) |
 | Right-drag / scroll / WASD | orbit / zoom / pan camera |
-| Esc | deselect |
+| Esc | disarm charge / deselect |
 
 ## Workspace
 

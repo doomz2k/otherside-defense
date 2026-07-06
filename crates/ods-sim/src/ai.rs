@@ -53,7 +53,7 @@ fn pick_action(battle: &Battle, id: UnitId) -> Option<Action> {
     visible.sort_by_key(|&t| dist(me.tile, battle.unit(t).tile));
 
     if let Some(&target) = visible.first() {
-        if me.tu >= me.fire_cost(FireMode::Snap) {
+        if me.fire_cost(FireMode::Snap).is_some_and(|c| me.tu >= c) {
             return Some(Action::Fire { unit: id, target, mode: FireMode::Snap });
         }
         return None; // in contact but dry — hold position

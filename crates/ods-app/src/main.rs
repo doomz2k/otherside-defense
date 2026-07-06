@@ -3,9 +3,11 @@
 //! Controls:
 //! - Left click a soldier: select. Left click ground: move there.
 //! - Left click a visible imp: fire at it with the current mode.
-//! - `1` / `2`: snap / aimed fire mode. Tab: next soldier.
+//! - `1` / `2` / `3`: snap / aimed / auto fire mode. Tab: next soldier.
+//! - `G`: arm a hellfire charge — the next click throws it at that tile
+//!   (arcs over walls). `H`: field-dress the selected soldier.
 //! - Space or Enter: end turn (the demons then play).
-//! - Right-drag: orbit camera. Scroll: zoom. WASD: pan. Esc: deselect.
+//! - Right-drag: orbit camera. Scroll: zoom. WASD: pan. Esc: deselect/disarm.
 //!
 //! Run with `--headless` to run the simulation smoke test without a window.
 
@@ -95,6 +97,8 @@ struct Game {
     battle: Battle,
     selected: Option<UnitId>,
     fire_mode: FireMode,
+    /// When true, the next ground click lobs a hellfire charge.
+    grenade_armed: bool,
     cursor: (f32, f32),
     right_drag: bool,
     last_cursor: (f32, f32),
@@ -112,6 +116,7 @@ impl Game {
             battle,
             selected: None,
             fire_mode: FireMode::Snap,
+            grenade_armed: false,
             cursor: (0.0, 0.0),
             right_drag: false,
             last_cursor: (0.0, 0.0),
@@ -172,9 +177,18 @@ impl Game {
 
     fn key(&mut self, code: KeyCode) {
         match code {
-            KeyCode::Escape => self.selected = None,
+            KeyCode::Escape => {
+                if self.grenade_armed {
+                    self.grenade_armed = false;
+                } else {
+                    self.selected = None;
+                }
+            }
             KeyCode::Digit1 => self.fire_mode = FireMode::Snap,
             KeyCode::Digit2 => self.fire_mode = FireMode::Aimed,
+            KeyCode::Digit3 => self.fire_mode = FireMode::Auto,
+            KeyCode::KeyG => self.grenade_armed = !self.grenade_armed,
+            KeyCode::KeyH => self.heal_selected(),
             KeyCode::Tab => self.select_next_soldier(),
             KeyCode::Space | KeyCode::Enter => self.end_turn(),
             KeyCode::KeyW => self.camera.pan(0.0, 12.0),
@@ -218,6 +232,16 @@ impl Game {
         let open = hit.position + hit.normal.as_vec3() * 0.01;
         let tile = voxel_to_tile(open.floor().as_ivec3());
 
+        if self.grenade_armed {
+            self.grenade_armed = false;
+            let Some(thrower) = self.selected else { return };
+            match self.battle.perform(Action::Throw { unit: thrower, at: tile }) {
+                Ok(events) => self.consume_events(&events),
+                Err(e) => println!("cannot throw: {e:?}"),
+            }
+            return;
+        }
+
         let events = if let Some(id) = self.battle.unit_at(tile) {
             let unit = self.battle.unit(id);
             match unit.side {
@@ -244,6 +268,14 @@ impl Game {
         match events {
             Ok(events) => self.consume_events(&events),
             Err(e) => println!("cannot: {e:?}"),
+        }
+    }
+
+    fn heal_selected(&mut self) {
+        let Some(id) = self.selected else { return };
+        match self.battle.perform(Action::Heal { medic: id, target: id }) {
+            Ok(events) => self.consume_events(&events),
+            Err(e) => println!("cannot heal: {e:?}"),
         }
     }
 
@@ -336,12 +368,23 @@ impl Game {
                 .selected
                 .map(|id| {
                     let u = self.battle.unit(id);
-                    format!("{} TU {}/{} HP {}", u.name, u.tu, u.tu_max, u.health)
+                    let wounds = if u.wounds > 0 {
+                        format!(" bleeding x{}", u.wounds)
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        "{} TU {}/{} HP {}{} | chg {} med {}",
+                        u.name, u.tu, u.tu_max, u.health, wounds, u.grenades, u.heal_charges
+                    )
                 })
                 .unwrap_or_else(|| "no selection (Tab)".to_string());
             format!(
-                "Otherside Defense — turn {} | {} | mode: {:?} [1/2] | Space: end turn",
-                self.battle.turn, sel, self.fire_mode
+                "Otherside Defense — turn {} | {} | mode: {:?} [1/2/3]{} | Space: end turn",
+                self.battle.turn,
+                sel,
+                self.fire_mode,
+                if self.grenade_armed { " | CHARGE ARMED — click target" } else { "" }
             )
         };
         self.window.set_title(&title);
@@ -388,7 +431,21 @@ fn describe(event: &Event, battle: &Battle) -> String {
         Event::TerrainDestroyed { voxels, .. } => {
             format!("terrain shattered ({voxels} voxels)")
         }
+        Event::Threw { unit, at } => format!("{} lobs a hellfire charge at {at}", name(unit)),
+        Event::Exploded { at, voxels } => {
+            format!("detonation at {at} ({voxels} voxels destroyed)")
+        }
+        Event::Wounded { unit, total } => {
+            format!("{} is bleeding ({total} open wounds)", name(unit))
+        }
+        Event::Bled { unit, health_left } => {
+            format!("{} bleeds ({health_left} HP left)", name(unit))
+        }
+        Event::Healed { medic, target, health_left } => {
+            format!("{} dresses {}'s wounds ({health_left} HP)", name(medic), name(target))
+        }
         Event::Panicked { unit } => format!("{} freezes in dread!", name(unit)),
+        Event::Berserked { unit } => format!("{} SNAPS — firing wildly!", name(unit)),
         Event::BattleOver { winner } => format!("=== BATTLE OVER: {winner:?} wins ==="),
     }
 }

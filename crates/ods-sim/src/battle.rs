@@ -18,15 +18,35 @@ pub const VISION_TILES: i32 = 14;
 const EYE_Z: f32 = 13.0;
 const CHEST_Z: f32 = 9.0;
 
+/// Hellfire charge (grenade) parameters.
+pub const GRENADE_POWER: i32 = 40;
+pub const GRENADE_RANGE_TILES: i32 = 10;
+pub const GRENADE_COST_PCT: i32 = 45;
+pub const GRENADE_CARVE_RADIUS: f32 = 7.0;
+/// Blast damages units within this many tiles (Chebyshev) of the impact.
+pub const BLAST_TILES: i32 = 2;
+/// Field dressing: flat TU cost, wounds staunched, health restored.
+pub const HEAL_COST_TU: i32 = 12;
+pub const HEAL_AMOUNT: i32 = 4;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     TurnStarted { side: Side, turn: u32 },
     Moved { unit: UnitId, from: IVec3, to: IVec3, tu_left: i32 },
     Fired { unit: UnitId, target: UnitId, mode: FireMode, reaction: bool, hit: bool },
+    Threw { unit: UnitId, at: IVec3 },
+    Exploded { at: IVec3, voxels: usize },
     Damaged { unit: UnitId, amount: i32, health_left: i32 },
+    /// The hit opened fatal wounds; `total` is the unit's open wound count.
+    Wounded { unit: UnitId, total: i32 },
+    /// Turn-start bleeding from open wounds.
+    Bled { unit: UnitId, health_left: i32 },
+    Healed { medic: UnitId, target: UnitId, health_left: i32 },
     Died { unit: UnitId },
     TerrainDestroyed { center: Vec3, voxels: usize },
     Panicked { unit: UnitId },
+    /// Dread broke the other way: wild firing at the nearest visible enemy.
+    Berserked { unit: UnitId },
     BattleOver { winner: Side },
 }
 
@@ -34,6 +54,10 @@ pub enum Event {
 pub enum Action {
     Move { unit: UnitId, to: IVec3 },
     Fire { unit: UnitId, target: UnitId, mode: FireMode },
+    /// Lob a hellfire charge at a tile. Arcs — no line of sight required.
+    Throw { unit: UnitId, at: IVec3 },
+    /// Field-dress a wounded ally (or yourself) on an adjacent tile.
+    Heal { medic: UnitId, target: UnitId },
     EndTurn,
 }
 
@@ -46,6 +70,17 @@ pub enum ActionError {
     NoPath,
     NoLineOfSight,
     BadTarget,
+    /// The weapon does not support the requested fire mode.
+    UnsupportedMode,
+    OutOfRange,
+    /// No grenades / heal charges left.
+    NoCharges,
+    NotAdjacent,
+}
+
+fn cheb(a: IVec3, b: IVec3) -> i32 {
+    let d = (b - a).abs();
+    d.x.max(d.y).max(d.z)
 }
 
 pub struct Battle {
@@ -170,6 +205,8 @@ impl Battle {
         match action {
             Action::Move { unit, to } => self.do_move(unit, to),
             Action::Fire { unit, target, mode } => self.do_fire(unit, target, mode),
+            Action::Throw { unit, at } => self.do_throw(unit, at),
+            Action::Heal { medic, target } => self.do_heal(medic, target),
             Action::EndTurn => Ok(self.end_turn()),
         }
     }
@@ -241,7 +278,7 @@ impl Battle {
             .filter(|e| {
                 e.alive
                     && e.side == mover_side.enemy()
-                    && e.tu >= e.fire_cost(FireMode::Snap)
+                    && e.fire_cost(FireMode::Snap).is_some_and(|c| e.tu >= c)
                     && e.reactions * e.tu / e.tu_max.max(1) > mover_initiative
             })
             .map(|e| e.id)
@@ -268,7 +305,11 @@ impl Battle {
         if !t.alive || t.side == self.unit(id).side {
             return Err(ActionError::BadTarget);
         }
-        if self.unit(id).tu < self.unit(id).fire_cost(mode) {
+        let cost = self
+            .unit(id)
+            .fire_cost(mode)
+            .ok_or(ActionError::UnsupportedMode)?;
+        if self.unit(id).tu < cost {
             return Err(ActionError::NotEnoughTu);
         }
         if !self.can_see(id, target) {
@@ -279,6 +320,9 @@ impl Battle {
         Ok(events)
     }
 
+    /// Spend the TUs for one fire action and resolve its rounds (one for
+    /// snap/aimed, a burst for auto). The mode must already be validated for
+    /// player actions; internal callers only use Snap, which always exists.
     fn resolve_shot(
         &mut self,
         shooter: UnitId,
@@ -287,27 +331,119 @@ impl Battle {
         reaction: bool,
         events: &mut Vec<Event>,
     ) {
-        let (cost, chance, power, breach) = {
+        let (cost, chance, rounds, power, breach) = {
             let s = self.unit(shooter);
-            (
-                s.fire_cost(mode),
-                s.hit_chance(mode),
-                s.weapon.power,
-                s.weapon.breach_radius,
-            )
+            let (Some(cost), Some(chance)) = (s.fire_cost(mode), s.hit_chance(mode)) else {
+                return;
+            };
+            (cost, chance, s.rounds_per_action(mode), s.weapon.power, s.weapon.breach_radius)
         };
         self.unit_mut(shooter).tu -= cost;
 
-        let hit = (self.rng.roll(100) as i32) < chance;
-        events.push(Event::Fired { unit: shooter, target, mode, reaction, hit });
+        for _ in 0..rounds {
+            if !self.unit(target).alive || self.winner.is_some() {
+                break; // remaining rounds of the burst go wide, harmlessly
+            }
+            let hit = (self.rng.roll(100) as i32) < chance;
+            events.push(Event::Fired { unit: shooter, target, mode, reaction, hit });
 
-        if hit {
-            // 0–200% of weapon power, the original's famous swingy roll.
-            let damage = power * self.rng.roll(201) as i32 / 100;
-            self.apply_damage(target, damage, events);
-        } else {
-            self.stray_shot(shooter, target, breach, events);
+            if hit {
+                // 0–200% of weapon power, the original's famous swingy roll.
+                let damage = power * self.rng.roll(201) as i32 / 100;
+                self.apply_damage(target, damage, events);
+            } else {
+                self.stray_shot(shooter, target, breach, events);
+            }
         }
+    }
+
+    fn do_throw(&mut self, id: UnitId, at: IVec3) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        let u = self.unit(id);
+        if u.grenades == 0 {
+            return Err(ActionError::NoCharges);
+        }
+        let cost = u.tu_max * GRENADE_COST_PCT / 100;
+        if u.tu < cost {
+            return Err(ActionError::NotEnoughTu);
+        }
+        if cheb(u.tile, at) > GRENADE_RANGE_TILES {
+            return Err(ActionError::OutOfRange);
+        }
+
+        {
+            let u = self.unit_mut(id);
+            u.tu -= cost;
+            u.grenades -= 1;
+        }
+        let mut events = vec![Event::Threw { unit: id, at }];
+        self.explode(at, GRENADE_POWER, &mut events);
+        Ok(events)
+    }
+
+    /// Detonate at a tile: carve the terrain, then damage every unit in the
+    /// blast. Units behind cover (no line from the blast center) take half.
+    fn explode(&mut self, at: IVec3, power: i32, events: &mut Vec<Event>) {
+        let center = (at * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, 8.0);
+        let destroyed = self.world.carve_sphere(center, GRENADE_CARVE_RADIUS);
+        let r = GRENADE_CARVE_RADIUS.ceil() as i32 + 1;
+        let c = center.as_ivec3();
+        self.tiles
+            .rederive_region(&self.world, c - IVec3::splat(r), c + IVec3::splat(r));
+        events.push(Event::Exploded { at, voxels: destroyed });
+
+        let victims: Vec<UnitId> = self
+            .units
+            .iter()
+            .filter(|u| u.alive && cheb(u.tile, at) <= BLAST_TILES)
+            .map(|u| u.id)
+            .collect();
+        for victim in victims {
+            let dist = cheb(self.unit(victim).tile, at);
+            // Explosives are less swingy than bullets: 50–150% of power,
+            // attenuated by distance.
+            let rolled = power * (50 + self.rng.roll(101) as i32) / 100;
+            let mut damage = rolled / (1 + dist);
+            // The carve happens first, so a unit sheltered by a surviving
+            // wall is genuinely in cover.
+            if !self.los_clear(center, Self::chest(self.unit(victim).tile)) {
+                damage /= 2;
+            }
+            self.apply_damage(victim, damage, events);
+        }
+    }
+
+    fn do_heal(&mut self, medic: UnitId, target: UnitId) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(medic)?;
+        let (m, t) = (self.unit(medic), self.unit(target));
+        if !t.alive || t.side != m.side {
+            return Err(ActionError::BadTarget);
+        }
+        if cheb(m.tile, t.tile) > 1 {
+            return Err(ActionError::NotAdjacent);
+        }
+        if m.heal_charges == 0 {
+            return Err(ActionError::NoCharges);
+        }
+        if m.tu < HEAL_COST_TU {
+            return Err(ActionError::NotEnoughTu);
+        }
+
+        {
+            let m = self.unit_mut(medic);
+            m.tu -= HEAL_COST_TU;
+            m.heal_charges -= 1;
+        }
+        {
+            let t = self.unit_mut(target);
+            t.wounds = (t.wounds - 1).max(0);
+            t.health = (t.health + HEAL_AMOUNT).min(t.health_max);
+        }
+        Ok(vec![Event::Healed {
+            medic,
+            target,
+            health_left: self.unit(target).health,
+        }])
     }
 
     /// A miss travels on: deviate the aim line and chip whatever terrain it
@@ -349,26 +485,38 @@ impl Battle {
             t.health -= damage;
             t.morale = (t.morale - damage / 2).max(0);
         }
-        let t = self.unit(target);
         events.push(Event::Damaged {
             unit: target,
             amount: damage,
-            health_left: t.health.max(0),
+            health_left: self.unit(target).health.max(0),
         });
 
-        if t.health <= 0 {
-            let dead_side = t.side;
-            self.unit_mut(target).alive = false;
-            events.push(Event::Died { unit: target });
-
-            // Seeing a comrade die is the great morale killer.
-            for u in &mut self.units {
-                if u.alive && u.side == dead_side {
-                    u.morale = (u.morale - (15 - u.bravery / 10)).max(0);
-                }
+        if self.unit(target).health <= 0 {
+            self.kill_unit(target, events);
+        } else if damage >= 5 {
+            // Serious hits can open fatal wounds that bleed each turn.
+            let new_wounds = self.rng.roll(3) as i32;
+            if new_wounds > 0 {
+                let t = self.unit_mut(target);
+                t.wounds += new_wounds;
+                let total = t.wounds;
+                events.push(Event::Wounded { unit: target, total });
             }
-            self.check_victory(events);
         }
+    }
+
+    fn kill_unit(&mut self, target: UnitId, events: &mut Vec<Event>) {
+        let dead_side = self.unit(target).side;
+        self.unit_mut(target).alive = false;
+        events.push(Event::Died { unit: target });
+
+        // Seeing a comrade die is the great morale killer.
+        for u in &mut self.units {
+            if u.alive && u.side == dead_side {
+                u.morale = (u.morale - (15 - u.bravery / 10)).max(0);
+            }
+        }
+        self.check_victory(events);
     }
 
     fn check_victory(&mut self, events: &mut Vec<Event>) {
@@ -388,22 +536,46 @@ impl Battle {
         }
         let mut events = vec![Event::TurnStarted { side: self.side_to_move, turn: self.turn }];
 
-        // Refresh TUs, regenerate a little morale, and roll panic checks for
-        // the side coming on turn.
+        // For the side coming on turn: refresh TUs, bleed open wounds, then
+        // roll dread checks (panic or berserk).
         let ids: Vec<UnitId> = self.living(self.side_to_move).map(|u| u.id).collect();
         for id in ids {
             {
                 let u = self.unit_mut(id);
                 u.tu = u.tu_max;
             }
+
+            let wounds = self.unit(id).wounds;
+            if wounds > 0 {
+                self.unit_mut(id).health -= wounds;
+                events.push(Event::Bled {
+                    unit: id,
+                    health_left: self.unit(id).health.max(0),
+                });
+                if self.unit(id).health <= 0 {
+                    self.kill_unit(id, &mut events);
+                    if self.winner.is_some() {
+                        return events;
+                    }
+                    continue;
+                }
+            }
+
             let morale = self.unit(id).morale;
             if morale < 50 {
                 let chance = ((50 - morale) * 2).clamp(0, 90) as u32;
                 if self.rng.roll(100) < chance {
-                    let u = self.unit_mut(id);
-                    u.tu = 0; // frozen by dread this turn
-                    u.morale = (u.morale + 20).min(100);
-                    events.push(Event::Panicked { unit: id });
+                    self.unit_mut(id).morale = (morale + 20).min(100);
+                    if self.rng.roll(100) < 25 {
+                        events.push(Event::Berserked { unit: id });
+                        self.go_berserk(id, &mut events);
+                    } else {
+                        events.push(Event::Panicked { unit: id });
+                    }
+                    self.unit_mut(id).tu = 0; // the turn is lost either way
+                    if self.winner.is_some() {
+                        return events;
+                    }
                     continue;
                 }
             }
@@ -411,6 +583,31 @@ impl Battle {
             u.morale = (u.morale + 5).min(100);
         }
         events
+    }
+
+    /// Berserk: blaze away at the nearest visible enemy, then collapse.
+    fn go_berserk(&mut self, id: UnitId, events: &mut Vec<Event>) {
+        let me = self.unit(id).tile;
+        let mut enemies: Vec<UnitId> = self
+            .living(self.unit(id).side.enemy())
+            .map(|u| u.id)
+            .collect();
+        enemies.sort_by_key(|&e| (cheb(me, self.unit(e).tile), e.0));
+        let Some(&target) = enemies.iter().find(|&&e| self.can_see(id, e)) else {
+            return;
+        };
+        for _ in 0..2 {
+            if !self.unit(target).alive
+                || self.winner.is_some()
+                || self
+                    .unit(id)
+                    .fire_cost(FireMode::Snap)
+                    .is_none_or(|c| self.unit(id).tu < c)
+            {
+                break;
+            }
+            self.resolve_shot(id, target, FireMode::Snap, false, events);
+        }
     }
 }
 
@@ -512,7 +709,7 @@ mod tests {
     #[test]
     fn firing_costs_tu_and_eventually_kills() {
         let mut b = open_field(duelists(), 42);
-        let cost = b.unit(UnitId(0)).fire_cost(FireMode::Snap);
+        let cost = b.unit(UnitId(0)).fire_cost(FireMode::Snap).unwrap();
         assert_eq!(cost, 13);
 
         let mut killed = false;
@@ -559,7 +756,7 @@ mod tests {
             if b.winner.is_some() {
                 break;
             }
-            while b.unit(UnitId(0)).tu >= b.unit(UnitId(0)).fire_cost(FireMode::Snap)
+            while b.unit(UnitId(0)).tu >= b.unit(UnitId(0)).fire_cost(FireMode::Snap).unwrap()
                 && b.winner.is_none()
             {
                 let events = b
@@ -619,7 +816,9 @@ mod tests {
             Unit::imp(2, "Imp", IVec3::new(10, 5, 0)),
         ];
         units[1].bravery = 10; // very jumpy
-        let mut b = open_field(units, 5);
+        // Walled field: the imp is out of sight, so a berserk roll can't
+        // shoot anyone and end the battle mid-test.
+        let mut b = walled_field(units, 5);
 
         let before = b.unit(UnitId(1)).morale;
         // Execute soldier A via direct damage.
@@ -635,7 +834,7 @@ mod tests {
         // start (probabilistic, so give it several attempts).
         b.units[1].morale = 5;
         let mut panicked = false;
-        for _ in 0..12 {
+        for _ in 0..24 {
             b.perform(Action::EndTurn).unwrap(); // demons
             let events = b.perform(Action::EndTurn).unwrap(); // order turn start
             if events.iter().any(|e| matches!(e, Event::Panicked { unit } if *unit == UnitId(1))) {
@@ -645,6 +844,154 @@ mod tests {
             b.units[1].morale = 5; // keep them terrified for the next roll
         }
         assert!(panicked, "morale 5 should panic within a few checks");
+    }
+
+    #[test]
+    fn dread_can_break_into_berserk_fire() {
+        // Open field: a visible imp, an unbreakable one so the battle can't
+        // end while we fish for the berserk branch.
+        let mut units = duelists();
+        units[0].bravery = 10;
+        units[1].health_max = 5000;
+        units[1].health = 5000;
+        let mut b = open_field(units, 21);
+
+        let mut berserked = false;
+        for _ in 0..60 {
+            b.units[0].morale = 5;
+            b.perform(Action::EndTurn).unwrap(); // demons
+            let events = b.perform(Action::EndTurn).unwrap(); // order turn start
+            if events.iter().any(|e| matches!(e, Event::Berserked { unit } if *unit == UnitId(0))) {
+                berserked = true;
+                assert!(
+                    events.iter().any(|e| matches!(
+                        e,
+                        Event::Fired { unit, mode: FireMode::Snap, .. } if *unit == UnitId(0)
+                    )),
+                    "berserk must actually blaze away: {events:?}"
+                );
+                assert_eq!(b.unit(UnitId(0)).tu, 0, "the berserk turn is lost");
+                break;
+            }
+        }
+        assert!(berserked, "60 dread checks should break someone eventually");
+    }
+
+    #[test]
+    fn auto_burst_fires_multiple_rounds_for_one_cost() {
+        let mut units = duelists();
+        units[1].health_max = 5000; // survive the burst so all rounds fire
+        units[1].health = 5000;
+        let mut b = open_field(units, 9);
+        let cost = b.unit(UnitId(0)).fire_cost(FireMode::Auto).unwrap();
+
+        let events = b
+            .perform(Action::Fire { unit: UnitId(0), target: UnitId(1), mode: FireMode::Auto })
+            .unwrap();
+        let rounds = events
+            .iter()
+            .filter(|e| matches!(e, Event::Fired { mode: FireMode::Auto, .. }))
+            .count();
+        assert_eq!(rounds, 3, "full burst: {events:?}");
+        assert_eq!(b.unit(UnitId(0)).tu, 55 - cost);
+
+        // Imps physically can't burst.
+        b.perform(Action::EndTurn).unwrap();
+        assert_eq!(
+            b.perform(Action::Fire { unit: UnitId(1), target: UnitId(0), mode: FireMode::Auto }),
+            Err(ActionError::UnsupportedMode)
+        );
+    }
+
+    #[test]
+    fn grenades_arc_over_walls_and_carve() {
+        // Imp hides directly behind the wall — unseeable, unshootable...
+        let mut units = duelists();
+        units[1].tile = IVec3::new(6, 5, 0);
+        units[1].health_max = 5000; // must survive ground zero for the
+        units[1].health = 5000; // follow-up range/supply assertions
+        let mut b = walled_field(units, 17);
+        assert!(!b.can_see(UnitId(0), UnitId(1)));
+
+        // ...but not un-bombable. Lob a charge right onto its tile.
+        let events = b
+            .perform(Action::Throw { unit: UnitId(0), at: IVec3::new(6, 5, 0) })
+            .unwrap();
+        assert!(matches!(events[0], Event::Threw { .. }));
+        let carved = events.iter().any(
+            |e| matches!(e, Event::Exploded { voxels, .. } if *voxels > 0),
+        );
+        assert!(carved, "the blast must scar the wall/ground: {events:?}");
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Damaged { unit, .. } if *unit == UnitId(1))),
+            "imp at ground zero takes blast damage: {events:?}"
+        );
+        assert_eq!(b.unit(UnitId(0)).grenades, 1);
+
+        // Range and supply limits.
+        b.units[0].tile = IVec3::new(0, 0, 0); // corner-to-corner is 11 tiles
+        assert_eq!(
+            b.perform(Action::Throw { unit: UnitId(0), at: IVec3::new(11, 11, 0) }),
+            Err(ActionError::OutOfRange)
+        );
+        b.units[0].grenades = 0;
+        assert_eq!(
+            b.perform(Action::Throw { unit: UnitId(0), at: IVec3::new(3, 5, 0) }),
+            Err(ActionError::NoCharges)
+        );
+    }
+
+    #[test]
+    fn wounds_bleed_at_turn_start_and_can_kill() {
+        let mut b = open_field(duelists(), 33);
+        b.units[0].wounds = 2;
+        b.units[0].health = 3;
+
+        b.perform(Action::EndTurn).unwrap(); // demons
+        let events = b.perform(Action::EndTurn).unwrap(); // order start: bleed 2
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Bled { unit, health_left: 1 } if *unit == UnitId(0))),
+            "{events:?}"
+        );
+
+        b.perform(Action::EndTurn).unwrap();
+        let events = b.perform(Action::EndTurn).unwrap(); // bleeds to death
+        assert!(events.iter().any(|e| matches!(e, Event::Died { unit } if *unit == UnitId(0))));
+        assert_eq!(b.winner, Some(Side::Demons));
+    }
+
+    #[test]
+    fn field_dressing_staunches_and_restores() {
+        let mut units = vec![
+            Unit::soldier(0, "Medic", IVec3::new(1, 5, 0)),
+            Unit::soldier(1, "Patient", IVec3::new(1, 6, 0)),
+            Unit::imp(2, "Imp", IVec3::new(10, 5, 0)),
+        ];
+        units[1].wounds = 2;
+        units[1].health = 10;
+        let mut b = open_field(units, 8);
+
+        let events = b
+            .perform(Action::Heal { medic: UnitId(0), target: UnitId(1) })
+            .unwrap();
+        assert!(matches!(events[0], Event::Healed { health_left: 14, .. }));
+        assert_eq!(b.unit(UnitId(1)).wounds, 1);
+        assert_eq!(b.unit(UnitId(0)).heal_charges, 2);
+        assert_eq!(b.unit(UnitId(0)).tu, 55 - HEAL_COST_TU);
+
+        // Too far away to treat.
+        b.units[1].tile = IVec3::new(5, 5, 0);
+        assert_eq!(
+            b.perform(Action::Heal { medic: UnitId(0), target: UnitId(1) }),
+            Err(ActionError::NotAdjacent)
+        );
+        // Demons are not patients.
+        assert_eq!(
+            b.perform(Action::Heal { medic: UnitId(0), target: UnitId(2) }),
+            Err(ActionError::BadTarget)
+        );
     }
 
     #[test]
@@ -683,7 +1030,12 @@ mod tests {
         assert!(r.aimed_acc > r.snap_acc);
         assert!(r.aimed_cost_pct > r.snap_cost_pct);
         let s = Unit::soldier(0, "X", IVec3::ZERO);
-        assert_eq!(s.hit_chance(FireMode::Snap), 36);
-        assert_eq!(s.hit_chance(FireMode::Aimed), 66);
+        assert_eq!(s.hit_chance(FireMode::Snap), Some(36));
+        assert_eq!(s.hit_chance(FireMode::Aimed), Some(66));
+        assert_eq!(s.hit_chance(FireMode::Auto), Some(21));
+        assert_eq!(s.fire_cost(FireMode::Auto), Some(19));
+        // Imps cannot burst-fire.
+        let i = Unit::imp(1, "Y", IVec3::ZERO);
+        assert_eq!(i.fire_cost(FireMode::Auto), None);
     }
 }
