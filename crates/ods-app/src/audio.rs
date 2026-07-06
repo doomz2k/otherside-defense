@@ -66,6 +66,8 @@ pub struct Audio {
     warfront: Arc<Vec<f32>>,
     music_sink: Option<Sink>,
     playing: Option<MusicTrack>,
+    /// Master volume, 0..=1, scaling both effects and music.
+    volume: f32,
 }
 
 impl Audio {
@@ -88,7 +90,20 @@ impl Audio {
             warfront: Arc::new(synth_warfront()),
             music_sink: None,
             playing: None,
+            volume: 1.0,
         })
+    }
+
+    /// Master volume for effects and music alike.
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = volume.clamp(0.0, 1.0);
+        if let Some(sink) = &self.music_sink {
+            sink.set_volume(0.5 * self.volume);
+        }
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.volume
     }
 
     /// Switch the underscore of the world. None silences it.
@@ -106,7 +121,7 @@ impl Audio {
                 MusicTrack::Warfront => self.warfront.clone(),
             };
             if let Ok(sink) = Sink::try_new(&self.handle) {
-                sink.set_volume(0.5);
+                sink.set_volume(0.5 * self.volume);
                 sink.append(LoopSource { data, pos: 0 });
                 self.music_sink = Some(sink);
             }
@@ -114,9 +129,12 @@ impl Audio {
     }
 
     pub fn play(&self, sound: Sound) {
+        if self.volume <= 0.0 {
+            return;
+        }
         if let Some((_, samples)) = self.banks.iter().find(|(s, _)| *s == sound) {
             let buffer = SamplesBuffer::new(1, RATE, samples.clone());
-            let _ = self.handle.play_raw(buffer);
+            let _ = self.handle.play_raw(buffer.amplify(self.volume));
         }
     }
 }

@@ -158,8 +158,9 @@ pub fn build_globe(selected: Option<Region>) -> (Vec<LitVertex>, Vec<u32>) {
 }
 
 /// Markers hovering just off the surface: detected rifts (red, brighter when
-/// still unstable), nests (dark violet), and the chapterhouse (gold).
-pub fn build_markers(campaign: &Campaign) -> (Vec<LitVertex>, Vec<u32>) {
+/// still unstable), nests (dark violet), and the chapterhouse (gold). `time`
+/// drives the pulse of anything alive down there.
+pub fn build_markers(campaign: &Campaign, time: f32) -> (Vec<LitVertex>, Vec<u32>) {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
 
@@ -172,19 +173,99 @@ pub fn build_markers(campaign: &Campaign) -> (Vec<LitVertex>, Vec<u32>) {
         let (lat, lon) = centroid(base.region);
         push(lat, lon, 7.0, [1.0, 0.85, 0.25, 1.0]);
     }
+    // Nests breathe, slow and swollen.
+    let nest_pulse = 6.0 + 0.7 * (time * 1.7).sin();
     for nest in &campaign.nests {
-        push(nest.lat, nest.lon, 6.0, [0.45, 0.1, 0.55, 1.0]);
+        push(nest.lat, nest.lon, nest_pulse, [0.45, 0.1, 0.55, 1.0]);
     }
     for rift in campaign.rifts.iter().filter(|r| r.detected) {
-        let color = if rift.is_stabilized() {
-            [0.75, 0.12, 0.08, 1.0]
+        // Unstable rifts flicker urgently; dug-in ones burn steady and dark.
+        let (size, color) = if rift.is_stabilized() {
+            (5.0 + 0.4 * (time * 2.3).sin(), [0.75, 0.12, 0.08, 1.0])
         } else {
-            [1.0, 0.35, 0.15, 1.0]
+            let throb = 0.5 + 0.5 * (time * 5.0).sin();
+            (
+                4.4 + 1.6 * throb,
+                [0.8 + 0.2 * throb, 0.25 + 0.35 * throb, 0.12, 1.0],
+            )
         };
-        push(rift.lat, rift.lon, 5.0, color);
+        push(rift.lat, rift.lon, size, color);
     }
 
     (vertices, indices)
+}
+
+/// The great cities of the world (lat, lon) — visible as lights after dark.
+const CITIES: [(f32, f32); 24] = [
+    (40.7, -74.0),   // New York
+    (34.0, -118.2),  // Los Angeles
+    (41.9, -87.6),   // Chicago
+    (19.4, -99.1),   // Mexico City
+    (-23.5, -46.6),  // São Paulo
+    (-34.6, -58.4),  // Buenos Aires
+    (51.5, -0.1),    // London
+    (48.9, 2.3),     // Paris
+    (52.5, 13.4),    // Berlin
+    (41.9, 12.5),    // Rome
+    (55.8, 37.6),    // Moscow
+    (30.0, 31.2),    // Cairo
+    (6.5, 3.4),      // Lagos
+    (-26.2, 28.0),   // Johannesburg
+    (25.2, 55.3),    // Dubai
+    (28.6, 77.2),    // Delhi
+    (19.1, 72.9),    // Mumbai
+    (39.9, 116.4),   // Beijing
+    (31.2, 121.5),   // Shanghai
+    (35.7, 139.7),   // Tokyo
+    (37.6, 127.0),   // Seoul
+    (1.4, 103.8),    // Singapore
+    (-33.9, 151.2),  // Sydney
+    (14.6, 121.0),   // Manila
+];
+
+/// City lights on the night side of the terminator, for the fx overlay slot.
+/// Each is a small warm quad flush with the surface; they twinkle faintly.
+pub fn build_city_lights(
+    sun_lon: f32,
+    time: f32,
+) -> (Vec<ods_render::OverlayVertex>, Vec<u32>) {
+    let mut verts = Vec::new();
+    let mut indices = Vec::new();
+    for (i, &(lat, lon)) in CITIES.iter().enumerate() {
+        let mut d = (lon - sun_lon).abs() % 360.0;
+        if d > 180.0 {
+            d = 360.0 - d;
+        }
+        if d < 90.0 {
+            continue; // daylight: the lights drown in the sun
+        }
+        // Brighter the deeper into night, with a slow per-city shimmer.
+        let depth = ((d - 90.0) / 90.0).clamp(0.0, 1.0);
+        let shimmer = 0.85 + 0.15 * (time * 2.0 + i as f32 * 1.7).sin();
+        let alpha = (0.35 + 0.55 * depth) * shimmer;
+
+        let center = latlon_to_pos(lat, lon, GLOBE_RADIUS + 1.5);
+        let normal = center.normalize();
+        // Tangent frame on the sphere surface.
+        let east = Vec3::Z.cross(normal).normalize_or(Vec3::X);
+        let north = normal.cross(east);
+        let r = 2.4;
+        let corners = [
+            center - east * r - north * r,
+            center + east * r - north * r,
+            center + east * r + north * r,
+            center - east * r + north * r,
+        ];
+        let first = verts.len() as u32;
+        for p in corners {
+            verts.push(ods_render::OverlayVertex {
+                position: p.to_array(),
+                color: [1.0, 0.85, 0.5, alpha],
+            });
+        }
+        indices.extend([0, 1, 2, 0, 2, 3].map(|k| first + k));
+    }
+    (verts, indices)
 }
 
 fn push_cube(

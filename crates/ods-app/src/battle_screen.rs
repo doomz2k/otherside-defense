@@ -30,6 +30,15 @@ enum FxKind {
     Flash,
 }
 
+/// A scrap of combat text drifting up from a point on the field.
+struct FloatText {
+    text: String,
+    color: egui::Color32,
+    world: Vec3,
+    age: f32,
+    life: f32,
+}
+
 pub struct BattleScreen {
     pub battle: Battle,
     /// Present when this battle belongs to the campaign.
@@ -40,6 +49,7 @@ pub struct BattleScreen {
     fire_mode: FireMode,
     grenade_armed: bool,
     fx: Vec<Fx>,
+    floaters: Vec<FloatText>,
     shake: f32,
     fx_clock: f32,
     /// Visual (lerped) feet positions per unit index — the glide.
@@ -70,6 +80,7 @@ impl BattleScreen {
             fire_mode: FireMode::Snap,
             grenade_armed: false,
             fx: Vec::new(),
+            floaters: Vec::new(),
             shake: 0.0,
             fx_clock: 0.0,
             visual: HashMap::new(),
@@ -377,6 +388,8 @@ impl BattleScreen {
                 self.minimap(ui);
             });
 
+        self.draw_floaters(ctx, renderer.aspect());
+
         if let Some((text, ttl)) = &self.banner {
             let alpha = (ttl.min(0.6) / 0.6 * 255.0) as u8;
             egui::Area::new(egui::Id::new("banner"))
@@ -478,12 +491,67 @@ impl BattleScreen {
         (at * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, z)
     }
 
+    /// Fights on the night side of the world are lit by muzzle and flame.
+    fn is_night(&self) -> bool {
+        self.battle.vision_tiles < 14
+    }
+
+    fn float(&mut self, over: UnitId, text: impl Into<String>, color: egui::Color32) {
+        self.floaters.push(FloatText {
+            text: text.into(),
+            color,
+            world: self.unit_pos(over, 20.0),
+            age: 0.0,
+            life: 1.4,
+        });
+    }
+
     fn spawn_fx(&mut self, event: &Event, audio: Option<&Audio>) {
         let play = |s: Sound| {
             if let Some(a) = audio {
                 a.play(s);
             }
         };
+        // Floating combat text: the numbers rise from where they happened.
+        match event {
+            Event::Damaged { unit, amount, .. } => {
+                self.float(*unit, format!("-{amount}"), egui::Color32::from_rgb(240, 80, 60));
+            }
+            Event::Burned { unit, amount } => {
+                self.float(*unit, format!("-{amount}"), egui::Color32::from_rgb(255, 150, 40));
+            }
+            Event::Fired { target, hit: false, .. } => {
+                self.float(*target, "MISS", egui::Color32::from_gray(170));
+            }
+            Event::Healed { target, .. } => {
+                self.float(*target, "STAUNCHED", egui::Color32::from_rgb(110, 220, 120));
+            }
+            Event::Stunned { unit, .. } => {
+                self.float(*unit, "STUN", egui::Color32::from_rgb(120, 200, 255));
+            }
+            Event::Terrified { target, morale_lost, .. } => {
+                if *morale_lost > 0 {
+                    self.float(
+                        *target,
+                        format!("TERROR -{morale_lost}"),
+                        egui::Color32::from_rgb(200, 120, 255),
+                    );
+                } else {
+                    self.float(*target, "RESISTED", egui::Color32::from_gray(200));
+                }
+            }
+            Event::PartCrippled { unit, part } => {
+                self.float(
+                    *unit,
+                    format!("{} CRIPPLED", part.name().to_uppercase()),
+                    egui::Color32::from_rgb(255, 120, 120),
+                );
+            }
+            Event::Panicked { unit } => {
+                self.float(*unit, "PANIC", egui::Color32::from_rgb(255, 210, 90));
+            }
+            _ => {}
+        }
         match event {
             Event::TurnStarted { side, .. } => {
                 let text = match side {
@@ -515,6 +583,18 @@ impl BattleScreen {
                     age: 0.0,
                     life: 0.22,
                 });
+                // After dark the muzzle is a lantern: a brief warm glow.
+                if self.is_night() {
+                    let p = self.unit_pos(*unit, 10.0);
+                    self.fx.push(Fx {
+                        kind: FxKind::Flash,
+                        from: p,
+                        to: p,
+                        color: [1.0, 0.75, 0.35, 0.5],
+                        age: 0.0,
+                        life: 0.16,
+                    });
+                }
                 play(Sound::Shot);
             }
             Event::Exploded { at, .. } => {
@@ -622,7 +702,53 @@ impl BattleScreen {
             }
         }
 
+        for f in &mut self.floaters {
+            f.age += dt;
+        }
+        self.floaters.retain(|f| f.age < f.life);
+
         self.update_fx(dt, renderer);
+    }
+
+    /// Paint the floating combat text: project each scrap of text from the
+    /// field into screen space and let it rise and fade.
+    fn draw_floaters(&self, ctx: &egui::Context, aspect: f32) {
+        if self.floaters.is_empty() {
+            return;
+        }
+        let vp = self.camera_vp(aspect);
+        // The 3D view fills the whole window, so project against the full
+        // viewport, not the panel-clipped content area.
+        let screen = ctx.viewport_rect();
+        let painter =
+            ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("floaters")));
+        for f in &self.floaters {
+            let t = (f.age / f.life).clamp(0.0, 1.0);
+            let world = f.world + Vec3::Z * (8.0 * t);
+            let clip = vp * world.extend(1.0);
+            if clip.w <= 0.1 {
+                continue; // behind the camera
+            }
+            let ndc = clip.truncate() / clip.w;
+            let pos = egui::pos2(
+                screen.center().x + ndc.x * screen.width() / 2.0,
+                screen.center().y - ndc.y * screen.height() / 2.0,
+            );
+            let alpha = ((1.0 - t) * 255.0) as u8;
+            let color = egui::Color32::from_rgba_unmultiplied(
+                f.color.r(),
+                f.color.g(),
+                f.color.b(),
+                alpha,
+            );
+            painter.text(
+                pos,
+                egui::Align2::CENTER_BOTTOM,
+                &f.text,
+                egui::FontId::proportional(15.0),
+                color,
+            );
+        }
     }
 
     /// Advance effect ages and camera shake; rebuild the fx mesh.
@@ -814,12 +940,51 @@ impl BattleScreen {
         let mut verts: Vec<OverlayVertex> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
         let (min, max) = self.battle.tiles.bounds();
+        // At night, open flame throws a pool of warm light; everything else
+        // sinks into cold blue. Distance to the nearest fire decides which.
+        let night = self.is_night();
+        let fires: Vec<IVec3> = self
+            .battle
+            .clouds
+            .iter()
+            .filter(|(_, kind, _)| *kind == ods_sim::battle::CloudKind::Fire)
+            .map(|(t, _, _)| *t)
+            .collect();
+        let fire_dist = |tile: IVec3| -> i32 {
+            fires
+                .iter()
+                .map(|f| (f.x - tile.x).abs().max((f.y - tile.y).abs()) + (f.z - tile.z).abs())
+                .min()
+                .unwrap_or(i32::MAX)
+        };
         for z in min.z..max.z {
             for y in min.y..max.y {
                 for x in min.x..max.x {
                     let tile = IVec3::new(x, y, z);
                     if !visible.contains(&tile) {
                         push_tile_quad(&mut verts, &mut indices, tile, [0.0, 0.0, 0.02, 0.55]);
+                    } else if night {
+                        match fire_dist(tile) {
+                            0 => {} // the burning tile draws its own color below
+                            1 => push_tile_quad(
+                                &mut verts,
+                                &mut indices,
+                                tile,
+                                [1.0, 0.6, 0.25, 0.16],
+                            ),
+                            2 => push_tile_quad(
+                                &mut verts,
+                                &mut indices,
+                                tile,
+                                [0.9, 0.5, 0.2, 0.07],
+                            ),
+                            _ => push_tile_quad(
+                                &mut verts,
+                                &mut indices,
+                                tile,
+                                [0.02, 0.04, 0.12, 0.28],
+                            ),
+                        }
                     }
                 }
             }

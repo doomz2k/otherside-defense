@@ -16,9 +16,53 @@ pub enum GeoAction {
 
 impl Core {
     pub fn menu_ui(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // The voxel diorama smoulders behind a transparent panel; the menu
+        // itself sits on a parchment-dark card.
+        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
+            let card = egui::Frame::new()
+                .fill(egui::Color32::from_rgba_premultiplied(14, 8, 10, 210))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 96, 48)))
+                .corner_radius(egui::CornerRadius::same(4))
+                .inner_margin(egui::Margin::symmetric(28, 18));
+            ui.add_space(40.0);
             ui.vertical_centered(|ui| {
-                ui.add_space(60.0);
+                card.show(ui, |ui| self.menu_card(ui));
+            });
+        });
+
+        if self.show_options {
+            let mut open = true;
+            egui::Window::new("Options")
+                .open(&mut open)
+                .anchor(egui::Align2::RIGHT_TOP, [-16.0, 16.0])
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("Volume");
+                    if ui
+                        .add(egui::Slider::new(&mut self.volume, 0.0..=1.0).show_value(false))
+                        .changed()
+                    {
+                        let volume = self.volume;
+                        if let Some(a) = self.audio_mut() {
+                            a.set_volume(volume);
+                        }
+                    }
+                    ui.label("Camera sensitivity");
+                    ui.add(egui::Slider::new(&mut self.cam_sense, 0.3..=2.5).show_value(false));
+                    ui.label(
+                        egui::RichText::new(
+                            "Applies to right-drag orbiting on both the globe and the field.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                });
+            self.show_options = open;
+        }
+    }
+
+    fn menu_card(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new("OTHERSIDE DEFENSE").size(34.0).strong());
                 ui.label("The rifts are opening. The Order answers.");
                 ui.add_space(20.0);
@@ -74,11 +118,14 @@ impl Core {
                 if ui.button(egui::RichText::new("Quick skirmish").size(18.0)).clicked() {
                     self.start_skirmish();
                 }
+                ui.add_space(4.0);
+                if ui.button("Options").clicked() {
+                    self.show_options = !self.show_options;
+                }
                 if let Some(status) = &self.status {
                     ui.add_space(12.0);
                     ui.colored_label(egui::Color32::LIGHT_RED, status);
                 }
-            });
         });
     }
 

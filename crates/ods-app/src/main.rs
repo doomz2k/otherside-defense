@@ -15,6 +15,7 @@ mod chronicle;
 mod figures;
 mod geoscape;
 mod globe;
+mod theme;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -80,12 +81,19 @@ pub struct Core {
     pub ironman_choice: bool,
     pub show_codex: bool,
     pub show_stats: bool,
+    pub show_options: bool,
+    /// Master volume (0..=1) and orbit-drag sensitivity (0.3..=2.5).
+    pub volume: f32,
+    pub cam_sense: f32,
     audio: Option<audio::Audio>,
     /// The big spinning world.
     geo_camera: OrbitCamera,
     geo_drag: bool,
     pub selected_region: Option<Region>,
     globe_built_for: Option<Option<Region>>,
+    /// The title screen's frozen skirmish, slowly orbited.
+    menu_built: bool,
+    menu_camera: OrbitCamera,
     cursor: (f32, f32),
     last_cursor: (f32, f32),
     last_frame: Instant,
@@ -130,9 +138,13 @@ impl Core {
             None,
             None,
         );
+        theme::apply(&egui_ctx);
         let mut geo_camera = OrbitCamera::new(Vec3::ZERO);
         geo_camera.distance = 640.0;
         geo_camera.pitch = 0.35;
+        let mut menu_camera = OrbitCamera::new(Vec3::new(96.0, 96.0, 10.0));
+        menu_camera.distance = 220.0;
+        menu_camera.pitch = 0.55;
 
         Ok(Self {
             window,
@@ -150,11 +162,16 @@ impl Core {
             ironman_choice: false,
             show_codex: false,
             show_stats: false,
+            show_options: false,
+            volume: 1.0,
+            cam_sense: 1.0,
             audio: audio::Audio::new(),
             geo_camera,
             geo_drag: false,
             selected_region: None,
             globe_built_for: None,
+            menu_built: false,
+            menu_camera,
             cursor: (0.0, 0.0),
             last_cursor: (0.0, 0.0),
             last_frame: Instant::now(),
@@ -162,13 +179,39 @@ impl Core {
         })
     }
 
+    pub(crate) fn audio_mut(&mut self) -> Option<&mut audio::Audio> {
+        self.audio.as_mut()
+    }
+
     /// Switch to the Geoscape and (re)install the globe scene.
     pub fn enter_geoscape(&mut self) {
         self.renderer.clear_scene();
+        self.menu_built = false;
         let (vertices, indices) = globe::build_globe(self.selected_region);
         self.renderer.set_globe(&vertices, &indices);
         self.globe_built_for = Some(self.selected_region);
         self.screen = Screen::Geoscape;
+    }
+
+    /// Build the title screen's voxel diorama: a small skirmish scene,
+    /// mid-fight forever, slowly orbited by the camera.
+    fn build_menu_diorama(&mut self) {
+        self.renderer.clear_scene();
+        let mut battle = scenario::skirmish(1349);
+        for coord in battle.world.take_dirty_chunks() {
+            let mesh = ods_voxel::mesh_chunk(&battle.world, coord);
+            self.renderer.upsert_chunk(coord, &mesh);
+        }
+        // Every figure on parade — the diorama has no fog of war.
+        let visible: std::collections::HashSet<glam::IVec3> =
+            battle.units.iter().map(|u| u.tile).collect();
+        let (verts, indices) =
+            figures::build_figures(&battle, &visible, &std::collections::HashMap::new());
+        self.renderer.set_figures(&verts, &indices);
+        let (min, max) = battle.tiles.bounds();
+        let center = ((min + max).as_vec3() / 2.0) * ods_sim::TILE_VOXELS as f32;
+        self.menu_camera.target = Vec3::new(center.x, center.y, 8.0);
+        self.menu_built = true;
     }
 
     pub fn start_skirmish(&mut self) {
@@ -178,6 +221,7 @@ impl Core {
             .unwrap_or(42);
         let battle = scenario::skirmish(seed);
         self.battle = Some(BattleScreen::new(&mut self.renderer, battle, None));
+        self.menu_built = false;
         self.screen = Screen::Battle;
     }
 
@@ -198,15 +242,17 @@ impl Core {
                 if self.screen == Screen::Geoscape && self.geo_drag && !response.consumed {
                     let dx = self.cursor.0 - self.last_cursor.0;
                     let dy = self.cursor.1 - self.last_cursor.1;
-                    self.geo_camera.orbit(dx * -0.006, dy * 0.006);
+                    self.geo_camera
+                        .orbit(dx * -0.006 * self.cam_sense, dy * 0.006 * self.cam_sense);
                 }
                 self.last_cursor = self.cursor;
+                let sense = self.cam_sense;
                 if let Some(b) = self.battle.as_mut() {
                     b.cursor = (position.x as f32, position.y as f32);
                     if b.right_drag && !response.consumed {
                         let dx = b.cursor.0 - b.last_cursor.0;
                         let dy = b.cursor.1 - b.last_cursor.1;
-                        b.drag(dx, dy);
+                        b.drag(dx * sense, dy * sense);
                     }
                     b.last_cursor = b.cursor;
                 }
@@ -329,9 +375,12 @@ impl Core {
                     + self.sun_drift;
                 let sun = globe::latlon_to_pos(12.0, sun_lon, 1.0);
                 if let Some(c) = &self.campaign {
-                    let (vertices, indices) = globe::build_markers(c);
+                    let (vertices, indices) = globe::build_markers(c, self.sun_drift);
                     self.renderer.set_markers(&vertices, &indices);
                 }
+                // Civilization glitters on the night side of the line.
+                let (lights, light_idx) = globe::build_city_lights(sun_lon, self.sun_drift);
+                self.renderer.set_fx(&lights, &light_idx);
                 let vp = self.geo_camera.view_proj(self.renderer.aspect());
                 self.renderer.set_camera(vp, sun);
             }
@@ -339,6 +388,13 @@ impl Core {
                 if let Some(a) = self.audio.as_mut() {
                     a.music(Some(audio::MusicTrack::Vigil));
                 }
+                // A frozen skirmish smoulders behind the title.
+                if !self.menu_built {
+                    self.build_menu_diorama();
+                }
+                self.menu_camera.yaw += dt * 0.07;
+                let vp = self.menu_camera.view_proj(self.renderer.aspect());
+                self.renderer.set_camera(vp, Vec3::new(-0.3, -0.4, 0.45));
             }
         }
 
@@ -370,6 +426,7 @@ impl Core {
         match c.begin_mission(kind) {
             Ok((battle, token)) => {
                 self.battle = Some(BattleScreen::new(&mut self.renderer, battle, Some(token)));
+                self.menu_built = false;
                 self.screen = Screen::Battle;
             }
             Err(e) => self.log.push(format!("cannot stage the mission: {e:?}")),
@@ -387,6 +444,7 @@ impl Core {
         if leave {
             let mut screen = self.battle.take().expect("battle present");
             self.renderer.clear_scene();
+            self.menu_built = false;
             match (screen.token.take(), &mut self.campaign) {
                 (Some(token), Some(c)) => {
                     let report = c.conclude_mission(token, &screen.battle);
