@@ -156,6 +156,13 @@ impl Core {
                     "⛓ cells: {}g/{}o",
                     c.prisoners.grunts, c.prisoners.overseers
                 ));
+                if c.blood_moon.is_some() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 60, 50),
+                        egui::RichText::new("🌑 BLOOD MOON").strong(),
+                    )
+                    .on_hover_text("the packs come stronger; the salvage comes double");
+                }
                 ui.separator();
                 let alive = c.over.is_none();
                 let mut advanced = false;
@@ -532,6 +539,60 @@ impl Core {
                         ui.label("Click a fit soldier's @base tag to rotate their station.");
                     });
 
+                let maimed: Vec<usize> = c
+                    .soldiers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| !s.lost_parts.is_empty())
+                    .map(|(i, _)| i)
+                    .collect();
+                if !maimed.is_empty() {
+                    egui::CollapsingHeader::new(format!(
+                        "Infirmary — the maimed ({}) | limbs {} · grafts {}",
+                        maimed.len(),
+                        c.limb_stock,
+                        c.graft_stock
+                    ))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.label(
+                            "Hellsteel limbs restore what was lost. Flesh grafts restore \
+                             it better — and cost the wearer a piece of their sleep.",
+                        );
+                        let mut fit: Option<(usize, bool)> = None;
+                        for &i in &maimed {
+                            let s = &c.soldiers[i];
+                            ui.horizontal(|ui| {
+                                let lost: Vec<&str> =
+                                    s.lost_parts.iter().map(|p| p.name()).collect();
+                                ui.label(format!("{} — lost: {}", s.name, lost.join(", ")));
+                                if ui
+                                    .add_enabled(c.limb_stock > 0, egui::Button::new("🦾 Fit limb"))
+                                    .clicked()
+                                {
+                                    fit = Some((i, false));
+                                }
+                                if ui
+                                    .add_enabled(c.graft_stock > 0, egui::Button::new("🩸 Graft"))
+                                    .clicked()
+                                {
+                                    fit = Some((i, true));
+                                }
+                            });
+                        }
+                        if let Some((i, graft)) = fit {
+                            match c.fit_replacement(i, graft) {
+                                Ok(()) => self.log.push(format!(
+                                    "{} is made whole{}",
+                                    c.soldiers[i].name,
+                                    if graft { " — with something that was never theirs." } else { "." }
+                                )),
+                                Err(e) => self.log.push(format!("cannot fit: {e:?}")),
+                            }
+                        }
+                    });
+                }
+
                 if !c.memorial.is_empty() {
                     egui::CollapsingHeader::new(format!("Memorial ({})", c.memorial.len()))
                         .show(ui, |ui| {
@@ -745,6 +806,19 @@ impl Core {
                 });
             });
 
+        // Under a blood moon the whole sky is a wound.
+        if c.blood_moon.is_some() {
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Background,
+                egui::Id::new("blood-moon-wash"),
+            ));
+            painter.rect_filled(
+                ctx.viewport_rect(),
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(140, 10, 10, 26),
+            );
+        }
+
         // ------------------------------------------- the world itself
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -821,13 +895,26 @@ impl Core {
                                 ui.separator();
                                 continue;
                             }
+                            let slain = c.codex_slain.contains(&species);
                             ui.horizontal(|ui| {
                                 ui.strong(species.name());
+                                if slain {
+                                    ui.colored_label(egui::Color32::from_rgb(200, 90, 70), "☠ necropsied");
+                                }
                                 if captured {
                                     ui.colored_label(egui::Color32::GOLD, "⛓ dissected");
                                 }
                             });
                             ui.label(bestiary_lore(species));
+                            if slain {
+                                let key = species.name().to_lowercase().replace(' ', "_");
+                                if let Some(d) = ods_sim::data::species().get(&key) {
+                                    ui.label(format!(
+                                        "Necropsy: {} TU · {} HP · armor {}/{}/{}",
+                                        d.tu, d.health, d.armor.0, d.armor.1, d.armor.2
+                                    ));
+                                }
+                            }
                             if captured {
                                 let parts: Vec<&str> = species
                                     .body_parts()

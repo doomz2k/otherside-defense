@@ -37,6 +37,8 @@ pub struct BattleReport {
     pub species_captured: Vec<ods_sim::units::Species>,
     /// Horrors witnessed per survivor (squad index, count) — sanity damage.
     pub horrors: Vec<(usize, u32)>,
+    /// Breeds the squad put down this battle (necropsy-tier codex).
+    pub species_slain: Vec<ods_sim::units::Species>,
     /// Atrocity sites the squad discovered (cleansed if the field was held).
     pub atrocities_found: u32,
 }
@@ -176,9 +178,13 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
 
     // Everything that walked the field goes in the field reports.
     let mut species_seen = Vec::new();
+    let mut species_slain = Vec::new();
     for u in battle.units.iter().skip(squad_len) {
         if !u.civilian && !species_seen.contains(&u.species) {
             species_seen.push(u.species);
+        }
+        if !u.alive && !u.civilian && !species_slain.contains(&u.species) {
+            species_slain.push(u.species);
         }
     }
 
@@ -208,6 +214,7 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
         species_seen,
         species_captured,
         horrors,
+        species_slain,
         atrocities_found: battle.atrocities.iter().filter(|(_, found)| *found).count() as u32,
     }
 }

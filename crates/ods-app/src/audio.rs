@@ -20,6 +20,8 @@ pub enum Sound {
     Defeat,
     /// Something on the edge of hearing, saying your name.
     Whisper,
+    /// Your own pulse, too loud: the squad is bleeding out.
+    Heartbeat,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -84,6 +86,7 @@ impl Audio {
             (Sound::Victory, synth_sting(true)),
             (Sound::Defeat, synth_sting(false)),
             (Sound::Whisper, synth_whisper()),
+            (Sound::Heartbeat, synth_heartbeat()),
         ];
         Some(Self {
             _stream: stream,
@@ -260,6 +263,25 @@ fn synth_whisper() -> Vec<f32> {
             low += (noise(i) - low) * 0.12;
             let syllable = 0.6 + 0.4 * (t * 9.0 * std::f32::consts::TAU).sin();
             low * syllable * env(i) * 0.4
+        })
+        .collect()
+}
+
+/// A double thump: lub-dub, low and close.
+fn synth_heartbeat() -> Vec<f32> {
+    let len = (RATE as f32 * 0.5) as usize;
+    (0..len)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            let beat = |at: f32, gain: f32| -> f32 {
+                let dt = t - at;
+                if !(0.0..=0.12).contains(&dt) {
+                    0.0
+                } else {
+                    (dt * 48.0 * std::f32::consts::TAU).sin() * (-dt * 30.0).exp() * gain
+                }
+            };
+            (beat(0.0, 0.5) + beat(0.22, 0.35)).clamp(-1.0, 1.0)
         })
         .collect()
 }

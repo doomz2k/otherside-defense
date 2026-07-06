@@ -21,10 +21,13 @@ pub enum Project {
     HeraldsConfession,
     /// The arch-demon's true name. Unlocks the final assault.
     NameOfTheEnemy,
+    /// Stitching what hell is made of onto what we are: prosthetics from
+    /// hellsteel, grafts from captured flesh. The price is paid in sleep.
+    FleshGrafting,
 }
 
 impl Project {
-    pub const ALL: [Project; 7] = [
+    pub const ALL: [Project; 8] = [
         Project::BlessedArms,
         Project::HellsteelPlate,
         Project::RiftAugury,
@@ -32,6 +35,7 @@ impl Project {
         Project::Interrogation,
         Project::HeraldsConfession,
         Project::NameOfTheEnemy,
+        Project::FleshGrafting,
     ];
 
     /// Total occultist-days required.
@@ -44,6 +48,7 @@ impl Project {
             Project::Interrogation => 80,
             Project::HeraldsConfession => 150,
             Project::NameOfTheEnemy => 250,
+            Project::FleshGrafting => 140,
         }
     }
 
@@ -51,6 +56,7 @@ impl Project {
     pub fn materials(self) -> (u32, u32) {
         match self {
             Project::HellfireLance => (10, 15),
+            Project::FleshGrafting => (0, 8),
             _ => (0, 0),
         }
     }
@@ -62,6 +68,7 @@ impl Project {
             Project::Interrogation => (1, 0),
             Project::HeraldsConfession => (0, 1),
             Project::NameOfTheEnemy => (0, 2),
+            Project::FleshGrafting => (1, 0),
         _ => (0, 0),
         }
     }
@@ -72,6 +79,7 @@ impl Project {
             Project::HellfireLance => Some(Project::BlessedArms),
             Project::HeraldsConfession => Some(Project::Interrogation),
             Project::NameOfTheEnemy => Some(Project::HeraldsConfession),
+            Project::FleshGrafting => Some(Project::Interrogation),
             _ => None,
         }
     }
@@ -85,6 +93,7 @@ impl Project {
             Project::Interrogation => "Interrogation",
             Project::HeraldsConfession => "The Herald's Confession",
             Project::NameOfTheEnemy => "The Name of the Enemy",
+            Project::FleshGrafting => "Flesh Grafting",
         }
     }
 }
@@ -128,14 +137,25 @@ pub enum ManufactureItem {
     TradeArms,
     /// Forge one Hellfire Lance for the armoury (needs the research).
     ForgeLance,
+    /// A hellsteel prosthetic: give a maimed soldier their limb back.
+    HellsteelLimb,
+    /// A living graft cut from captured demon flesh (needs the research).
+    /// Better than the limb it replaces — and it knows it.
+    FleshGraft,
+    /// Mount a slain breed as a trophy: the halls remember, the garrison
+    /// stands taller, the council pays for the spectacle.
+    MountTrophy,
 }
 
 impl ManufactureItem {
-    pub const ALL: [ManufactureItem; 4] = [
+    pub const ALL: [ManufactureItem; 7] = [
         ManufactureItem::HellfireCharges,
         ManufactureItem::FieldDressings,
         ManufactureItem::TradeArms,
         ManufactureItem::ForgeLance,
+        ManufactureItem::HellsteelLimb,
+        ManufactureItem::FleshGraft,
+        ManufactureItem::MountTrophy,
     ];
 
     /// Artificer-days of work.
@@ -145,6 +165,9 @@ impl ManufactureItem {
             ManufactureItem::FieldDressings => 30,
             ManufactureItem::TradeArms => 60,
             ManufactureItem::ForgeLance => 50,
+            ManufactureItem::HellsteelLimb => 45,
+            ManufactureItem::FleshGraft => 55,
+            ManufactureItem::MountTrophy => 25,
         }
     }
 
@@ -155,6 +178,9 @@ impl ManufactureItem {
             ManufactureItem::FieldDressings => (0, 0),
             ManufactureItem::TradeArms => (0, 5),
             ManufactureItem::ForgeLance => (2, 4),
+            ManufactureItem::HellsteelLimb => (0, 6),
+            ManufactureItem::FleshGraft => (3, 3),
+            ManufactureItem::MountTrophy => (0, 2),
         }
     }
 
@@ -164,6 +190,9 @@ impl ManufactureItem {
             ManufactureItem::FieldDressings => "Field dressings",
             ManufactureItem::TradeArms => "Trade arms",
             ManufactureItem::ForgeLance => "Forge a hellfire lance",
+            ManufactureItem::HellsteelLimb => "Cast a hellsteel limb",
+            ManufactureItem::FleshGraft => "Cut a flesh graft",
+            ManufactureItem::MountTrophy => "Mount a trophy",
         }
     }
 }

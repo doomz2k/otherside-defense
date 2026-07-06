@@ -345,7 +345,7 @@ impl Core {
                 }
                 if let Some(b) = self.battle.as_mut() {
                     let (w, h) = self.renderer.size();
-                    b.update_frame(dt, &mut self.renderer, w, h);
+                    b.update_frame(dt, &mut self.renderer, self.audio.as_ref(), w, h);
                     let vp = b.camera_vp(self.renderer.aspect());
                     // Night fights are lit low and flat.
                     let sun = if b.battle.vision_tiles < 14 {

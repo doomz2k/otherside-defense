@@ -50,6 +50,7 @@ pub struct BattleScreen {
     grenade_armed: bool,
     fx: Vec<Fx>,
     floaters: Vec<FloatText>,
+    heart_timer: f32,
     shake: f32,
     fx_clock: f32,
     /// Visual (lerped) feet positions per unit index — the glide.
@@ -81,6 +82,7 @@ impl BattleScreen {
             grenade_armed: false,
             fx: Vec::new(),
             floaters: Vec::new(),
+            heart_timer: 0.0,
             shake: 0.0,
             fx_clock: 0.0,
             visual: HashMap::new(),
@@ -412,6 +414,29 @@ impl BattleScreen {
             });
 
         self.draw_floaters(ctx, renderer.aspect());
+
+        // The HUD wears the squad's blood: dark red creeping in from the
+        // corners as the muster bleeds out.
+        let vitality = self.squad_vitality();
+        if vitality < 0.6 {
+            let screen = ctx.viewport_rect();
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Background,
+                egui::Id::new("blood-hud"),
+            ));
+            let soak = ((0.6 - vitality) / 0.6).clamp(0.0, 1.0);
+            let a = (soak * 110.0) as u8;
+            let color = egui::Color32::from_rgba_unmultiplied(110, 8, 8, a);
+            let r = 90.0 + 130.0 * soak;
+            for corner in [
+                screen.min,
+                egui::pos2(screen.max.x, screen.min.y),
+                egui::pos2(screen.min.x, screen.max.y),
+                screen.max,
+            ] {
+                painter.circle_filled(corner, r, color);
+            }
+        }
 
         // While a Prince holds one of yours, the world's edges bleed violet.
         let mind_held = self
@@ -813,8 +838,29 @@ impl BattleScreen {
         }
     }
 
+    /// The squad's remaining blood, 0..=1 (dead men hold none).
+    fn squad_vitality(&self) -> f32 {
+        let (mut have, mut max) = (0i32, 0i32);
+        for u in &self.battle.units {
+            if u.side == Side::Order && !u.civilian {
+                max += u.health_max;
+                if u.alive {
+                    have += u.health.max(0);
+                }
+            }
+        }
+        if max == 0 { 1.0 } else { have as f32 / max as f32 }
+    }
+
     /// Per-frame upkeep: hover intelligence, gliding figures, banner, fx.
-    pub fn update_frame(&mut self, dt: f32, renderer: &mut Renderer, width: f32, height: f32) {
+    pub fn update_frame(
+        &mut self,
+        dt: f32,
+        renderer: &mut Renderer,
+        audio: Option<&Audio>,
+        width: f32,
+        height: f32,
+    ) {
         // Hover: what tile is under the cursor, and what would a move cost?
         let (origin, dir) = self.camera.screen_ray(self.cursor.0, self.cursor.1, width, height);
         let hover = self.battle.world.raycast(origin, dir, 4000.0).map(|hit| {
@@ -868,6 +914,19 @@ impl BattleScreen {
             f.age += dt;
         }
         self.floaters.retain(|f| f.age < f.life);
+
+        // When the squad runs low on blood you hear your own.
+        if self.battle.winner.is_none() && self.squad_vitality() < 0.4 {
+            self.heart_timer -= dt;
+            if self.heart_timer <= 0.0 {
+                self.heart_timer = 1.15;
+                if let Some(a) = audio {
+                    a.play(Sound::Heartbeat);
+                }
+            }
+        } else {
+            self.heart_timer = 0.0;
+        }
 
         self.update_fx(dt, renderer);
     }

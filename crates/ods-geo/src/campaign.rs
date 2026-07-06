@@ -328,6 +328,15 @@ pub enum GeoEvent {
     SortieFought { region: Region, victory: bool, demons_slain: u32, dead: usize },
     /// The rift closed (or expired) before the squad could engage.
     SortieRecalled { region: Region },
+    /// Three days out, the augurs read it in the sky: a blood moon comes.
+    BloodMoonOmen { in_days: u32 },
+    /// The sky opens like a wound. Hell is generous and hungry at once.
+    BloodMoonRises,
+    BloodMoonSets,
+    /// A soldier wakes screaming — and sometimes the dream is a map.
+    NightTerror { name: String },
+    /// The dream WAS a map: an undetected rift, revealed in sleep.
+    DreamOfTheRift { region: Region },
     CampaignOver { outcome: CampaignOutcome },
 }
 
@@ -507,6 +516,24 @@ pub struct Campaign {
     /// brought home from a held field, and the living remember it.
     #[serde(default)]
     pub burial_honors: u32,
+    /// Prosthetics and grafts waiting in the infirmary stores.
+    #[serde(default)]
+    pub limb_stock: u32,
+    #[serde(default)]
+    pub graft_stock: u32,
+    /// Slain breeds mounted in the halls: bravery for the garrison, score
+    /// for the spectacle.
+    #[serde(default)]
+    pub trophies: u32,
+    /// Breeds the squads have put down (necropsy tier of the codex).
+    #[serde(default)]
+    pub codex_slain: std::collections::HashSet<ods_sim::units::Species>,
+    /// Days of blood moon remaining (None: the sky is honest tonight).
+    #[serde(default)]
+    pub blood_moon: Option<u32>,
+    /// Day of month the omen shows (0: no blood moon this month).
+    #[serde(default)]
+    omen_day: u32,
     /// Squads in the air (or camped at distant rifts).
     #[serde(default)]
     pub sorties: Vec<Sortie>,
@@ -560,6 +587,12 @@ impl Campaign {
             stats: CampaignStats::default(),
             reckoning_target: 0,
             burial_honors: 0,
+            limb_stock: 0,
+            graft_stock: 0,
+            trophies: 0,
+            codex_slain: std::collections::HashSet::new(),
+            blood_moon: None,
+            omen_day: 0,
             sorties: Vec::new(),
             month_score: 0,
             bad_months: 0,
@@ -785,6 +818,21 @@ impl Campaign {
         {
             return Err(GeoError::PrerequisiteMissing);
         }
+        if matches!(item, ManufactureItem::HellsteelLimb | ManufactureItem::FleshGraft)
+            && !self.research.is_complete(Project::FleshGrafting)
+        {
+            return Err(GeoError::PrerequisiteMissing);
+        }
+        // A graft is cut from something; a trophy is mounted from something.
+        if item == ManufactureItem::FleshGraft {
+            if self.prisoners.grunts == 0 {
+                return Err(GeoError::NoPrisoners);
+            }
+            self.prisoners.grunts -= 1;
+        }
+        if item == ManufactureItem::MountTrophy && self.codex_slain.is_empty() {
+            return Err(GeoError::NoMaterials);
+        }
         let (brim, steel) = item.materials();
         if self.brimstone < brim || self.hellsteel < steel {
             return Err(GeoError::NoMaterials);
@@ -973,16 +1021,54 @@ impl Campaign {
         self.sorties.retain(|s| s.rift_id != rift_id);
     }
 
-    /// What the field teams drag back from a banished incursion.
+    /// What the field teams drag back from a banished incursion. Under a
+    /// blood moon the veil bleeds salvage: everything comes back double.
     fn collect_salvage(&mut self, kind: RiftKind, demons_slain: u32) {
-        self.hellsteel += demons_slain;
-        self.brimstone += match kind {
-            RiftKind::Scouting => 1,
-            RiftKind::Harvest => 4,
-            RiftKind::Terror => 2,
-            RiftKind::Infiltration => 2,
-            RiftKind::NestBuilding => 3,
-        };
+        let mult = if self.blood_moon.is_some() { 2 } else { 1 };
+        self.hellsteel += demons_slain * mult;
+        self.brimstone += mult
+            * match kind {
+                RiftKind::Scouting => 1,
+                RiftKind::Harvest => 4,
+                RiftKind::Terror => 2,
+                RiftKind::Infiltration => 2,
+                RiftKind::NestBuilding => 3,
+            };
+    }
+
+    /// Fit a hellsteel limb or a flesh graft to a maimed soldier: the lost
+    /// part comes off the roster and its stat penalty is given back. Grafts
+    /// hand out a bonus on top — and take it out of the soldier's sleep.
+    pub fn fit_replacement(&mut self, soldier: usize, graft: bool) -> Result<(), GeoError> {
+        self.guard_over()?;
+        let stock = if graft { &mut self.graft_stock } else { &mut self.limb_stock };
+        if *stock == 0 {
+            return Err(GeoError::NoMaterials);
+        }
+        let s = self.soldiers.get_mut(soldier).ok_or(GeoError::BadAssignment)?;
+        if s.lost_parts.is_empty() {
+            return Err(GeoError::BadAssignment);
+        }
+        *stock -= 1;
+        let part = s.lost_parts.remove(0);
+        // Give back what apply_loss took.
+        use ods_sim::body::BodyPart as P;
+        match part {
+            P::LeftArm | P::RightArm | P::Weapon => s.stats.accuracy += 12,
+            P::LeftLeg | P::RightLeg => s.stats.tu += 8,
+            _ => s.stats.health += 5,
+        }
+        if graft {
+            // Living flesh outperforms what it replaced — and whispers.
+            match part {
+                P::LeftArm | P::RightArm | P::Weapon => s.stats.accuracy += 5,
+                P::LeftLeg | P::RightLeg => s.stats.tu += 5,
+                _ => s.stats.health += 3,
+            }
+            s.sanity = (s.sanity - 15).max(0);
+        }
+        s.recovery_days += 6;
+        Ok(())
     }
 
     /// Storm an established nest, AI-resolved.
@@ -1052,6 +1138,11 @@ impl Campaign {
                 (7, 10, false) // fewer bodies, worse breeds — a Prince waits
             }
         };
+        // Under the blood moon, everything that comes through comes bigger.
+        let strength = if self.blood_moon.is_some() { strength + 2 } else { strength };
+        // A garrison drilling under mounted trophies does not flinch easily
+        // (applied to the squad below, after the battle is built).
+        let trophy_bravery = (self.trophies as i32 * 2).min(10);
 
         // A sortie's squad is whoever flew out; otherwise muster the fit
         // (for Reckonings, only those stationed at the struck house).
@@ -1197,6 +1288,13 @@ impl Campaign {
                 u.bravery = (u.bravery + 4).min(95);
             }
         }
+        // The trophy hall's lesson: these things die.
+        if trophy_bravery > 0 {
+            for i in 0..squad_idx.len() {
+                let u = &mut battle.units[i];
+                u.bravery = (u.bravery + trophy_bravery).min(95);
+            }
+        }
         Ok((battle, MissionToken { kind, squad_idx, base }))
     }
 
@@ -1224,6 +1322,7 @@ impl Campaign {
 
         // The codex learns what the squads met — and what they took alive.
         self.codex_seen.extend(report.species_seen.iter().copied());
+        self.codex_slain.extend(report.species_slain.iter().copied());
         if report.victory {
             self.codex_captured.extend(report.species_captured.iter().copied());
         }
@@ -1522,6 +1621,9 @@ impl Campaign {
                     ManufactureItem::FieldDressings => self.dressing_stock += 4,
                     ManufactureItem::TradeArms => self.funds += 45,
                     ManufactureItem::ForgeLance => self.lance_stock += 1,
+                    ManufactureItem::HellsteelLimb => self.limb_stock += 1,
+                    ManufactureItem::FleshGraft => self.graft_stock += 1,
+                    ManufactureItem::MountTrophy => self.trophies += 1,
                 }
                 events.push(GeoEvent::ManufactureComplete { item: done });
             }
@@ -1549,6 +1651,70 @@ impl Campaign {
                 s.sanity = (s.sanity + mend).min(100);
                 if was_broken && !s.is_broken() {
                     events.push(GeoEvent::SoldierRecovered { name: s.name.clone() });
+                }
+            }
+        }
+
+        // The blood moon: three days of a wounded sky. Announced by omen,
+        // ticked daily, mourned by nobody when it sets.
+        match &mut self.blood_moon {
+            Some(days) => {
+                *days -= 1;
+                if *days == 0 {
+                    self.blood_moon = None;
+                    events.push(GeoEvent::BloodMoonSets);
+                } else if self.rng.roll(100) < 40 {
+                    // The veil bleeds: an unscheduled rift tears open.
+                    let region = Region::ALL[self.rng.roll(Region::ALL.len() as u32) as usize];
+                    let (lat0, lat1, lon0, lon1) = region.bounds();
+                    let lat = lat0 + (lat1 - lat0) * self.rng.roll(1000) as f32 / 1000.0;
+                    let lon = lon0 + (lon1 - lon0) * self.rng.roll(1000) as f32 / 1000.0;
+                    let kind = RiftKind::Harvest;
+                    self.rifts.push(Rift {
+                        id: self.next_id,
+                        kind,
+                        region,
+                        lat,
+                        lon,
+                        days_left: kind.lifetime(),
+                        days_open: 0,
+                        detected: false,
+                    });
+                    self.next_id += 1;
+                }
+            }
+            None => {
+                if self.day == self.omen_day {
+                    events.push(GeoEvent::BloodMoonOmen { in_days: 3 });
+                } else if self.omen_day > 0 && self.day == self.omen_day + 3 {
+                    self.blood_moon = Some(3);
+                    events.push(GeoEvent::BloodMoonRises);
+                }
+            }
+        }
+
+        // Night terrors: the worn-thin wake screaming. Sometimes the dream
+        // is a map — an undetected rift, seen from the wrong side.
+        for i in 0..self.soldiers.len() {
+            let haunted = self.soldiers[i].sanity < 60 || self.soldiers[i].phobia.is_some();
+            if haunted && self.rng.roll(100) < 3 {
+                self.soldiers[i].recovery_days += 1;
+                events.push(GeoEvent::NightTerror { name: self.soldiers[i].name.clone() });
+                if self.rng.roll(100) < 30 {
+                    if let Some(r) = self.rifts.iter_mut().find(|r| !r.detected) {
+                        r.detected = true;
+                        let region = r.region;
+                        events.push(GeoEvent::DreamOfTheRift { region });
+                        events.push(GeoEvent::RiftDetected {
+                            id: r.id,
+                            kind: r.kind,
+                            region,
+                            days_left: r.days_left,
+                        });
+                    } else {
+                        let s = &mut self.soldiers[i];
+                        s.sanity = (s.sanity - 3).max(0);
+                    }
                 }
             }
         }
@@ -1794,6 +1960,14 @@ impl Campaign {
                 self.month_plan.push(PlannedRift { day, kind: RiftKind::Terror, region });
                 events.push(GeoEvent::RegionPanicking { region, panic });
             }
+        }
+
+        // One month in five, the sky goes wrong.
+        self.omen_day = if self.rng.roll(100) < 20 { 3 + self.rng.roll(20) } else { 0 };
+
+        // Council inspectors tour the trophy hall and leave impressed.
+        if self.trophies > 0 {
+            self.month_score += (self.trophies as i64 * 2).min(10);
         }
 
         // The reliquaries reprice salvage with the fortunes of war.
@@ -2807,5 +2981,79 @@ mod tests {
         // Phobias are a chance, not a promise — but across a dozen bloody
         // missions at sub-40 sanity, someone should have cracked.
         assert!(phobia_seen || c.soldiers.iter().all(|s| s.sanity > 40));
+    }
+
+    #[test]
+    fn limbs_and_grafts_restore_the_maimed() {
+        let mut c = Campaign::new(60);
+        c.soldiers[0].lost_parts.push(ods_sim::body::BodyPart::RightArm);
+        let acc = c.soldiers[0].stats.accuracy;
+
+        // No stock, no miracle.
+        assert_eq!(c.fit_replacement(0, false), Err(GeoError::NoMaterials));
+        c.limb_stock = 1;
+        c.fit_replacement(0, false).unwrap();
+        assert!(c.soldiers[0].lost_parts.is_empty());
+        assert_eq!(c.soldiers[0].stats.accuracy, acc + 12, "the loss is given back");
+        assert_eq!(c.limb_stock, 0);
+
+        // A graft gives more and takes sleep.
+        c.soldiers[1].lost_parts.push(ods_sim::body::BodyPart::LeftLeg);
+        let (tu, sanity) = (c.soldiers[1].stats.tu, c.soldiers[1].sanity);
+        c.graft_stock = 1;
+        c.fit_replacement(1, true).unwrap();
+        assert_eq!(c.soldiers[1].stats.tu, tu + 13);
+        assert_eq!(c.soldiers[1].sanity, sanity - 15);
+
+        // The whole don't queue for the saw (stock present, no loss).
+        c.limb_stock = 1;
+        assert_eq!(c.fit_replacement(2, false), Err(GeoError::BadAssignment));
+    }
+
+    #[test]
+    fn grafting_demands_research_and_trophies_demand_kills() {
+        let mut c = Campaign::new(61);
+        c.hellsteel = 50;
+        c.brimstone = 50;
+        c.bases[0].start_build(Facility::Workshop, 4, 4);
+        for _ in 0..Facility::Workshop.build_days() {
+            c.advance_day();
+        }
+        assert_eq!(
+            c.start_manufacture(ManufactureItem::HellsteelLimb),
+            Err(GeoError::PrerequisiteMissing)
+        );
+        assert_eq!(
+            c.start_manufacture(ManufactureItem::MountTrophy),
+            Err(GeoError::NoMaterials),
+            "nothing slain, nothing mounted"
+        );
+        c.research.completed.insert(Project::FleshGrafting);
+        c.codex_slain.insert(ods_sim::units::Species::Imp);
+        assert!(c.start_manufacture(ManufactureItem::HellsteelLimb).is_ok());
+    }
+
+    #[test]
+    fn the_blood_moon_rises_and_sets() {
+        let mut c = Campaign::new(62);
+        c.month_plan.clear();
+        c.rifts.clear();
+        c.omen_day = c.day; // force the omen today
+        let events = c.advance_day();
+        assert!(events.iter().any(|e| matches!(e, GeoEvent::BloodMoonOmen { .. })));
+        let mut rose = false;
+        let mut set = false;
+        for _ in 0..8 {
+            for e in c.advance_day() {
+                match e {
+                    GeoEvent::BloodMoonRises => rose = true,
+                    GeoEvent::BloodMoonSets => set = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(rose, "the omen keeps its promise");
+        assert!(set, "and it passes");
+        assert!(c.blood_moon.is_none());
     }
 }

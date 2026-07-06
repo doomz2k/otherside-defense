@@ -91,6 +91,21 @@ pub fn narrate(c: &Campaign, event: &GeoEvent) -> String {
             "{stamp} the rift in {} closed before the squad landed — turning for home",
             region.name()
         ),
+        E::BloodMoonOmen { in_days } => format!(
+            "{stamp} the augurs read the sky and go quiet: a BLOOD MOON in {in_days} days"
+        ),
+        E::BloodMoonRises => format!(
+            "{stamp} ### THE BLOOD MOON RISES — the veil bleeds, the packs come stronger, \
+             and the salvage comes double ###"
+        ),
+        E::BloodMoonSets => format!("{stamp} the blood moon sets. The sky pretends nothing happened"),
+        E::NightTerror { name } => {
+            format!("{stamp} {name} wakes screaming; the ward-candles are lit until dawn")
+        }
+        E::DreamOfTheRift { region } => format!(
+            "{stamp} ...but the dream was a MAP: an unseen rift in {}, revealed in sleep",
+            region.name()
+        ),
         E::CampaignOver { outcome } => match outcome {
             ods_geo::CampaignOutcome::Victory => {
                 format!("{stamp} ### THE NAME IS BROKEN — THE ORDER PREVAILS ###")

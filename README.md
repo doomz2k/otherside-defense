@@ -75,6 +75,34 @@ All weapon and species numbers live in RON tables
 (`crates/ods-sim/data/*.ron`), embedded at build time and overridable by
 dropping edited copies in `./data/` next to the executable — the modding hook.
 
+## The horror of it
+
+This is not a clean war. A crippled limb struck again is **severed** — gone
+from the figure, gone from the roster, permanent until the workshop casts a
+hellsteel limb or cuts a **flesh graft** from captured demon flesh (better
+than what it replaces, and it costs the wearer sleep). Overkill **gibs**;
+blood and viscera stain the voxel ground for the whole battle; corpses
+persist — carry your dead home for burial honors, or watch demons *eat*
+them and Takers raise them back up. Demon claws seed **rot** in the wounds
+they leave: amputate in the field [X] or watch the name on the roster stand
+up on the wrong side.
+
+Hell glows. Summoning pentagrams scribe themselves in burning sigil-light
+and deliver reinforcements unless you foul the circle; the obelisk wears
+rune script and veins the ground with creeping corruption that whispers at
+whoever stands on it; your soldiers answer with chalked **ward sigils** [R]
+that burn whatever crosses them. At night the unseen pack is a field of
+glowing eyes, the Taker is only footprints and noises until it's at arm's
+length, and possession is a turning halo, a violet vignette, and a whisper.
+
+Morale resets every battle. **Sanity doesn't.** Gibs, Takings, and the
+gibbet-post atrocities on terror maps erode it mission after mission;
+broken soldiers are unfit until the **Chapel** talks them back, and minds
+pushed too far crack into permanent phobias. Once a month, sometimes, the
+augurs go quiet three days ahead of a **blood moon** — stronger packs,
+double salvage, and a sky like a wound. The worn-thin wake screaming; some
+of those dreams are maps.
+
 ## Where you fight, and how you get there
 
 Rift battlemaps are procedurally generated from the rift's **biome** — the
