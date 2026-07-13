@@ -11,8 +11,8 @@ use ods_render::LitVertex;
 
 pub const GLOBE_RADIUS: f32 = 200.0;
 
-const STACKS: usize = 96;
-const SLICES: usize = 192;
+const STACKS: usize = 192;
+const SLICES: usize = 384;
 
 const OCEAN: [f32; 3] = [0.05, 0.11, 0.24];
 const LAND: [f32; 3] = [0.23, 0.33, 0.17];
@@ -61,6 +61,25 @@ fn is_land(lat: f32, lon: f32) -> bool {
     let row = row.min(LANDMASK.len() - 1);
     let col = col.min(63);
     LANDMASK[row].as_bytes()[col] == b'#'
+}
+
+/// The landmask is coarse; the mesh no longer is. Perturb the sample point
+/// with position-hashed jitter so coastlines break into ragged, detailed
+/// pixel-coast instead of mask-cell staircases.
+fn is_land_detailed(lat: f32, lon: f32) -> bool {
+    let h = |a: f32, b: f32, k: u32| -> f32 {
+        let mut x = (a * 91.7) as i32 as u32;
+        x = x
+            .wrapping_mul(2654435761)
+            .wrapping_add((b * 73.3) as i32 as u32)
+            .wrapping_mul(1274126177)
+            .wrapping_add(k);
+        x ^= x >> 15;
+        ((x.wrapping_mul(2246822519) >> 9) & 1023) as f32 / 1023.0 - 0.5
+    };
+    let jlat = h(lat, lon, 1) * 2.4;
+    let jlon = h(lat, lon, 2) * 2.4;
+    is_land((lat + jlat).clamp(-90.0, 90.0), lon + jlon)
 }
 
 /// Rough box-partition of the world into our eight council regions.
@@ -118,7 +137,7 @@ pub fn build_globe(selected: Option<Region>) -> (Vec<LitVertex>, Vec<u32>) {
             let pos = latlon_to_pos(lat, lon, GLOBE_RADIUS);
             let normal = pos.normalize();
 
-            let land = is_land(lat, lon);
+            let land = is_land_detailed(lat, lon);
             let mut color = if land { LAND } else { OCEAN };
             // Polar ice creeps over everything near the caps.
             let ice = ((lat.abs() - 62.0) / 12.0).clamp(0.0, 1.0);

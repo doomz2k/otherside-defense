@@ -100,7 +100,7 @@ impl OrbitCamera {
     }
 
     pub fn zoom(&mut self, factor: f32) {
-        self.distance = (self.distance * factor).clamp(60.0, 1500.0);
+        self.distance = (self.distance * factor).clamp(60.0, 3200.0);
     }
 
     /// Pan the target in the ground plane, relative to the view direction.

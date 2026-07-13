@@ -4,7 +4,7 @@
 use glam::IVec3;
 use ods_voxel::{Voxel, VoxelWorld};
 
-use crate::TILE_VOXELS;
+use crate::{TILE_VOXELS, VS};
 use crate::battle::Battle;
 use crate::units::Unit;
 
@@ -12,9 +12,9 @@ pub const MAP_TILES: IVec3 = IVec3::new(24, 24, 2);
 
 /// Ground fills voxels z 0..4 (the tile's foot band), so shallow craters
 /// don't punch through to the void.
-pub const GROUND_TOP: i32 = 4;
+pub const GROUND_TOP: i32 = TILE_VOXELS / 4;
 /// Walls rise from the ground to torso/head height.
-const WALL_TOP: i32 = 14;
+const WALL_TOP: i32 = TILE_VOXELS * 7 / 8;
 
 pub const MAT_GROUND: Voxel = Voxel(1);
 pub const MAT_WALL: Voxel = Voxel(2);
@@ -41,6 +41,10 @@ pub const MAT_FOLIAGE: Voxel = Voxel(12);
 pub const MAT_TIMBER: Voxel = Voxel(13);
 /// Spilled blood, dried into the ground.
 pub const MAT_BLOOD: Voxel = Voxel(14);
+/// Ground stipple: grass tufts, wildflowers, frost glints.
+pub const MAT_TUFT: Voxel = Voxel(19);
+pub const MAT_FLOWER: Voxel = Voxel(20);
+pub const MAT_GLINT: Voxel = Voxel(21);
 /// Viscera. What overkill leaves.
 pub const MAT_GORE: Voxel = Voxel(15);
 /// Glowing sigil-crimson: summoning circles, the obelisk's runes. EMISSIVE.
@@ -84,6 +88,7 @@ pub fn skirmish(seed: u64) -> Battle {
         IVec3::new(MAP_TILES.x * TILE_VOXELS, MAP_TILES.y * TILE_VOXELS, GROUND_TOP),
         MAT_GROUND,
     );
+    stipple_ground(&mut world, seed, Biome::Temperate);
 
     // The chapel: a walled rectangle with a doorway on each long side.
     // Tile ring at x 9..=14, y 8..=15.
@@ -109,8 +114,8 @@ pub fn skirmish(seed: u64) -> Battle {
     for (tx, ty) in [(3, 8), (4, 15), (11, 3), (12, 20), (17, 7), (18, 16), (8, 11)] {
         let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
         world.fill_box(
-            o + IVec3::new(3, 3, GROUND_TOP),
-            o + IVec3::new(13, 13, GROUND_TOP + 4),
+            o + IVec3::new(3 * VS, 3 * VS, GROUND_TOP),
+            o + IVec3::new(13 * VS, 13 * VS, GROUND_TOP + 4 * VS),
             MAT_RUBBLE,
         );
     }
@@ -237,6 +242,7 @@ pub fn incursion_mission(
         IVec3::new(MAP_TILES.x * TILE_VOXELS, MAP_TILES.y * TILE_VOXELS, GROUND_TOP),
         ground,
     );
+    stipple_ground(&mut world, seed, biome);
     match seed % 3 {
         0 => {
             // The chapel yard (the original) — now with a loft: an upper
@@ -272,7 +278,7 @@ pub fn incursion_mission(
             let stair = IVec3::new(10, 9, 0) * TILE_VOXELS;
             world.fill_box(
                 stair + IVec3::new(0, 0, GROUND_TOP),
-                stair + IVec3::new(TILE_VOXELS, TILE_VOXELS, 10),
+                stair + IVec3::new(TILE_VOXELS, TILE_VOXELS, 10 * VS),
                 MAT_RUBBLE,
             );
             // Upper walls with window gaps on alternating ring tiles.
@@ -286,14 +292,14 @@ pub fn incursion_mission(
                     let top = TILE_VOXELS + GROUND_TOP;
                     world.fill_box(
                         o + IVec3::new(0, 0, top),
-                        o + IVec3::new(TILE_VOXELS, TILE_VOXELS, top + 10),
+                        o + IVec3::new(TILE_VOXELS, TILE_VOXELS, top + 10 * VS),
                         MAT_WALL,
                     );
                     // A shutter gap: waist-to-head open on every other tile.
                     if (tx + ty) % 2 == 0 {
                         world.fill_box(
-                            o + IVec3::new(2, 2, top + 5),
-                            o + IVec3::new(14, 14, top + 10),
+                            o + IVec3::new(2 * VS, 2 * VS, top + 5 * VS),
+                            o + IVec3::new(14 * VS, 14 * VS, top + 10 * VS),
                             Voxel::EMPTY,
                         );
                     }
@@ -323,8 +329,8 @@ pub fn incursion_mission(
                 for tx in [7, 8, 10, 11, 13, 14] {
                     let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
                     world.fill_box(
-                        o + IVec3::new(2, 2, GROUND_TOP),
-                        o + IVec3::new(14, 14, 10),
+                        o + IVec3::new(2 * VS, 2 * VS, GROUND_TOP),
+                        o + IVec3::new(14 * VS, 14 * VS, 10 * VS),
                         MAT_RUBBLE,
                     );
                 }
@@ -340,8 +346,8 @@ pub fn incursion_mission(
     for (tx, ty) in [(8, 7), (13, 16)] {
         let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
         world.fill_box(
-            o + IVec3::new(5, 5, GROUND_TOP),
-            o + IVec3::new(11, 11, GROUND_TOP + 7),
+            o + IVec3::new(5 * VS, 5 * VS, GROUND_TOP),
+            o + IVec3::new(11 * VS, 11 * VS, GROUND_TOP + 7 * VS),
             MAT_CASK,
         );
         hazard_casks.push(IVec3::new(tx, ty, 0));
@@ -356,8 +362,8 @@ pub fn incursion_mission(
     );
     for (px, py) in [(16, 3), (19, 3), (16, 5), (19, 5)] {
         world.fill_box(
-            IVec3::new(px * TILE_VOXELS + 4, py * TILE_VOXELS + 4, GROUND_TOP),
-            IVec3::new(px * TILE_VOXELS + 12, py * TILE_VOXELS + 12, TILE_VOXELS),
+            IVec3::new(px * TILE_VOXELS + 4 * VS, py * TILE_VOXELS + 4 * VS, GROUND_TOP),
+            IVec3::new(px * TILE_VOXELS + 12 * VS, py * TILE_VOXELS + 12 * VS, TILE_VOXELS),
             MAT_WALL,
         );
     }
@@ -365,13 +371,13 @@ pub fn incursion_mission(
     let mound = IVec3::new(15, 4, 0) * TILE_VOXELS;
     world.fill_box(
         mound + IVec3::new(0, 0, GROUND_TOP),
-        mound + IVec3::new(TILE_VOXELS, TILE_VOXELS, 10),
+        mound + IVec3::new(TILE_VOXELS, TILE_VOXELS, 10 * VS),
         MAT_RUBBLE,
     );
 
     // The rift obelisk, deep in demon territory (clear of spawn tiles).
     let obelisk_min = IVec3::new(22 * TILE_VOXELS, 11 * TILE_VOXELS, GROUND_TOP);
-    let obelisk_max = IVec3::new(23 * TILE_VOXELS, 13 * TILE_VOXELS, 24);
+    let obelisk_max = IVec3::new(23 * TILE_VOXELS, 13 * TILE_VOXELS, 24 * VS);
     world.fill_box(obelisk_min, obelisk_max, MAT_OBELISK);
     carve_runes(&mut world, obelisk_min, obelisk_max);
 
@@ -401,7 +407,7 @@ pub fn incursion_mission(
         let o = tile * TILE_VOXELS;
         world.fill_box(
             o + IVec3::new(0, 0, GROUND_TOP),
-            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, 10),
+            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, 10 * VS),
             mat,
         );
     };
@@ -410,7 +416,7 @@ pub fn incursion_mission(
         let o = tile * TILE_VOXELS;
         world.fill_box(
             o + IVec3::new(0, 0, GROUND_TOP),
-            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, top),
+            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, top * VS),
             mat,
         );
     };
@@ -471,8 +477,8 @@ pub fn incursion_mission(
                 let Some(t) = roll_open(&world, &mut rng) else { continue };
                 let o = t * TILE_VOXELS;
                 world.fill_box(
-                    o + IVec3::new(6, 6, GROUND_TOP),
-                    o + IVec3::new(10, 10, TILE_VOXELS),
+                    o + IVec3::new(6 * VS, 6 * VS, GROUND_TOP),
+                    o + IVec3::new(10 * VS, 10 * VS, TILE_VOXELS),
                     MAT_TIMBER,
                 );
                 for cy in -1..=1 {
@@ -481,8 +487,8 @@ pub fn incursion_mission(
                         if (0..MAP_TILES.x).contains(&c.x) && (0..MAP_TILES.y).contains(&c.y) {
                             let co = c * TILE_VOXELS;
                             world.fill_box(
-                                co + IVec3::new(2, 2, TILE_VOXELS),
-                                co + IVec3::new(14, 14, TILE_VOXELS + GROUND_TOP),
+                                co + IVec3::new(2 * VS, 2 * VS, TILE_VOXELS),
+                                co + IVec3::new(14 * VS, 14 * VS, TILE_VOXELS + GROUND_TOP),
                                 MAT_FOLIAGE,
                             );
                         }
@@ -532,8 +538,8 @@ pub fn incursion_mission(
     for (tx, ty) in [(9, 11), (14, 12)] {
         let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
         world.fill_box(
-            o + IVec3::new(6, 0, GROUND_TOP),
-            o + IVec3::new(10, TILE_VOXELS, 14),
+            o + IVec3::new(6 * VS, 0, GROUND_TOP),
+            o + IVec3::new(10 * VS, TILE_VOXELS, 14 * VS),
             MAT_DOOR,
         );
         door_tiles.push(IVec3::new(tx, ty, 0));
@@ -559,22 +565,22 @@ pub fn incursion_mission(
                 let o = t * TILE_VOXELS;
                 // The post.
                 world.fill_box(
-                    o + IVec3::new(7, 7, GROUND_TOP),
-                    o + IVec3::new(9, 9, GROUND_TOP + 12),
+                    o + IVec3::new(7 * VS, 7 * VS, GROUND_TOP),
+                    o + IVec3::new(9 * VS, 9 * VS, GROUND_TOP + 12 * VS),
                     MAT_TIMBER,
                 );
                 // What hangs from it.
                 world.fill_box(
-                    o + IVec3::new(6, 6, GROUND_TOP + 6),
-                    o + IVec3::new(10, 10, GROUND_TOP + 9),
+                    o + IVec3::new(6 * VS, 6 * VS, GROUND_TOP + 6 * VS),
+                    o + IVec3::new(10 * VS, 10 * VS, GROUND_TOP + 9 * VS),
                     MAT_GORE,
                 );
                 // The ground around it, painted and scrawled.
                 for (dx, dy) in [(3, 4), (11, 5), (5, 11), (12, 12), (8, 3), (4, 8)] {
-                    world.set_voxel(o + IVec3::new(dx, dy, GROUND_TOP - 1), MAT_BLOOD);
+                    world.set_voxel(o + IVec3::new(dx * VS, dy * VS, GROUND_TOP - 1), MAT_BLOOD);
                 }
                 for (dx, dy) in [(2, 2), (13, 2), (2, 13), (13, 13)] {
-                    world.set_voxel(o + IVec3::new(dx, dy, GROUND_TOP - 1), MAT_SIGIL);
+                    world.set_voxel(o + IVec3::new(dx * VS, dy * VS, GROUND_TOP - 1), MAT_SIGIL);
                 }
                 atrocity_tiles.push(t);
                 break;
@@ -643,6 +649,48 @@ pub fn incursion_mission(
     battle
 }
 
+/// The 1994 ground texture, in voxels: every tile gets a seeded scatter of
+/// surface specks — tufts and wildflowers on grass, scree on sand, frost
+/// glints on snow — set INTO the ground surface so walkability never moves.
+fn stipple_ground(world: &mut VoxelWorld, seed: u64, biome: Biome) {
+    let hash = |x: i32, y: i32, k: u32| -> u32 {
+        let mut h = (seed as u32)
+            .wrapping_mul(747796405)
+            .wrapping_add(x as u32)
+            .wrapping_mul(2654435761)
+            .wrapping_add(y as u32)
+            .wrapping_mul(1274126177)
+            .wrapping_add(k);
+        h ^= h >> 15;
+        h.wrapping_mul(2246822519) >> 8
+    };
+    // (per-tile speck count, primary, accent, accent frequency)
+    let (count, primary, accent, accent_every) = match biome {
+        Biome::Temperate => (10, MAT_TUFT, MAT_FLOWER, 6),
+        Biome::Jungle => (14, MAT_TUFT, MAT_FLOWER, 9),
+        Biome::Desert => (6, MAT_RUBBLE, MAT_TIMBER, 8),
+        Biome::Tundra => (6, MAT_GLINT, MAT_RUBBLE, 7),
+    };
+    for ty in 0..MAP_TILES.y {
+        for tx in 0..MAP_TILES.x {
+            let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
+            for k in 0..count {
+                let hx = (hash(tx, ty, k * 3) % TILE_VOXELS as u32) as i32;
+                let hy = (hash(tx, ty, k * 3 + 1) % TILE_VOXELS as u32) as i32;
+                let p = o + IVec3::new(hx, hy, GROUND_TOP - 1);
+                if world.voxel(p).is_solid() {
+                    let mat = if hash(tx, ty, k * 3 + 2) % accent_every == 0 {
+                        accent
+                    } else {
+                        primary
+                    };
+                    world.set_voxel(p, mat);
+                }
+            }
+        }
+    }
+}
+
 /// The nearest walkable tile to an anchor (spiral out to radius 2).
 fn nearest_walkable(battle: &Battle, anchor: IVec3) -> Option<IVec3> {
     for r in 0..=2 {
@@ -667,14 +715,14 @@ pub fn nest_map(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32, strength: 
     // Solid flesh, then gnaw the warren out of it.
     world.fill_box(
         IVec3::new(0, 0, GROUND_TOP),
-        IVec3::new(MAP_TILES.x * TILE_VOXELS, MAP_TILES.y * TILE_VOXELS, 14),
+        IVec3::new(MAP_TILES.x * TILE_VOXELS, MAP_TILES.y * TILE_VOXELS, 14 * VS),
         MAT_FLESH,
     );
     let carve_tile = |world: &mut VoxelWorld, tx: i32, ty: i32| {
         let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
         world.fill_box(
             o + IVec3::new(0, 0, GROUND_TOP),
-            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, 14),
+            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, 14 * VS),
             Voxel::EMPTY,
         );
     };
@@ -706,7 +754,7 @@ pub fn nest_map(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32, strength: 
     }
     // The nest-heart, deep east.
     let heart_min = IVec3::new(21 * TILE_VOXELS, 11 * TILE_VOXELS, GROUND_TOP);
-    let heart_max = IVec3::new(22 * TILE_VOXELS, 13 * TILE_VOXELS, 20);
+    let heart_max = IVec3::new(22 * TILE_VOXELS, 13 * TILE_VOXELS, 20 * VS);
     for tx in 20..=22 {
         for ty in 10..=13 {
             carve_tile(&mut world, tx, ty);
@@ -745,8 +793,8 @@ pub fn otherside(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32, strength:
     for (tx, ty) in [(5, 10), (12, 4), (15, 12), (10, 16), (18, 9)] {
         let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
         world.fill_box(
-            o + IVec3::new(2, 2, GROUND_TOP),
-            o + IVec3::new(14, 14, 10),
+            o + IVec3::new(2 * VS, 2 * VS, GROUND_TOP),
+            o + IVec3::new(14 * VS, 14 * VS, 10 * VS),
             MAT_RUBBLE,
         );
     }
@@ -755,14 +803,14 @@ pub fn otherside(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32, strength:
     for &(tx, ty) in &pool_tiles {
         let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
         world.fill_box(
-            o + IVec3::new(1, 1, GROUND_TOP - 1),
-            o + IVec3::new(15, 15, GROUND_TOP),
+            o + IVec3::new(VS, VS, GROUND_TOP - 1),
+            o + IVec3::new(15 * VS, 15 * VS, GROUND_TOP),
             MAT_POOL,
         );
     }
     // The throne of the Name.
     let throne_min = IVec3::new(22 * TILE_VOXELS, 11 * TILE_VOXELS, GROUND_TOP);
-    let throne_max = IVec3::new(23 * TILE_VOXELS, 13 * TILE_VOXELS, 26);
+    let throne_max = IVec3::new(23 * TILE_VOXELS, 13 * TILE_VOXELS, 26 * VS);
     world.fill_box(throne_min, throne_max, MAT_FLESH);
     carve_runes(&mut world, throne_min, throne_max);
 
@@ -858,7 +906,7 @@ pub fn base_defense_fortified(
     );
     world.fill_box(
         IVec3::new(0, 0, GROUND_TOP),
-        IVec3::new(map_tiles.x * TILE_VOXELS, map_tiles.y * TILE_VOXELS, 14),
+        IVec3::new(map_tiles.x * TILE_VOXELS, map_tiles.y * TILE_VOXELS, 14 * VS),
         MAT_WALL,
     );
 
@@ -866,7 +914,7 @@ pub fn base_defense_fortified(
         let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
         world.fill_box(
             o + IVec3::new(0, 0, GROUND_TOP),
-            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, 14),
+            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, 14 * VS),
             Voxel::EMPTY,
         );
     };
@@ -965,7 +1013,7 @@ pub fn base_defense_fortified(
 /// Band an objective column with glowing rune rings: every few voxels of
 /// height, the column's outer shell burns sigil-crimson.
 fn carve_runes(world: &mut VoxelWorld, min: IVec3, max: IVec3) {
-    let mut z = min.z + 4;
+    let mut z = min.z + 4 * VS;
     while z < max.z - 1 {
         for y in min.y..max.y {
             for x in min.x..max.x {
@@ -976,7 +1024,7 @@ fn carve_runes(world: &mut VoxelWorld, min: IVec3, max: IVec3) {
                 }
             }
         }
-        z += 5;
+        z += 5 * VS;
     }
 }
 
@@ -1132,8 +1180,9 @@ mod tests {
         let mut all_events = Vec::new();
         for dy in 0..3 {
             let at = glam::IVec3::new(22, 11 + dy, 0);
-            let center = (at * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, 12.0);
-            b.world.carve_sphere(center, 14.0);
+            let center =
+                (at * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, 12.0) * VS as f32;
+            b.world.carve_sphere(center, 14.0 * VS as f32);
             let mut events = Vec::new();
             b.check_objective_for_test(&mut events);
             all_events.extend(events);
@@ -1316,7 +1365,8 @@ mod tests {
             for y in 1..23 {
                 for x in 5..20 {
                     let trunk = glam::IVec3::new(x, y, 0);
-                    let probe = trunk * crate::TILE_VOXELS + glam::IVec3::new(8, 8, GROUND_TOP + 1);
+                    let probe = trunk * crate::TILE_VOXELS
+                        + glam::IVec3::new(crate::TILE_VOXELS / 2, crate::TILE_VOXELS / 2, GROUND_TOP + 1);
                     if b.world.voxel(probe) == MAT_TIMBER {
                         assert!(!b.tiles.is_walkable(trunk), "trunks block");
                         let above = glam::IVec3::new(x, y, 1);

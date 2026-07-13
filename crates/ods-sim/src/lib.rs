@@ -20,7 +20,12 @@ use rand::SeedableRng;
 use rand_pcg::Pcg32;
 
 /// Side length of one gameplay tile, in voxels. One tile ≈ 1 m³.
-pub const TILE_VOXELS: i32 = 16;
+pub const TILE_VOXELS: i32 = 32;
+
+/// Voxel scale relative to the original 16-per-tile grid. Every legacy
+/// sub-tile measurement multiplies by this; detail generators use it to
+/// know how fine they may carve.
+pub const VS: i32 = TILE_VOXELS / 16;
 
 /// Voxel coordinate of a tile's minimum corner.
 pub fn tile_to_voxel_min(tile: IVec3) -> IVec3 {
@@ -75,10 +80,11 @@ mod tests {
 
     #[test]
     fn tile_mapping_handles_negatives() {
+        let t = TILE_VOXELS;
         assert_eq!(voxel_to_tile(IVec3::new(0, 0, 0)), IVec3::new(0, 0, 0));
-        assert_eq!(voxel_to_tile(IVec3::new(15, 15, 15)), IVec3::new(0, 0, 0));
-        assert_eq!(voxel_to_tile(IVec3::new(16, 0, 0)), IVec3::new(1, 0, 0));
-        assert_eq!(voxel_to_tile(IVec3::new(-1, -16, -17)), IVec3::new(-1, -1, -2));
-        assert_eq!(tile_to_voxel_min(IVec3::new(-1, 2, 0)), IVec3::new(-16, 32, 0));
+        assert_eq!(voxel_to_tile(IVec3::splat(t - 1)), IVec3::new(0, 0, 0));
+        assert_eq!(voxel_to_tile(IVec3::new(t, 0, 0)), IVec3::new(1, 0, 0));
+        assert_eq!(voxel_to_tile(IVec3::new(-1, -t, -t - 1)), IVec3::new(-1, -1, -2));
+        assert_eq!(tile_to_voxel_min(IVec3::new(-1, 2, 0)), IVec3::new(-t, 2 * t, 0));
     }
 }

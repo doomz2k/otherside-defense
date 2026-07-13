@@ -8,6 +8,10 @@ use ods_voxel::VoxelWorld;
 
 use crate::body::BodyPart;
 use crate::scenario::{MAT_BLOOD, MAT_GORE};
+use crate::VS;
+
+/// Center of a tile in voxels, as a float.
+const HALF_TILE: f32 = crate::TILE_VOXELS as f32 / 2.0;
 use crate::tiles::{PathMode, TileMap, step_cost};
 use crate::units::{FireMode, Side, Species, Unit, UnitId};
 use crate::{SimRng, TILE_VOXELS};
@@ -17,8 +21,8 @@ pub const VISION_TILES: i32 = 14;
 
 /// Eye and chest heights in voxels above a tile's minimum corner (assumes
 /// floors sit in the tile's lower quarter, which map generation guarantees).
-const EYE_Z: f32 = 13.0;
-const CHEST_Z: f32 = 9.0;
+const EYE_Z: f32 = 13.0 * VS as f32;
+const CHEST_Z: f32 = 9.0 * VS as f32;
 
 /// Hellfire charge (grenade) parameters.
 pub const GRENADE_POWER: i32 = 40;
@@ -42,7 +46,7 @@ const WARD_BURN: i32 = 8;
 const INFECTION_TURNS: u32 = 4;
 pub const GRENADE_RANGE_TILES: i32 = 10;
 pub const GRENADE_COST_PCT: i32 = 45;
-pub const GRENADE_CARVE_RADIUS: f32 = 7.0;
+pub const GRENADE_CARVE_RADIUS: f32 = 7.0 * VS as f32;
 /// Blast damages units within this many tiles (Chebyshev) of the impact.
 pub const BLAST_TILES: i32 = 2;
 /// Field dressing: flat TU cost, wounds staunched, health restored.
@@ -419,13 +423,14 @@ impl Battle {
         let o = tile * TILE_VOXELS;
         let z = crate::scenario::GROUND_TOP - 1;
         let c = TILE_VOXELS / 2;
-        let r2 = 36; // radius 6
+        let r2 = 36 * VS * VS; // radius 6 (legacy voxels), scaled
         for y in 0..TILE_VOXELS {
             for x in 0..TILE_VOXELS {
                 let (dx, dy) = (x - c, y - c);
                 let d2 = dx * dx + dy * dy;
-                let on_ring = (r2 - 10..=r2 + 10).contains(&d2);
-                let on_cross = d2 < r2 && (dx == dy || dx == -dy || dx == 0 || dy == 0);
+                let on_ring = (r2 - 10 * VS * VS..=r2 + 10 * VS * VS).contains(&d2);
+                let on_cross = d2 < r2
+                    && ((dx - dy).abs() < VS || (dx + dy).abs() < VS || dx.abs() < VS || dy.abs() < VS);
                 if on_ring || on_cross {
                     let p = o + IVec3::new(x, y, z);
                     if self.world.voxel(p).is_solid() {
@@ -608,11 +613,11 @@ impl Battle {
     // Sight
 
     fn eye(tile: IVec3) -> Vec3 {
-        (tile * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, EYE_Z)
+        (tile * TILE_VOXELS).as_vec3() + Vec3::new(HALF_TILE, HALF_TILE, EYE_Z)
     }
 
     fn chest(tile: IVec3) -> Vec3 {
-        (tile * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, CHEST_Z)
+        (tile * TILE_VOXELS).as_vec3() + Vec3::new(HALF_TILE, HALF_TILE, CHEST_Z)
     }
 
     fn los_clear(&self, from: Vec3, to: Vec3) -> bool {
@@ -800,8 +805,8 @@ impl Battle {
         // Swing the leaf: clear the tile's blocking mass.
         let o = at * TILE_VOXELS;
         self.world.fill_box(
-            o + IVec3::new(0, 0, 4),
-            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, 14),
+            o + IVec3::new(0, 0, crate::scenario::GROUND_TOP),
+            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, TILE_VOXELS * 7 / 8),
             ods_voxel::Voxel::EMPTY,
         );
         self.tiles
@@ -1327,7 +1332,7 @@ impl Battle {
                 // Masonry gives way before the Behemoth.
                 let o = next * TILE_VOXELS;
                 let mut smashed = 0;
-                for z in 4..TILE_VOXELS {
+                for z in crate::scenario::GROUND_TOP..TILE_VOXELS {
                     for y in 0..TILE_VOXELS {
                         for x in 0..TILE_VOXELS {
                             let p = o + IVec3::new(x, y, z);
@@ -1659,8 +1664,9 @@ impl Battle {
                     // The ram hammer cracks scenery through its target.
                     if melee && breach > 0.0 {
                         let c = (self.unit(target).tile * TILE_VOXELS).as_vec3()
-                            + Vec3::new(8.0, 8.0, 8.0);
-                        let destroyed = self.world.carve_sphere(c + Vec3::new(0.0, 0.0, 2.0), breach);
+                            + Vec3::splat(HALF_TILE);
+                        let destroyed =
+                            self.world.carve_sphere(c + Vec3::new(0.0, 0.0, 2.0 * VS as f32), breach * VS as f32);
                         if destroyed > 0 {
                             let ci = c.as_ivec3();
                             let r = breach.ceil() as i32 + 1;
@@ -1735,7 +1741,7 @@ impl Battle {
     /// Detonate at a tile: carve the terrain, then damage every unit in the
     /// blast. Units behind cover (no line from the blast center) take half.
     fn explode(&mut self, at: IVec3, power: i32, source: Option<UnitId>, events: &mut Vec<Event>) {
-        let center = (at * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, 8.0);
+        let center = (at * TILE_VOXELS).as_vec3() + Vec3::splat(HALF_TILE);
         let destroyed = self.world.carve_sphere(center, GRENADE_CARVE_RADIUS);
         let r = GRENADE_CARVE_RADIUS.ceil() as i32 + 1;
         let c = center.as_ivec3();
@@ -1825,8 +1831,8 @@ impl Battle {
         let up = side.cross(dir);
         let deviated = (dir + side * jitter(0.12) + up * jitter(0.08)).normalize();
 
-        if let Some(impact) = self.world.raycast(from, deviated, 640.0) {
-            let destroyed = self.world.carve_sphere(impact.position, breach_radius);
+        if let Some(impact) = self.world.raycast(from, deviated, 640.0 * VS as f32) {
+            let destroyed = self.world.carve_sphere(impact.position, breach_radius * VS as f32);
             if destroyed > 0 {
                 let r = breach_radius.ceil() as i32 + 1;
                 let c = impact.position.as_ivec3();
@@ -2508,7 +2514,7 @@ mod tests {
         let mut world = VoxelWorld::new();
         world.fill_box(
             IVec3::new(0, 0, 0),
-            IVec3::new(12 * TILE_VOXELS, 12 * TILE_VOXELS, 2),
+            IVec3::new(12 * TILE_VOXELS, 12 * TILE_VOXELS, crate::scenario::GROUND_TOP),
             STONE,
         );
         Battle::new(world, IVec3::ZERO, IVec3::new(12, 12, 1), units, seed)
@@ -2519,12 +2525,12 @@ mod tests {
         let mut world = VoxelWorld::new();
         world.fill_box(
             IVec3::new(0, 0, 0),
-            IVec3::new(12 * TILE_VOXELS, 12 * TILE_VOXELS, 2),
+            IVec3::new(12 * TILE_VOXELS, 12 * TILE_VOXELS, crate::scenario::GROUND_TOP),
             STONE,
         );
         world.fill_box(
             IVec3::new(5 * TILE_VOXELS, 0, 2),
-            IVec3::new(6 * TILE_VOXELS, 12 * TILE_VOXELS, 14),
+            IVec3::new(6 * TILE_VOXELS, 12 * TILE_VOXELS, TILE_VOXELS * 7 / 8),
             Voxel(2),
         );
         Battle::new(world, IVec3::ZERO, IVec3::new(12, 12, 1), units, seed)
@@ -2585,7 +2591,7 @@ mod tests {
         let mut b = walled_field(duelists(), 1);
         // Blow a man-sized hole through the wall at eye height.
         let center = Vec3::new(5.5 * TILE_VOXELS as f32, 5.5 * TILE_VOXELS as f32, 11.0);
-        let destroyed = b.world.carve_sphere(center, 10.0);
+        let destroyed = b.world.carve_sphere(center, 10.0 * VS as f32);
         assert!(destroyed > 0);
         assert!(b.can_see(UnitId(0), UnitId(1)), "sight through the breach");
     }

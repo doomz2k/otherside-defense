@@ -51,7 +51,7 @@ impl Species {
         use BodyPart::*;
         match self {
             Species::Soldier => &[Head, Torso, LeftArm, RightArm, LeftLeg, RightLeg, Weapon],
-            Species::Imp => &[Head, Torso, LeftArm, RightArm, LeftLeg, RightLeg, Horns],
+            Species::Imp => &[Head, Torso, LeftArm, RightArm, LeftLeg, RightLeg, Horns, Tail],
             Species::Overseer => &[Head, Torso, LeftArm, RightArm, Horns],
             Species::Hellhound => &[Head, Maw, Torso, LeftLeg, RightLeg, Tail],
             Species::BileWisp => &[Sac, Maw],

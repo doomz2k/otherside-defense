@@ -12,6 +12,10 @@ use winit::keyboard::KeyCode;
 use std::collections::HashMap;
 
 use crate::audio::{Audio, Sound};
+
+const VS_F: f32 = ods_sim::VS as f32;
+const HALF_TILE: f32 = TILE_VOXELS as f32 / 2.0;
+const PAN_STEP: f32 = 12.0 * VS_F;
 use crate::figures;
 
 /// A transient battlefield effect.
@@ -75,7 +79,11 @@ impl BattleScreen {
         let mut screen = Self {
             battle,
             token,
-            camera: OrbitCamera::isometric(Vec3::new(center.x, center.y, 0.0)),
+            camera: {
+                let mut cam = OrbitCamera::isometric(Vec3::new(center.x, center.y, 0.0));
+                cam.distance *= VS_F; // the field doubled; stand back to match
+                cam
+            },
             log: vec!["The squad deploys.".to_string()],
             selected: None,
             fire_mode: FireMode::Snap,
@@ -273,10 +281,10 @@ impl BattleScreen {
             }
             KeyCode::KeyQ => self.camera.snap_turn(1),
             KeyCode::KeyE => self.camera.snap_turn(-1),
-            KeyCode::KeyW => self.camera.pan(0.0, 12.0),
-            KeyCode::KeyS => self.camera.pan(0.0, -12.0),
-            KeyCode::KeyA => self.camera.pan(-12.0, 0.0),
-            KeyCode::KeyD => self.camera.pan(12.0, 0.0),
+            KeyCode::KeyW => self.camera.pan(0.0, PAN_STEP),
+            KeyCode::KeyS => self.camera.pan(0.0, -PAN_STEP),
+            KeyCode::KeyA => self.camera.pan(-PAN_STEP, 0.0),
+            KeyCode::KeyD => self.camera.pan(PAN_STEP, 0.0),
             _ => {}
         }
     }
@@ -664,11 +672,12 @@ impl BattleScreen {
     // Effects
 
     fn unit_pos(&self, id: UnitId, z: f32) -> Vec3 {
-        (self.battle.unit(id).tile * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, z)
+        (self.battle.unit(id).tile * TILE_VOXELS).as_vec3()
+            + Vec3::new(HALF_TILE, HALF_TILE, z * VS_F)
     }
 
     fn tile_pos(at: IVec3, z: f32) -> Vec3 {
-        (at * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, z)
+        (at * TILE_VOXELS).as_vec3() + Vec3::new(HALF_TILE, HALF_TILE, z * VS_F)
     }
 
     /// Fights on the night side of the world are lit by muzzle and flame.
@@ -978,7 +987,7 @@ impl BattleScreen {
         let mut moved = false;
         for u in &self.battle.units {
             let target = (u.tile * TILE_VOXELS).as_vec3()
-                + Vec3::new(8.0, 8.0, ods_sim::scenario::GROUND_TOP as f32);
+                + Vec3::new(HALF_TILE, HALF_TILE, ods_sim::scenario::GROUND_TOP as f32);
             let entry = self.visual.entry(u.id.0).or_insert(target);
             let delta = target - *entry;
             if delta.length_squared() > 0.05 {
@@ -1038,7 +1047,7 @@ impl BattleScreen {
             ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("floaters")));
         for f in &self.floaters {
             let t = (f.age / f.life).clamp(0.0, 1.0);
-            let world = f.world + Vec3::Z * (8.0 * t);
+            let world = f.world + Vec3::Z * (8.0 * VS_F * t);
             let clip = vp * world.extend(1.0);
             if clip.w <= 0.1 {
                 continue; // behind the camera
@@ -1091,7 +1100,7 @@ impl BattleScreen {
                     let head = fx.from.lerp(fx.to, t);
                     let tail = fx.from.lerp(fx.to, (t - 0.3).max(0.0));
                     let dir = fx.to - fx.from;
-                    let perp = dir.cross(Vec3::Z).normalize_or(Vec3::X) * 0.5;
+                    let perp = dir.cross(Vec3::Z).normalize_or(Vec3::X) * (0.5 * VS_F);
                     push_quad(
                         &mut verts,
                         &mut indices,
@@ -1100,11 +1109,11 @@ impl BattleScreen {
                     );
                 }
                 FxKind::Blast => {
-                    let r = 3.0 + 26.0 * t;
+                    let r = (3.0 + 26.0 * t) * VS_F;
                     push_flat_square(&mut verts, &mut indices, fx.from, r, color);
                 }
                 FxKind::Flash => {
-                    push_flat_square(&mut verts, &mut indices, fx.from, 6.0, color);
+                    push_flat_square(&mut verts, &mut indices, fx.from, 6.0 * VS_F, color);
                 }
             }
         }
@@ -1126,9 +1135,9 @@ impl BattleScreen {
                 let fall = (self.fx_clock * (18.0 + h * 8.0) + h2 * cycle) % cycle;
                 let p = anchor
                     + Vec3::new(
-                        (h - 0.5) * 160.0 + self.fx_clock.sin() * drift * h,
-                        (h2 - 0.5) * 160.0,
-                        38.0 - fall,
+                        ((h - 0.5) * 160.0 + self.fx_clock.sin() * drift * h) * VS_F,
+                        (h2 - 0.5) * 160.0 * VS_F,
+                        (38.0 - fall) * VS_F,
                     );
                 push_quad(
                     &mut verts,
@@ -1147,9 +1156,10 @@ impl BattleScreen {
         // Possession halos: a slow-turning sigil diamond over seized minds.
         for u in &self.battle.units {
             if u.is_active() && u.possessed > 0 {
-                let c = (u.tile * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, 21.0);
+                let c = (u.tile * TILE_VOXELS).as_vec3()
+                    + Vec3::new(HALF_TILE, HALF_TILE, 21.0 * VS_F);
                 let a = self.fx_clock * 1.7;
-                let r = 4.5;
+                let r = 4.5 * VS_F;
                 let e1 = Vec3::new(a.cos(), a.sin(), 0.0) * r;
                 let e2 = Vec3::new(-a.sin(), a.cos(), 0.0) * r;
                 let pulse = 0.45 + 0.2 * (self.fx_clock * 3.0).sin();
@@ -1270,7 +1280,7 @@ impl BattleScreen {
     }
 
     fn cap(&self) -> Option<i32> {
-        self.floor_cap.then_some(16)
+        self.floor_cap.then_some(TILE_VOXELS)
     }
 
     fn refresh_chunks(&mut self, renderer: &mut Renderer) {
@@ -1387,9 +1397,66 @@ impl BattleScreen {
             let u = self.battle.unit(id);
             if u.alive {
                 push_tile_quad(&mut verts, &mut indices, u.tile, [0.2, 1.0, 0.35, 0.35]);
+                // The soldier's own cursor box, in the Order's gold.
+                push_wire_box(&mut verts, &mut indices, u.tile, [0.95, 0.85, 0.3, 0.9]);
             }
         }
+        // The hovered tile wears the classic wireframe cursor: red over
+        // enemies, arming-orange with a charge out, white over open ground.
+        if let Some(tile) = self.hover {
+            let color = if self.grenade_armed {
+                [1.0, 0.55, 0.1, 0.95]
+            } else if self
+                .battle
+                .unit_at(tile)
+                .is_some_and(|id| self.battle.unit(id).side == Side::Demons)
+            {
+                [1.0, 0.2, 0.15, 0.95]
+            } else {
+                [0.9, 0.9, 0.95, 0.8]
+            };
+            push_wire_box(&mut verts, &mut indices, tile, color);
+        }
         renderer.set_overlay(&verts, &indices);
+    }
+}
+
+/// The X-COM tile cursor: a wireframe box drawn as twelve thin ribbons
+/// around the tile's standing volume.
+fn push_wire_box(
+    verts: &mut Vec<OverlayVertex>,
+    indices: &mut Vec<u32>,
+    tile: IVec3,
+    color: [f32; 4],
+) {
+    let t = TILE_VOXELS as f32;
+    let w = 0.5 * VS_F; // ribbon half-width
+    let base = (tile * TILE_VOXELS).as_vec3()
+        + Vec3::new(0.0, 0.0, ods_sim::scenario::GROUND_TOP as f32 + 0.15);
+    let top = t * 0.75; // the standing volume, not the whole column
+    let corners = [
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(t, 0.0, 0.0),
+        Vec3::new(t, t, 0.0),
+        Vec3::new(0.0, t, 0.0),
+    ];
+    let edge = |verts: &mut Vec<OverlayVertex>, indices: &mut Vec<u32>, a: Vec3, b: Vec3| {
+        let dir = (b - a).normalize_or(Vec3::X);
+        // A ribbon facing up for floor edges, sideways for verticals.
+        let side = if dir.z.abs() > 0.5 { Vec3::X } else { Vec3::Z };
+        let perp = dir.cross(side).normalize_or(Vec3::Y) * w;
+        push_quad(verts, indices, [a - perp, a + perp, b + perp, b - perp], color);
+    };
+    for i in 0..4 {
+        let (a, b) = (base + corners[i], base + corners[(i + 1) % 4]);
+        edge(verts, indices, a, b); // floor square
+        edge(
+            verts,
+            indices,
+            base + corners[i] + Vec3::new(0.0, 0.0, top),
+            base + corners[(i + 1) % 4] + Vec3::new(0.0, 0.0, top),
+        ); // ceiling square
+        edge(verts, indices, a, a + Vec3::new(0.0, 0.0, top)); // verticals
     }
 }
 

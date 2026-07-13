@@ -65,133 +65,272 @@ const GARG_DARK: [f32; 4] = [0.28, 0.28, 0.34, 1.0];
 const BEHE: [f32; 4] = [0.42, 0.20, 0.12, 1.0];
 const BEHE_DARK: [f32; 4] = [0.28, 0.13, 0.08, 1.0];
 
-/// The anatomy-tagged geometry of each species.
+/// The anatomy-tagged geometry of each species — the high-density set:
+/// each figure is a few dozen tagged boxes, so silhouettes read at a
+/// glance and severed parts leave honest gaps. Coordinates are in legacy
+/// 16-per-tile units; `push_unit` scales them to the live voxel grid.
 pub fn blueprint(species: Species) -> &'static [PartBox] {
     use BodyPart::*;
     match species {
         Species::Soldier => {
             const P: &[PartBox] = &[
-            pb(LeftLeg, (-2.5, -1.0, 0.0), (-0.5, 1.0, 5.0), ARMOR_DARK),
-            pb(RightLeg, (0.5, -1.0, 0.0), (2.5, 1.0, 5.0), ARMOR_DARK),
-            pb(Torso, (-3.0, -1.5, 5.0), (3.0, 1.5, 9.0), ARMOR),
-            pb(LeftArm, (-4.2, -1.0, 4.5), (-3.0, 1.0, 8.5), ARMOR_DARK),
-            pb(RightArm, (3.0, -1.0, 4.5), (4.2, 1.0, 8.5), ARMOR_DARK),
-            pb(Head, (-1.5, -1.5, 9.0), (1.5, 1.5, 11.5), ARMOR),
-            pb(Head, (-1.2, 1.2, 9.6), (1.2, 1.6, 10.8), VISOR),
-            pb(Weapon, (3.0, -0.5, 6.0), (4.2, 5.5, 7.4), GUNMETAL),
-        ];
+                // Boots, shins, thighs.
+                pb(LeftLeg, (-2.6, -1.4, 0.0), (-0.6, 1.6, 1.2), GUNMETAL),
+                pb(RightLeg, (0.6, -1.4, 0.0), (2.6, 1.6, 1.2), GUNMETAL),
+                pb(LeftLeg, (-2.4, -1.0, 1.2), (-0.7, 1.0, 3.0), ARMOR_DARK),
+                pb(RightLeg, (0.7, -1.0, 1.2), (2.4, 1.0, 3.0), ARMOR_DARK),
+                pb(LeftLeg, (-2.6, -1.2, 3.0), (-0.5, 1.2, 5.0), ARMOR),
+                pb(RightLeg, (0.5, -1.2, 3.0), (2.6, 1.2, 5.0), ARMOR),
+                // Torso: belt, cuirass, chest plate, collar.
+                pb(Torso, (-2.8, -1.4, 5.0), (2.8, 1.4, 5.8), GUNMETAL),
+                pb(Torso, (-3.0, -1.5, 5.8), (3.0, 1.5, 8.4), ARMOR),
+                pb(Torso, (-2.2, 1.5, 6.2), (2.2, 1.9, 8.0), ARMOR_DARK),
+                pb(Torso, (-1.6, -1.7, 8.4), (1.6, 1.7, 9.0), ARMOR_DARK),
+                // Pauldrons + arms + gloves.
+                pb(LeftArm, (-4.6, -1.4, 7.6), (-2.8, 1.4, 9.0), ARMOR),
+                pb(RightArm, (2.8, -1.4, 7.6), (4.6, 1.4, 9.0), ARMOR),
+                pb(LeftArm, (-4.2, -1.0, 4.8), (-3.0, 1.0, 7.6), ARMOR_DARK),
+                pb(RightArm, (3.0, -1.0, 4.8), (4.2, 1.0, 7.6), ARMOR_DARK),
+                pb(LeftArm, (-4.2, -1.0, 4.0), (-3.0, 1.2, 4.8), GUNMETAL),
+                pb(RightArm, (3.0, -1.0, 4.0), (4.2, 1.2, 4.8), GUNMETAL),
+                // Helmet: skull, brim, visor slit, crest.
+                pb(Head, (-1.6, -1.6, 9.0), (1.6, 1.6, 11.4), ARMOR),
+                pb(Head, (-1.9, -1.9, 9.0), (1.9, 1.9, 9.6), ARMOR_DARK),
+                pb(Head, (-1.3, 1.3, 10.0), (1.3, 1.8, 10.7), VISOR),
+                pb(Head, (-0.3, -1.8, 11.4), (0.3, 1.2, 12.2), ARMOR_DARK),
+                // Rifle: stock, body, barrel, muzzle.
+                pb(Weapon, (3.2, -2.2, 6.0), (4.4, -0.2, 7.2), CIVVY),
+                pb(Weapon, (3.2, -0.2, 6.2), (4.4, 3.4, 7.4), GUNMETAL),
+                pb(Weapon, (3.5, 3.4, 6.5), (4.1, 6.2, 7.1), GUNMETAL),
+                pb(Weapon, (3.4, 6.2, 6.4), (4.2, 6.8, 7.2), ARMOR_DARK),
+            ];
             P
         }
         Species::Imp => {
             const P: &[PartBox] = &[
-            pb(LeftLeg, (-2.0, -1.0, 0.0), (-0.5, 1.0, 2.8), IMP_DARK),
-            pb(RightLeg, (0.5, -1.0, 0.0), (2.0, 1.0, 2.8), IMP_DARK),
-            pb(Torso, (-2.5, -1.5, 2.8), (2.5, 2.0, 5.8), IMP_SKIN),
-            pb(LeftArm, (-3.6, -1.0, 1.8), (-2.5, 1.0, 5.4), IMP_SKIN),
-            pb(RightArm, (2.5, -1.0, 1.8), (3.6, 1.0, 5.4), IMP_SKIN),
-            pb(Head, (-2.0, -1.5, 5.8), (2.0, 2.0, 8.2), IMP_SKIN),
-            pb(Horns, (-1.9, -0.5, 8.2), (-0.9, 0.5, 9.6), HORN),
-            pb(Horns, (0.9, -0.5, 8.2), (1.9, 0.5, 9.6), HORN),
-        ];
+                // Digitigrade legs with hoofed feet.
+                pb(LeftLeg, (-2.2, -1.6, 0.0), (-0.7, 0.2, 0.9), HORN),
+                pb(RightLeg, (0.7, -1.6, 0.0), (2.2, 0.2, 0.9), HORN),
+                pb(LeftLeg, (-2.0, -1.0, 0.9), (-0.6, 1.0, 2.8), IMP_DARK),
+                pb(RightLeg, (0.6, -1.0, 0.9), (2.0, 1.0, 2.8), IMP_DARK),
+                // Pot-bellied torso with ridged spine.
+                pb(Torso, (-2.5, -1.5, 2.8), (2.5, 2.2, 5.8), IMP_SKIN),
+                pb(Torso, (-0.5, -2.0, 3.4), (0.5, -1.5, 5.4), IMP_DARK),
+                // Long arms with claw hands.
+                pb(LeftArm, (-3.6, -1.0, 2.4), (-2.5, 1.0, 5.4), IMP_SKIN),
+                pb(RightArm, (2.5, -1.0, 2.4), (3.6, 1.0, 5.4), IMP_SKIN),
+                pb(LeftArm, (-3.9, -0.6, 1.5), (-2.8, 1.4, 2.4), IMP_DARK),
+                pb(RightArm, (2.8, -0.6, 1.5), (3.9, 1.4, 2.4), IMP_DARK),
+                // Head: jaw, snout, ears, two-segment horns.
+                pb(Head, (-1.8, -1.4, 5.8), (1.8, 1.8, 8.0), IMP_SKIN),
+                pb(Head, (-1.2, 1.8, 6.0), (1.2, 2.6, 7.0), IMP_DARK),
+                pb(Head, (-2.4, -0.6, 6.6), (-1.8, 0.4, 7.6), IMP_DARK),
+                pb(Head, (1.8, -0.6, 6.6), (2.4, 0.4, 7.6), IMP_DARK),
+                pb(Horns, (-1.8, -0.5, 8.0), (-0.9, 0.5, 9.2), HORN),
+                pb(Horns, (-2.2, -0.5, 9.2), (-1.3, 0.5, 10.0), HORN),
+                pb(Horns, (0.9, -0.5, 8.0), (1.8, 0.5, 9.2), HORN),
+                pb(Horns, (1.3, -0.5, 9.2), (2.2, 0.5, 10.0), HORN),
+                pb(Tail, (-0.4, -3.4, 2.4), (0.4, -1.5, 3.2), IMP_DARK),
+                pb(Tail, (-0.3, -4.4, 3.0), (0.3, -3.4, 3.8), HORN),
+            ];
             P
         }
         Species::Overseer => {
             const P: &[PartBox] = &[
-            pb(Torso, (-2.8, -1.8, 0.0), (2.8, 1.8, 9.5), ROBE),
-            pb(Torso, (-2.2, -1.4, 3.0), (2.2, 1.4, 5.0), ROBE_DARK),
-            pb(LeftArm, (-4.0, -1.0, 5.0), (-2.8, 1.0, 9.0), ROBE_DARK),
-            pb(RightArm, (2.8, -1.0, 5.0), (4.0, 1.0, 9.0), ROBE_DARK),
-            pb(Head, (-1.4, -1.2, 9.5), (1.4, 1.4, 12.0), PALE),
-            pb(Horns, (-2.4, -0.4, 11.0), (-1.4, 0.4, 13.4), HORN),
-            pb(Horns, (1.4, -0.4, 11.0), (2.4, 0.4, 13.4), HORN),
-        ];
+                // Layered robes: hem, skirt, girdle, mantle.
+                pb(Torso, (-3.2, -2.2, 0.0), (3.2, 2.2, 1.0), ROBE_DARK),
+                pb(Torso, (-2.8, -1.8, 1.0), (2.8, 1.8, 6.0), ROBE),
+                pb(Torso, (-2.3, -1.5, 4.4), (2.3, 1.5, 5.2), GOLD),
+                pb(Torso, (-3.0, -2.0, 6.0), (3.0, 2.0, 9.5), ROBE_DARK),
+                // Sleeved arms with pale grasping hands.
+                pb(LeftArm, (-4.2, -1.2, 5.0), (-2.9, 1.2, 9.0), ROBE_DARK),
+                pb(RightArm, (2.9, -1.2, 5.0), (4.2, 1.2, 9.0), ROBE_DARK),
+                pb(LeftArm, (-4.4, -0.6, 4.0), (-3.3, 0.8, 5.0), PALE),
+                pb(RightArm, (3.3, -0.6, 4.0), (4.4, 0.8, 5.0), PALE),
+                // Cowled head, sunken face, backswept horn crown.
+                pb(Head, (-1.7, -1.6, 9.5), (1.7, 1.4, 12.2), ROBE),
+                pb(Head, (-1.2, 1.2, 10.0), (1.2, 1.8, 11.6), PALE),
+                pb(Horns, (-2.4, -0.6, 11.2), (-1.5, 0.4, 13.0), HORN),
+                pb(Horns, (-2.9, -1.2, 12.4), (-2.0, -0.2, 13.8), HORN),
+                pb(Horns, (1.5, -0.6, 11.2), (2.4, 0.4, 13.0), HORN),
+                pb(Horns, (2.0, -1.2, 12.4), (2.9, -0.2, 13.8), HORN),
+            ];
             P
         }
         Species::Hellhound => {
             const P: &[PartBox] = &[
-            // Quadruped: each Leg part carries its side's pair.
-            pb(LeftLeg, (-2.2, -3.5, 0.0), (-1.0, -2.0, 2.2), HOUND_DARK),
-            pb(LeftLeg, (-2.2, 2.0, 0.0), (-1.0, 3.5, 2.2), HOUND_DARK),
-            pb(RightLeg, (1.0, -3.5, 0.0), (2.2, -2.0, 2.2), HOUND_DARK),
-            pb(RightLeg, (1.0, 2.0, 0.0), (2.2, 3.5, 2.2), HOUND_DARK),
-            pb(Torso, (-2.2, -4.0, 2.2), (2.2, 4.0, 5.2), HOUND),
-            pb(Head, (-1.6, 4.0, 3.0), (1.6, 6.5, 6.0), HOUND),
-            pb(Maw, (-1.0, 6.5, 3.2), (1.0, 8.0, 4.4), FANG),
-            pb(Tail, (-0.5, -6.0, 4.0), (0.5, -4.0, 5.0), HOUND_DARK),
-        ];
+                // Four legs with paws; heavier haunches at the rear.
+                pb(LeftLeg, (-2.3, -3.6, 0.0), (-1.0, -1.8, 1.0), HOUND_DARK),
+                pb(LeftLeg, (-2.2, -3.4, 1.0), (-1.1, -2.1, 2.4), HOUND),
+                pb(LeftLeg, (-2.3, 2.0, 0.0), (-1.0, 3.6, 1.0), HOUND_DARK),
+                pb(LeftLeg, (-2.2, 2.1, 1.0), (-1.1, 3.4, 2.4), HOUND),
+                pb(RightLeg, (1.0, -3.6, 0.0), (2.3, -1.8, 1.0), HOUND_DARK),
+                pb(RightLeg, (1.1, -3.4, 1.0), (2.2, -2.1, 2.4), HOUND),
+                pb(RightLeg, (1.0, 2.0, 0.0), (2.3, 3.6, 1.0), HOUND_DARK),
+                pb(RightLeg, (1.1, 2.1, 1.0), (2.2, 3.4, 2.4), HOUND),
+                // Body: haunches, barrel chest, shoulder hump, spine ridge.
+                pb(Torso, (-2.4, -4.2, 2.2), (2.4, -1.2, 5.4), HOUND),
+                pb(Torso, (-2.2, -1.2, 2.4), (2.2, 4.0, 5.0), HOUND),
+                pb(Torso, (-1.8, 1.6, 5.0), (1.8, 3.8, 6.0), HOUND_DARK),
+                pb(Torso, (-0.4, -3.8, 5.2), (0.4, 1.6, 5.8), HOUND_DARK),
+                // Head: skull, ears, brow; the maw with two teeth rows.
+                pb(Head, (-1.6, 4.0, 3.2), (1.6, 6.4, 5.8), HOUND),
+                pb(Head, (-1.5, 3.9, 5.8), (-0.7, 4.9, 6.6), HOUND_DARK),
+                pb(Head, (0.7, 3.9, 5.8), (1.5, 4.9, 6.6), HOUND_DARK),
+                pb(Maw, (-1.1, 6.4, 3.8), (1.1, 8.0, 4.6), HOUND_DARK),
+                pb(Maw, (-0.9, 6.6, 4.6), (0.9, 7.8, 5.0), FANG),
+                pb(Maw, (-0.9, 6.6, 3.4), (0.9, 7.8, 3.8), FANG),
+                // Tail, raised.
+                pb(Tail, (-0.5, -5.6, 4.2), (0.5, -4.0, 5.0), HOUND_DARK),
+                pb(Tail, (-0.4, -6.6, 5.0), (0.4, -5.4, 5.8), HOUND_DARK),
+            ];
             P
         }
         Species::BileWisp => {
             const P: &[PartBox] = &[
-            // Floating: nothing touches the ground.
-            pb(Sac, (-2.8, -2.8, 4.0), (2.8, 2.8, 9.0), BILE),
-            pb(Sac, (-1.8, -1.8, 3.0), (1.8, 1.8, 4.0), BILE_DARK),
-            pb(Maw, (-1.0, 2.8, 5.5), (1.0, 4.0, 7.0), BILE_DARK),
-        ];
+                // A lobed, sagging float-sac with drips and tendrils.
+                pb(Sac, (-2.8, -2.8, 4.6), (2.8, 2.8, 8.6), BILE),
+                pb(Sac, (-2.2, -2.2, 8.6), (2.2, 2.2, 9.6), BILE_DARK),
+                pb(Sac, (-3.4, -1.4, 5.4), (-2.8, 1.4, 7.6), BILE_DARK),
+                pb(Sac, (2.8, -1.4, 5.4), (3.4, 1.4, 7.6), BILE_DARK),
+                pb(Sac, (-1.8, -1.8, 3.6), (1.8, 1.8, 4.6), BILE_DARK),
+                pb(Sac, (-0.6, -0.6, 2.6), (0.6, 0.6, 3.6), BILE),
+                pb(Sac, (-0.3, -0.3, 1.8), (0.3, 0.3, 2.6), BILE_DARK),
+                // The puckered maw, dripping.
+                pb(Maw, (-1.1, 2.8, 5.6), (1.1, 4.0, 7.0), BILE_DARK),
+                pb(Maw, (-0.5, 3.2, 4.8), (0.5, 3.8, 5.6), BILE),
+            ];
             P
         }
         Species::Taker => {
             const P: &[PartBox] = &[
-            pb(LeftLeg, (-2.0, -0.8, 0.0), (-1.0, 0.8, 7.0), BONE_DARK),
-            pb(RightLeg, (1.0, -0.8, 0.0), (2.0, 0.8, 7.0), BONE_DARK),
-            pb(Torso, (-2.2, -1.2, 7.0), (2.2, 1.2, 11.0), BONE),
-            pb(LeftArm, (-3.4, -0.8, 3.0), (-2.2, 0.8, 10.5), BONE),
-            pb(LeftArm, (-3.6, 0.8, 3.0), (-2.0, 3.0, 4.2), BONE_DARK), // reaching claw
-            pb(RightArm, (2.2, -0.8, 3.0), (3.4, 0.8, 10.5), BONE),
-            pb(RightArm, (2.0, 0.8, 3.0), (3.6, 3.0, 4.2), BONE_DARK),
-            pb(Head, (-1.2, -1.0, 11.0), (1.2, 1.2, 13.2), BONE),
-        ];
+                // Stilted shin-bone legs.
+                pb(LeftLeg, (-2.0, -0.8, 0.0), (-1.1, 0.8, 3.6), BONE_DARK),
+                pb(LeftLeg, (-2.2, -1.0, 3.6), (-0.9, 1.0, 7.0), BONE),
+                pb(RightLeg, (1.1, -0.8, 0.0), (2.0, 0.8, 3.6), BONE_DARK),
+                pb(RightLeg, (0.9, -1.0, 3.6), (2.2, 1.0, 7.0), BONE),
+                // Gaunt trunk with visible rib bars.
+                pb(Torso, (-2.2, -1.2, 7.0), (2.2, 1.2, 11.0), BONE),
+                pb(Torso, (-2.3, 1.2, 7.6), (2.3, 1.4, 8.0), BONE_DARK),
+                pb(Torso, (-2.3, 1.2, 8.6), (2.3, 1.4, 9.0), BONE_DARK),
+                pb(Torso, (-2.3, 1.2, 9.6), (2.3, 1.4, 10.0), BONE_DARK),
+                // The arms: too long, ending in finger-blades.
+                pb(LeftArm, (-3.3, -0.8, 4.0), (-2.2, 0.8, 10.5), BONE),
+                pb(RightArm, (2.2, -0.8, 4.0), (3.3, 0.8, 10.5), BONE),
+                pb(LeftArm, (-3.6, 0.8, 3.0), (-2.6, 3.2, 3.6), BONE_DARK),
+                pb(LeftArm, (-3.2, 0.8, 2.2), (-2.2, 3.6, 2.8), FANG),
+                pb(RightArm, (2.6, 0.8, 3.0), (3.6, 3.2, 3.6), BONE_DARK),
+                pb(RightArm, (2.2, 0.8, 2.2), (3.2, 3.6, 2.8), FANG),
+                // A skull, not a face; the jaw hangs.
+                pb(Head, (-1.2, -1.0, 11.0), (1.2, 1.2, 13.0), BONE),
+                pb(Head, (-0.9, 1.0, 11.2), (0.9, 1.5, 12.6), BONE_DARK),
+                pb(Head, (-0.8, 1.0, 10.4), (0.8, 1.6, 11.0), BONE),
+            ];
             P
         }
         Species::Prince => {
             const P: &[PartBox] = &[
-            pb(Torso, (-3.2, -2.0, 0.0), (3.2, 2.0, 10.5), PRINCE_ROBE),
-            pb(Torso, (-2.4, -1.6, 4.0), (2.4, 1.6, 6.0), GOLD),
-            pb(LeftArm, (-4.6, -1.2, 5.5), (-3.2, 1.2, 10.0), PRINCE_DARK),
-            pb(RightArm, (3.2, -1.2, 5.5), (4.6, 1.2, 10.0), PRINCE_DARK),
-            pb(Head, (-1.5, -1.3, 10.5), (1.5, 1.5, 13.2), ASH),
-            pb(Horns, (-2.8, -0.5, 12.0), (-1.5, 0.5, 14.8), GOLD),
-            pb(Horns, (1.5, -0.5, 12.0), (2.8, 0.5, 14.8), GOLD),
-            pb(Wings, (-6.5, -2.6, 6.0), (-3.2, -1.8, 12.5), PRINCE_DARK),
-            pb(Wings, (3.2, -2.6, 6.0), (6.5, -1.8, 12.5), PRINCE_DARK),
-        ];
+                // Robes in tiers, belted in gold, trailing to the ground.
+                pb(Torso, (-3.6, -2.4, 0.0), (3.6, 2.4, 1.2), PRINCE_DARK),
+                pb(Torso, (-3.2, -2.0, 1.2), (3.2, 2.0, 7.0), PRINCE_ROBE),
+                pb(Torso, (-2.5, -1.7, 4.6), (2.5, 1.7, 5.6), GOLD),
+                pb(Torso, (-3.0, -1.9, 7.0), (3.0, 1.9, 10.5), PRINCE_DARK),
+                pb(Torso, (-1.4, 1.9, 7.4), (1.4, 2.3, 9.8), GOLD),
+                // Clawed sleeves.
+                pb(LeftArm, (-4.7, -1.2, 5.5), (-3.2, 1.2, 10.0), PRINCE_DARK),
+                pb(RightArm, (3.2, -1.2, 5.5), (4.7, 1.2, 10.0), PRINCE_DARK),
+                pb(LeftArm, (-4.9, -0.6, 4.4), (-3.7, 1.0, 5.5), ASH),
+                pb(RightArm, (3.7, -0.6, 4.4), (4.9, 1.0, 5.5), ASH),
+                // The ash-grey head under a golden horn-crown.
+                pb(Head, (-1.5, -1.3, 10.5), (1.5, 1.5, 13.0), ASH),
+                pb(Head, (-1.0, 1.4, 11.0), (1.0, 1.8, 12.4), PRINCE_DARK),
+                pb(Horns, (-2.6, -0.5, 12.0), (-1.5, 0.5, 13.6), GOLD),
+                pb(Horns, (-3.2, -0.5, 13.0), (-2.2, 0.5, 14.6), GOLD),
+                pb(Horns, (1.5, -0.5, 12.0), (2.6, 0.5, 13.6), GOLD),
+                pb(Horns, (2.2, -0.5, 13.0), (3.2, 0.5, 14.6), GOLD),
+                pb(Horns, (-0.5, -0.5, 13.0), (0.5, 0.5, 14.2), GOLD),
+                // Wings: bone fingers with stretched membrane.
+                pb(Wings, (-6.8, -2.4, 5.6), (-3.2, -2.0, 12.8), PRINCE_DARK),
+                pb(Wings, (-6.2, -2.2, 6.4), (-3.2, -1.8, 11.6), ROBE),
+                pb(Wings, (3.2, -2.4, 5.6), (6.8, -2.0, 12.8), PRINCE_DARK),
+                pb(Wings, (3.2, -2.2, 6.4), (6.2, -1.8, 11.6), ROBE),
+            ];
             P
         }
         Species::Gargoyle => {
             const P: &[PartBox] = &[
-            pb(Torso, (-2.0, -1.5, 3.0), (2.0, 1.5, 6.5), GARG),
-            pb(Head, (-1.4, 1.0, 6.0), (1.4, 2.8, 8.2), GARG),
-            pb(LeftArm, (-3.0, -0.8, 2.0), (-2.0, 0.8, 6.0), GARG_DARK),
-            pb(RightArm, (2.0, -0.8, 2.0), (3.0, 0.8, 6.0), GARG_DARK),
-            pb(Wings, (-5.5, -1.8, 4.0), (-2.0, -1.0, 9.5), GARG_DARK),
-            pb(Wings, (2.0, -1.8, 4.0), (5.5, -1.0, 9.5), GARG_DARK),
-            pb(Tail, (-0.4, -4.5, 3.0), (0.4, -1.5, 4.0), GARG_DARK),
-        ];
+                // Perched haunches and gripping stone claws.
+                pb(Torso, (-2.2, -1.8, 1.2), (2.2, 1.2, 3.0), GARG_DARK),
+                pb(LeftArm, (-2.6, -0.6, 0.0), (-1.4, 1.2, 1.2), GARG),
+                pb(RightArm, (1.4, -0.6, 0.0), (2.6, 1.2, 1.2), GARG),
+                // Hunched trunk with a spined back.
+                pb(Torso, (-2.0, -1.5, 3.0), (2.0, 1.5, 6.5), GARG),
+                pb(Torso, (-0.4, -2.0, 4.0), (0.4, -1.5, 6.2), GARG_DARK),
+                // Snouted head with ear-horns.
+                pb(Head, (-1.4, 1.0, 6.0), (1.4, 2.6, 8.2), GARG),
+                pb(Head, (-0.9, 2.6, 6.3), (0.9, 3.4, 7.2), GARG_DARK),
+                pb(Head, (-1.5, 0.8, 8.2), (-0.8, 1.6, 9.2), GARG_DARK),
+                pb(Head, (0.8, 0.8, 8.2), (1.5, 1.6, 9.2), GARG_DARK),
+                // Wings: leading-edge bone, membrane, wingtip claw.
+                pb(Wings, (-5.6, -1.6, 8.4), (-2.0, -1.0, 9.6), GARG),
+                pb(Wings, (-5.4, -1.7, 4.2), (-2.0, -1.1, 8.4), GARG_DARK),
+                pb(Wings, (-6.2, -1.5, 8.8), (-5.4, -0.9, 9.8), GARG),
+                pb(Wings, (2.0, -1.6, 8.4), (5.6, -1.0, 9.6), GARG),
+                pb(Wings, (2.0, -1.7, 4.2), (5.4, -1.1, 8.4), GARG_DARK),
+                pb(Wings, (5.4, -1.5, 8.8), (6.2, -0.9, 9.8), GARG),
+                pb(Tail, (-0.4, -4.4, 3.0), (0.4, -1.6, 3.8), GARG_DARK),
+                pb(Tail, (-0.6, -5.2, 3.4), (0.6, -4.4, 4.2), GARG),
+            ];
             P
         }
         Species::Behemoth => {
             const P: &[PartBox] = &[
-            pb(LeftLeg, (-5.0, -2.0, 0.0), (-2.0, 2.0, 5.0), BEHE_DARK),
-            pb(RightLeg, (2.0, -2.0, 0.0), (5.0, 2.0, 5.0), BEHE_DARK),
-            pb(Torso, (-6.0, -3.0, 5.0), (6.0, 3.0, 12.0), BEHE),
-            pb(LeftArm, (-7.8, -2.0, 3.0), (-6.0, 2.0, 11.0), BEHE_DARK),
-            pb(RightArm, (6.0, -2.0, 3.0), (7.8, 2.0, 11.0), BEHE_DARK),
-            pb(Head, (-2.2, 3.0, 9.0), (2.2, 5.5, 13.0), BEHE),
-            pb(Horns, (-3.4, 3.2, 12.0), (-2.2, 4.2, 14.8), HORN),
-            pb(Horns, (2.2, 3.2, 12.0), (3.4, 4.2, 14.8), HORN),
-        ];
+                // Pillar legs on splayed feet.
+                pb(LeftLeg, (-5.4, -2.6, 0.0), (-1.8, 2.4, 1.4), BEHE_DARK),
+                pb(RightLeg, (1.8, -2.6, 0.0), (5.4, 2.4, 1.4), BEHE_DARK),
+                pb(LeftLeg, (-5.0, -2.0, 1.4), (-2.0, 2.0, 5.0), BEHE),
+                pb(RightLeg, (2.0, -2.0, 1.4), (5.0, 2.0, 5.0), BEHE),
+                // The mountain: gut, chest, shoulder plates, back spines.
+                pb(Torso, (-6.0, -3.0, 5.0), (6.0, 3.0, 9.0), BEHE),
+                pb(Torso, (-5.4, -2.6, 9.0), (5.4, 2.6, 12.0), BEHE_DARK),
+                pb(Torso, (-7.0, -2.4, 10.4), (-4.6, 2.4, 12.6), BEHE_DARK),
+                pb(Torso, (4.6, -2.4, 10.4), (7.0, 2.4, 12.6), BEHE_DARK),
+                pb(Torso, (-1.0, -3.8, 8.4), (1.0, -3.0, 11.0), HORN),
+                pb(Torso, (-0.8, -4.4, 6.4), (0.8, -3.6, 9.0), HORN),
+                // Arms that end in knuckled fists dragging low.
+                pb(LeftArm, (-7.8, -2.0, 4.2), (-6.0, 2.0, 10.8), BEHE_DARK),
+                pb(RightArm, (6.0, -2.0, 4.2), (7.8, 2.0, 10.8), BEHE_DARK),
+                pb(LeftArm, (-8.4, -1.6, 2.2), (-6.2, 2.4, 4.2), BEHE),
+                pb(RightArm, (6.2, -1.6, 2.2), (8.4, 2.4, 4.2), BEHE),
+                // Head low between the shoulders, tusked and horned.
+                pb(Head, (-2.2, 3.0, 9.0), (2.2, 5.4, 12.6), BEHE),
+                pb(Head, (-1.8, 5.4, 9.4), (1.8, 6.2, 10.8), BEHE_DARK),
+                pb(Head, (-2.0, 5.2, 8.2), (-1.2, 6.4, 9.4), FANG),
+                pb(Head, (1.2, 5.2, 8.2), (2.0, 6.4, 9.4), FANG),
+                pb(Horns, (-3.6, 3.2, 11.6), (-2.2, 4.2, 13.4), HORN),
+                pb(Horns, (-4.4, 3.2, 12.8), (-3.2, 4.2, 14.6), HORN),
+                pb(Horns, (2.2, 3.2, 11.6), (3.6, 4.2, 13.4), HORN),
+                pb(Horns, (3.2, 3.2, 12.8), (4.4, 4.2, 14.6), HORN),
+            ];
             P
         }
         Species::Husk => {
             const P: &[PartBox] = &[
-            pb(LeftLeg, (-2.5, -1.0, 0.0), (-0.5, 1.0, 4.5), HUSK_DARK),
-            pb(RightLeg, (0.5, -1.0, 0.0), (2.5, 1.0, 4.5), HUSK_DARK),
-            // The slump: torso and head lean forward.
-            pb(Torso, (-3.0, -0.5, 4.5), (3.0, 2.5, 8.0), HUSK_SKIN),
-            pb(LeftArm, (-4.2, 0.0, 3.0), (-3.0, 2.0, 7.5), HUSK_DARK),
-            pb(RightArm, (3.0, 0.0, 3.0), (4.2, 2.0, 7.5), HUSK_DARK),
-            pb(Head, (-1.5, 0.5, 8.0), (1.5, 3.0, 10.2), HUSK_SKIN),
-        ];
+                // The shamble: uneven legs, one dragging.
+                pb(LeftLeg, (-2.5, -1.0, 0.0), (-0.6, 1.0, 4.5), HUSK_DARK),
+                pb(RightLeg, (0.6, -0.6, 0.0), (2.5, 1.6, 4.0), HUSK_DARK),
+                // Caved torso showing rib shadows, slumped forward.
+                pb(Torso, (-3.0, -0.5, 4.5), (3.0, 2.5, 8.0), HUSK_SKIN),
+                pb(Torso, (-2.6, 2.5, 5.2), (2.6, 2.7, 5.6), HUSK_DARK),
+                pb(Torso, (-2.6, 2.5, 6.2), (2.6, 2.7, 6.6), HUSK_DARK),
+                // Arms hang wrong; one reaches.
+                pb(LeftArm, (-4.2, 0.0, 3.0), (-3.0, 2.0, 7.5), HUSK_DARK),
+                pb(RightArm, (3.0, 0.6, 4.4), (4.2, 3.2, 5.6), HUSK_DARK),
+                pb(RightArm, (3.2, 3.2, 4.2), (4.0, 4.4, 5.0), HUSK_SKIN),
+                // The head lolls; the jaw no longer closes.
+                pb(Head, (-1.5, 0.5, 8.0), (1.5, 3.0, 10.2), HUSK_SKIN),
+                pb(Head, (-1.0, 2.6, 7.2), (1.0, 3.4, 8.0), HUSK_DARK),
+            ];
             P
         }
     }
@@ -257,12 +396,21 @@ pub fn build_figures(
 
 /// Two burning points at head height: the shape of a demon you can't see.
 fn push_eyes(vertices: &mut Vec<LitVertex>, indices: &mut Vec<u32>, unit: &ods_sim::units::Unit) {
-    let feet = (unit.tile * ods_sim::TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, 4.0);
+    let half = ods_sim::TILE_VOXELS as f32 / 2.0;
+    let feet = (unit.tile * ods_sim::TILE_VOXELS).as_vec3()
+        + Vec3::new(half, half, GROUND_TOP as f32);
     // Over-unit color: survives the diffuse term and reads as glow.
     let glow = [3.0, 0.35, 0.2, 1.0];
+    let vs = ods_sim::VS as f32;
     for dx in [-1.4f32, 1.4] {
-        let c = feet + Vec3::new(dx, 0.0, 10.5);
-        push_box(vertices, indices, c - Vec3::splat(0.45), c + Vec3::splat(0.45), glow);
+        let c = feet + Vec3::new(dx, 0.0, 10.5) * vs;
+        push_box(
+            vertices,
+            indices,
+            c - Vec3::splat(0.45 * vs),
+            c + Vec3::splat(0.45 * vs),
+            glow,
+        );
     }
 }
 
@@ -273,7 +421,12 @@ fn push_unit(
     feet_override: Option<Vec3>,
 ) {
     let feet = feet_override.unwrap_or_else(|| {
-        (unit.tile * TILE_VOXELS).as_vec3() + Vec3::new(8.0, 8.0, GROUND_TOP as f32)
+        (unit.tile * TILE_VOXELS).as_vec3()
+            + Vec3::new(
+                TILE_VOXELS as f32 / 2.0,
+                TILE_VOXELS as f32 / 2.0,
+                GROUND_TOP as f32,
+            )
     });
 
     // Pose: kneeling compresses; the subdued lie in a heap; the dead
@@ -331,8 +484,14 @@ fn push_unit(
             // Drained of struggle.
             color = [color[0] * 0.6, color[1] * 0.6, color[2] * 0.6, 1.0];
         }
-        let min = feet + Vec3::new(part.min.x, part.min.y, part.min.z * z_scale);
-        let max = feet + Vec3::new(part.max.x, part.max.y, (part.max.z * z_scale).max(part.min.z * z_scale + 0.4));
+        let vs = ods_sim::VS as f32;
+        let min = feet + Vec3::new(part.min.x, part.min.y, part.min.z * z_scale) * vs;
+        let max = feet
+            + Vec3::new(
+                part.max.x,
+                part.max.y,
+                (part.max.z * z_scale).max(part.min.z * z_scale + 0.4),
+            ) * vs;
         push_box(vertices, indices, min, max, color);
     }
 }

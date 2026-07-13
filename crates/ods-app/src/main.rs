@@ -145,7 +145,7 @@ impl Core {
         geo_camera.distance = 640.0;
         geo_camera.pitch = 0.35;
         let mut menu_camera = OrbitCamera::isometric(Vec3::new(96.0, 96.0, 10.0));
-        menu_camera.distance = 220.0;
+        menu_camera.distance = 220.0 * ods_sim::VS as f32;
 
         Ok(Self {
             window,

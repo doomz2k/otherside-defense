@@ -19,9 +19,9 @@ pub const MOVE_COST_DIAG: i32 = 6;
 
 /// Voxels with local z >= this height block a tile (torso/head space).
 /// Anything lower is floor or step-over rubble.
-const HEADROOM_Z: i32 = 4;
+const HEADROOM_Z: i32 = TILE_VOXELS / 4;
 /// Minimum solid voxels in the floor slab for a tile to support a unit
-/// (one full 16x16 layer's worth).
+/// (one full tile-wide layer's worth).
 const FLOOR_SUPPORT_MIN: i32 = TILE_VOXELS * TILE_VOXELS;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -384,7 +384,7 @@ mod tests {
             let o = crate::tile_to_voxel_min(IVec3::new(4, ty, 0));
             world.fill_box(
                 o + IVec3::new(0, 0, 2),
-                o + IVec3::new(TILE_VOXELS, TILE_VOXELS, 14),
+                o + IVec3::new(TILE_VOXELS, TILE_VOXELS, TILE_VOXELS * 7 / 8),
                 Voxel(2),
             );
         }
@@ -457,7 +457,7 @@ mod tests {
         let o = crate::tile_to_voxel_min(wall_tile);
         world.fill_box(
             o + IVec3::new(0, 0, 2),
-            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, 14),
+            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, TILE_VOXELS * 7 / 8),
             Voxel::EMPTY,
         );
         tiles.rederive_region(&world, o, o + IVec3::splat(TILE_VOXELS));
@@ -469,9 +469,11 @@ mod tests {
         // A partial carve that leaves torso-height debris must NOT open the
         // neighboring wall tile.
         let neighbor = IVec3::new(4, 4, 0);
-        let c = crate::tile_to_voxel_min(neighbor).as_vec3() + Vec3::new(8.0, 8.0, 6.0);
-        world.carve_sphere(c, 5.0);
-        let r = IVec3::splat(6);
+        let half = TILE_VOXELS as f32 / 2.0;
+        let c = crate::tile_to_voxel_min(neighbor).as_vec3()
+            + Vec3::new(half, half, 6.0 * crate::VS as f32);
+        world.carve_sphere(c, 5.0 * crate::VS as f32);
+        let r = IVec3::splat(6 * crate::VS);
         tiles.rederive_region(&world, c.as_ivec3() - r, c.as_ivec3() + r);
         assert!(!tiles.is_walkable(neighbor), "half-breached wall still blocks");
     }
