@@ -32,6 +32,8 @@ enum FxKind {
     Tracer,
     Blast,
     Flash,
+    /// A chip of the world knocked loose: flies, falls, fades.
+    Debris { vel: Vec3 },
 }
 
 /// A scrap of combat text drifting up from a point on the field.
@@ -71,6 +73,9 @@ pub struct BattleScreen {
     show_threat: bool,
     /// The big tactical map ([M]).
     show_map: bool,
+    /// The demon turn waits behind the HIDDEN MOVEMENT curtain.
+    demon_turn_pending: bool,
+    hidden_timer: f32,
     /// Battle pacing: scales the walk glide (set from the options screen).
     pub anim_speed: f32,
     pub cursor: (f32, f32),
@@ -107,6 +112,8 @@ impl BattleScreen {
             floor_cap: false,
             show_threat: false,
             show_map: false,
+            demon_turn_pending: false,
+            hidden_timer: 0.0,
             anim_speed: 1.0,
             cursor: (0.0, 0.0),
             right_drag: false,
@@ -122,7 +129,7 @@ impl BattleScreen {
     // Input from the window (only reaches us when egui didn't consume it)
 
     pub fn click(&mut self, renderer: &mut Renderer, audio: Option<&Audio>, width: f32, height: f32) {
-        if self.battle.winner.is_some() {
+        if self.battle.winner.is_some() || self.demon_turn_pending {
             return;
         }
         let (origin, dir) = self.camera.screen_ray(self.cursor.0, self.cursor.1, width, height);
@@ -665,6 +672,47 @@ impl BattleScreen {
             );
         }
 
+        // The HIDDEN MOVEMENT curtain: the classic black beat while the
+        // Otherside does what it does where you can't see it.
+        if self.demon_turn_pending {
+            let screen = ctx.viewport_rect();
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::new("hidden-movement"),
+            ));
+            painter.rect_filled(
+                screen,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(4, 2, 5, 235),
+            );
+            let center = screen.center();
+            let pulse = 26.0 + 5.0 * (self.fx_clock * 3.0).sin();
+            painter.circle_stroke(
+                center + egui::vec2(0.0, -60.0),
+                pulse,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(160, 20, 18)),
+            );
+            painter.circle_stroke(
+                center + egui::vec2(0.0, -60.0),
+                pulse * 0.55,
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(110, 14, 12)),
+            );
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                "HIDDEN MOVEMENT",
+                egui::FontId::proportional(30.0),
+                egui::Color32::from_rgb(200, 170, 130),
+            );
+            painter.text(
+                center + egui::vec2(0.0, 34.0),
+                egui::Align2::CENTER_CENTER,
+                "the Otherside stirs where no one is watching",
+                egui::FontId::proportional(13.0),
+                egui::Color32::from_rgb(120, 100, 90),
+            );
+        }
+
         if let Some((text, ttl)) = &self.banner {
             let alpha = (ttl.min(0.6) / 0.6 * 255.0) as u8;
             egui::Area::new(egui::Id::new("banner"))
@@ -861,7 +909,7 @@ impl BattleScreen {
     }
 
     fn end_turn(&mut self, renderer: &mut Renderer, audio: Option<&Audio>) {
-        if self.battle.winner.is_some() {
+        if self.battle.winner.is_some() || self.demon_turn_pending {
             return;
         }
         let fled = ai::run_civilian_moves(&mut self.battle);
@@ -873,8 +921,12 @@ impl BattleScreen {
                 return;
             }
         }
-        let events = ai::run_demon_turn(&mut self.battle);
-        self.consume(renderer, audio, &events);
+        // The demon turn waits behind the curtain: the HIDDEN MOVEMENT
+        // interstitial holds the screen for a beat before it resolves.
+        if self.battle.winner.is_none() {
+            self.demon_turn_pending = true;
+            self.hidden_timer = 1.3;
+        }
     }
 
     fn apply(
@@ -913,6 +965,25 @@ impl BattleScreen {
     /// Fights on the night side of the world are lit by muzzle and flame.
     fn is_night(&self) -> bool {
         self.battle.vision_tiles < 14
+    }
+
+    /// Knock a handful of material chips loose: they fly, arc, and die.
+    fn spawn_debris(&mut self, at: Vec3, color: [f32; 4], count: usize) {
+        for i in 0..count {
+            let a = i as f32 * 2.399; // golden-angle scatter
+            let speed = (12.0 + 9.0 * ((i * 7919) % 7) as f32 / 7.0) * VS_F;
+            let up = (26.0 + 18.0 * ((i * 104729) % 13) as f32 / 13.0) * VS_F;
+            self.fx.push(Fx {
+                kind: FxKind::Debris {
+                    vel: Vec3::new(a.cos() * speed, a.sin() * speed, up),
+                },
+                from: at,
+                to: at,
+                color,
+                age: 0.0,
+                life: 0.9,
+            });
+        }
     }
 
     fn float(&mut self, over: UnitId, text: impl Into<String>, color: egui::Color32) {
@@ -1063,18 +1134,16 @@ impl BattleScreen {
                     age: 0.0,
                     life: 0.22,
                 });
-                // After dark the muzzle is a lantern: a brief warm glow.
-                if self.is_night() {
-                    let p = self.unit_pos(*unit, 10.0);
-                    self.fx.push(Fx {
-                        kind: FxKind::Flash,
-                        from: p,
-                        to: p,
-                        color: [1.0, 0.75, 0.35, 0.5],
-                        age: 0.0,
-                        life: 0.16,
-                    });
-                }
+                // The muzzle answers with light — a lantern after dark.
+                let p = self.unit_pos(*unit, 10.0);
+                self.fx.push(Fx {
+                    kind: FxKind::Flash,
+                    from: p,
+                    to: p,
+                    color: [1.0, 0.75, 0.35, if self.is_night() { 0.5 } else { 0.28 }],
+                    age: 0.0,
+                    life: if self.is_night() { 0.16 } else { 0.10 },
+                });
                 play(Sound::Shot);
             }
             Event::Exploded { at, .. } => {
@@ -1087,6 +1156,7 @@ impl BattleScreen {
                     age: 0.0,
                     life: 0.55,
                 });
+                self.spawn_debris(p + Vec3::Z * 4.0 * VS_F, [0.55, 0.42, 0.28, 0.9], 8);
                 self.shake += 5.0;
                 play(Sound::Blast);
             }
@@ -1099,6 +1169,12 @@ impl BattleScreen {
                     age: 0.0,
                     life: 0.3,
                 });
+                self.spawn_debris(*center, [0.45, 0.40, 0.34, 0.85], 5);
+            }
+            Event::WallSmashed { at, .. } => {
+                let p = Self::tile_pos(*at, 12.0);
+                self.spawn_debris(p, [0.40, 0.24, 0.18, 0.9], 9);
+                self.shake += 3.0;
             }
             Event::Died { unit } => {
                 let p = self.unit_pos(*unit, 6.0);
@@ -1122,6 +1198,7 @@ impl BattleScreen {
                     age: 0.0,
                     life: 0.7,
                 });
+                self.spawn_debris(p + Vec3::Z * 6.0 * VS_F, [0.55, 0.05, 0.05, 0.95], 9);
                 self.shake += 4.0;
                 play(Sound::Death);
             }
@@ -1193,6 +1270,16 @@ impl BattleScreen {
         width: f32,
         height: f32,
     ) {
+        // The curtain lifts: the demons take their turn behind it.
+        if self.demon_turn_pending {
+            self.hidden_timer -= dt;
+            if self.hidden_timer <= 0.0 {
+                self.demon_turn_pending = false;
+                let events = ai::run_demon_turn(&mut self.battle);
+                self.consume(renderer, audio, &events);
+            }
+        }
+
         // Hover: what tile is under the cursor, and what would a move cost?
         let (origin, dir) = self.camera.screen_ray(self.cursor.0, self.cursor.1, width, height);
         let hover = self.battle.world.raycast(origin, dir, 4000.0).map(|hit| {
@@ -1344,6 +1431,14 @@ impl BattleScreen {
                 }
                 FxKind::Flash => {
                     push_flat_square(&mut verts, &mut indices, fx.from, 6.0 * VS_F, color);
+                }
+                FxKind::Debris { vel } => {
+                    // Ballistics on a chip of the world.
+                    let g = -140.0 * VS_F;
+                    let p = fx.from + vel * fx.age + Vec3::Z * (0.5 * g * fx.age * fx.age);
+                    if p.z > 0.5 {
+                        push_flat_square(&mut verts, &mut indices, p, 1.1 * VS_F, color);
+                    }
                 }
             }
         }
@@ -1691,6 +1786,28 @@ impl BattleScreen {
                 push_wire_box(&mut verts, &mut indices, u.tile, [0.95, 0.85, 0.3, 0.9]);
             }
         }
+        // Overhead markers, the original's colored language: a gold arrow
+        // over the selected soldier, pale chevrons over the squad, red pips
+        // over every demon in sight.
+        for u in &self.battle.units {
+            if !u.is_active() || u.civilian {
+                continue;
+            }
+            let base = (u.tile * TILE_VOXELS).as_vec3()
+                + Vec3::new(HALF_TILE, HALF_TILE, TILE_VOXELS as f32 + 4.0 * VS_F);
+            match u.side {
+                Side::Order if self.selected == Some(u.id) => {
+                    push_marker(&mut verts, &mut indices, base, 3.2 * VS_F, [1.0, 0.85, 0.2, 0.95]);
+                }
+                Side::Order => {
+                    push_marker(&mut verts, &mut indices, base, 1.7 * VS_F, [0.7, 0.82, 1.0, 0.65]);
+                }
+                Side::Demons if visible.contains(&u.tile) => {
+                    push_marker(&mut verts, &mut indices, base, 2.2 * VS_F, [1.0, 0.15, 0.1, 0.9]);
+                }
+                _ => {}
+            }
+        }
         // The hovered tile wears the classic wireframe cursor: red over
         // enemies, arming-orange with a charge out, white over open ground.
         if let Some(tile) = self.hover {
@@ -1747,6 +1864,22 @@ fn push_wire_box(
             base + corners[(i + 1) % 4] + Vec3::new(0.0, 0.0, top),
         ); // ceiling square
         edge(verts, indices, a, a + Vec3::new(0.0, 0.0, top)); // verticals
+    }
+}
+
+/// An overhead marker: a downward arrow built as two crossed vertical
+/// triangles, readable from any camera yaw.
+fn push_marker(
+    verts: &mut Vec<OverlayVertex>,
+    indices: &mut Vec<u32>,
+    tip: Vec3,
+    r: f32,
+    color: [f32; 4],
+) {
+    for axis in [Vec3::X, Vec3::Y] {
+        let a = tip + axis * r + Vec3::Z * (2.2 * r);
+        let b = tip - axis * r + Vec3::Z * (2.2 * r);
+        push_quad(verts, indices, [tip, a, b, tip], color);
     }
 }
 
@@ -1886,7 +2019,7 @@ fn describe(event: &Event, battle: &Battle) -> String {
             format!("{} rallies the line — every heart steadies", name(by))
         }
         Event::Evacuated { unit } => {
-            format!("*** {} reaches the wagons and is AWAY ***", name(unit))
+            format!("*** {} reaches the gondola and is AWAY ***", name(unit))
         }
         Event::TimeExpired => "!!! too late. The clock has taken the field".to_string(),
         Event::FloorCollapsed { at } => {

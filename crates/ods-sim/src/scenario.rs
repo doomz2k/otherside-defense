@@ -134,9 +134,10 @@ pub fn skirmish(seed: u64) -> Battle {
     Battle::new(world, IVec3::ZERO, MAP_TILES, units, seed)
 }
 
-/// West-side deployment tiles and east-side incursion tiles, in fill order.
+/// Deployment: the gondola deck first, then the mouth, then the ramp —
+/// the squad walks down out of the zeppelin the way it flew in.
 const ORDER_SPAWNS: [(i32, i32); 8] =
-    [(2, 9), (2, 11), (2, 13), (3, 15), (2, 7), (3, 17), (2, 5), (3, 19)];
+    [(1, 11), (2, 11), (1, 12), (2, 12), (3, 11), (3, 12), (4, 11), (4, 12)];
 const DEMON_SPAWNS: [(i32, i32); 8] =
     [(21, 8), (21, 11), (21, 14), (20, 16), (21, 5), (20, 18), (21, 20), (20, 3)];
 
@@ -243,6 +244,7 @@ pub fn incursion_mission(
         ground,
     );
     stipple_ground(&mut world, seed, biome);
+    build_gondola(&mut world);
     match seed % 3 {
         0 => {
             // The chapel yard (the original) — now with a loft: an upper
@@ -511,6 +513,154 @@ pub fn incursion_mission(
         }
     }
 
+    // ------------------------------------------------------------------
+    // Map furniture: the small litter of interrupted lives. All of it
+    // destructible, most of it cover.
+    let cart_at = |world: &mut VoxelWorld, t: IVec3| {
+        let o = t * TILE_VOXELS;
+        // Bed and sideboards, up at axle height.
+        world.fill_box(
+            o + IVec3::new(3 * VS, 5 * VS, GROUND_TOP + 2 * VS),
+            o + IVec3::new(13 * VS, 11 * VS, GROUND_TOP + 5 * VS),
+            MAT_TIMBER,
+        );
+        // Wheels.
+        for (wx, wy) in [(4, 4), (4, 11), (11, 4), (11, 11)] {
+            world.fill_box(
+                o + IVec3::new(wx * VS, wy * VS, GROUND_TOP),
+                o + IVec3::new((wx + 2) * VS, (wy + 1) * VS, GROUND_TOP + 3 * VS),
+                MAT_TIMBER,
+            );
+        }
+    };
+    let grave_at = |world: &mut VoxelWorld, t: IVec3| {
+        let o = t * TILE_VOXELS;
+        world.fill_box(
+            o + IVec3::new(6 * VS, 7 * VS, GROUND_TOP),
+            o + IVec3::new(10 * VS, 9 * VS, GROUND_TOP + 6 * VS),
+            MAT_WALL,
+        );
+    };
+    let scarecrow_at = |world: &mut VoxelWorld, t: IVec3| {
+        let o = t * TILE_VOXELS;
+        // The post and crossbar...
+        world.fill_box(
+            o + IVec3::new(7 * VS, 7 * VS, GROUND_TOP),
+            o + IVec3::new(9 * VS, 9 * VS, GROUND_TOP + 11 * VS),
+            MAT_TIMBER,
+        );
+        world.fill_box(
+            o + IVec3::new(3 * VS, 7 * VS, GROUND_TOP + 8 * VS),
+            o + IVec3::new(13 * VS, 9 * VS, GROUND_TOP + 9 * VS),
+            MAT_TIMBER,
+        );
+        // ...and a head nobody made from straw.
+        world.fill_box(
+            o + IVec3::new(7 * VS, 7 * VS, GROUND_TOP + 11 * VS),
+            o + IVec3::new(9 * VS, 9 * VS, GROUND_TOP + 13 * VS),
+            MAT_GORE,
+        );
+    };
+    let stall_at = |world: &mut VoxelWorld, t: IVec3| {
+        let o = t * TILE_VOXELS;
+        for (px, py) in [(2, 2), (13, 2), (2, 13), (13, 13)] {
+            world.fill_box(
+                o + IVec3::new(px * VS, py * VS, GROUND_TOP),
+                o + IVec3::new((px + 1) * VS, (py + 1) * VS, GROUND_TOP + 12 * VS),
+                MAT_TIMBER,
+            );
+        }
+        // The awning: head-height cover to duck beneath.
+        world.fill_box(
+            o + IVec3::new(VS, VS, GROUND_TOP + 12 * VS),
+            o + IVec3::new(15 * VS, 15 * VS, GROUND_TOP + 13 * VS),
+            MAT_TIMBER,
+        );
+    };
+    // A fence run with a stile gap in the middle: cover with a way through.
+    let fence_from = |world: &mut VoxelWorld, t: IVec3, step: IVec3, len: i32| {
+        for i in 0..len {
+            if i == len / 2 {
+                continue; // the stile
+            }
+            let seg = t + step * i;
+            if !is_open(world, seg) {
+                continue;
+            }
+            let o = seg * TILE_VOXELS;
+            world.fill_box(
+                o + IVec3::new(7 * VS, 7 * VS, GROUND_TOP),
+                o + IVec3::new(9 * VS, 9 * VS, GROUND_TOP + 7 * VS),
+                MAT_TIMBER,
+            );
+            let (rmin, rmax) = if step.x != 0 {
+                (IVec3::new(0, 7 * VS, 0), IVec3::new(TILE_VOXELS, 9 * VS, 0))
+            } else {
+                (IVec3::new(7 * VS, 0, 0), IVec3::new(9 * VS, TILE_VOXELS, 0))
+            };
+            world.fill_box(
+                o + rmin + IVec3::new(0, 0, GROUND_TOP + 4 * VS),
+                o + rmax + IVec3::new(0, 0, GROUND_TOP + 5 * VS),
+                MAT_TIMBER,
+            );
+        }
+    };
+    let roll_dir = |rng: &mut crate::SimRng| {
+        if rng.roll(2) == 0 { IVec3::new(1, 0, 0) } else { IVec3::new(0, 1, 0) }
+    };
+    match biome {
+        Biome::Temperate => {
+            for _ in 0..2 {
+                if let Some(t) = roll_open(&world, &mut rng) {
+                    let step = roll_dir(&mut rng);
+                    fence_from(&mut world, t, step, 3 + rng.roll(2) as i32);
+                }
+            }
+            if let Some(t) = roll_open(&world, &mut rng) {
+                cart_at(&mut world, t);
+            }
+            if let Some(t) = roll_open(&world, &mut rng) {
+                scarecrow_at(&mut world, t);
+            }
+            for _ in 0..2 {
+                if let Some(t) = roll_open(&world, &mut rng) {
+                    grave_at(&mut world, t);
+                }
+            }
+        }
+        Biome::Desert => {
+            if let Some(t) = roll_open(&world, &mut rng) {
+                stall_at(&mut world, t);
+            }
+            if let Some(t) = roll_open(&world, &mut rng) {
+                cart_at(&mut world, t);
+            }
+            if let Some(t) = roll_open(&world, &mut rng) {
+                grave_at(&mut world, t);
+            }
+        }
+        Biome::Jungle => {
+            // An old shrine the canopy swallowed, and a rotting cart.
+            if let Some(t) = roll_open(&world, &mut rng) {
+                grave_at(&mut world, t);
+            }
+            if let Some(t) = roll_open(&world, &mut rng) {
+                cart_at(&mut world, t);
+            }
+        }
+        Biome::Tundra => {
+            if let Some(t) = roll_open(&world, &mut rng) {
+                let step = roll_dir(&mut rng);
+                fence_from(&mut world, t, step, 3);
+            }
+            for _ in 0..2 {
+                if let Some(t) = roll_open(&world, &mut rng) {
+                    grave_at(&mut world, t);
+                }
+            }
+        }
+    }
+
     soldiers.truncate(ORDER_SPAWNS.len());
     let mut units = Vec::new();
     for (i, mut s) in soldiers.into_iter().enumerate() {
@@ -647,6 +797,52 @@ pub fn incursion_mission(
         }
     }
     battle
+}
+
+/// The Order's zeppelin, grounded at the west edge: a planked gondola with
+/// gunwale-height timber sides (boots stop, bullets fly over), a mouth
+/// facing the field flanked by witchfire lanterns, and a boarding ramp.
+/// The squad deploys from its deck; evacuations end here — the west-edge
+/// evacuation line IS the gondola.
+fn build_gondola(world: &mut VoxelWorld) {
+    let gunwale = TILE_VOXELS * 5 / 8;
+    // Deck and ramp planking, set into the ground surface.
+    for (tx, ty) in (0..=3)
+        .flat_map(|tx| (10..=13).map(move |ty| (tx, ty)))
+        .chain([(4, 11), (4, 12), (5, 11), (5, 12)])
+    {
+        let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
+        world.fill_box(
+            o + IVec3::new(0, 0, GROUND_TOP - 1),
+            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, GROUND_TOP),
+            MAT_TIMBER,
+        );
+    }
+    // Gunwales around the hull; the mouth (east face, two tiles) stays open.
+    for ty in 10..=13 {
+        for tx in 0..=3 {
+            let ring = tx == 0 || tx == 3 || ty == 10 || ty == 13;
+            let mouth = tx == 3 && (ty == 11 || ty == 12);
+            if ring && !mouth {
+                let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
+                world.fill_box(
+                    o + IVec3::new(0, 0, GROUND_TOP),
+                    o + IVec3::new(TILE_VOXELS, TILE_VOXELS, gunwale),
+                    MAT_TIMBER,
+                );
+            }
+        }
+    }
+    // Witchfire lanterns on the gunwale corners flanking the mouth.
+    for ty in [10, 13] {
+        let o = IVec3::new(3, ty, 0) * TILE_VOXELS;
+        let ly = if ty == 10 { TILE_VOXELS - 3 * VS } else { VS };
+        world.fill_box(
+            o + IVec3::new(TILE_VOXELS - 3 * VS, ly, gunwale),
+            o + IVec3::new(TILE_VOXELS - VS, ly + 2 * VS, gunwale + 3 * VS),
+            MAT_WARD,
+        );
+    }
 }
 
 /// The 1994 ground texture, in voxels: every tile gets a seeded scatter of
@@ -1062,6 +1258,36 @@ mod tests {
         assert!(b.tiles.is_walkable(IVec3::new(14, 12, 0)), "east doorway");
         // Interior is open.
         assert!(b.tiles.is_walkable(IVec3::new(11, 11, 0)));
+    }
+
+    #[test]
+    fn the_gondola_deploys_walkable_and_its_gunwale_holds() {
+        let squad: Vec<Unit> =
+            (0..4).map(|i| Unit::soldier(i, &format!("S{i}"), IVec3::ZERO)).collect();
+        let b = incursion_mission(
+            7,
+            squad,
+            2,
+            1,
+            0,
+            Biome::Temperate,
+            MissionSpec::Standard,
+        );
+        // Every deployment tile — deck, mouth, ramp — must be standable.
+        for (x, y) in ORDER_SPAWNS {
+            assert!(
+                b.tiles.is_walkable(IVec3::new(x, y, 0)),
+                "spawn ({x},{y}) is blocked"
+            );
+        }
+        // The gunwale stands as real waist-height cover on its tiles (it
+        // can be clambered over, like any mound — but not walked through).
+        let probe = IVec3::new(2, 10, 0) * TILE_VOXELS
+            + IVec3::new(TILE_VOXELS / 2, TILE_VOXELS / 2, GROUND_TOP + 2);
+        assert!(b.world.voxel(probe).is_solid(), "the gunwale is timber, not air");
+        // The mouth is open: the squad walks out onto the ramp and the field.
+        assert!(b.tiles.is_walkable(IVec3::new(3, 11, 0)));
+        assert!(b.tiles.is_walkable(IVec3::new(4, 11, 0)));
     }
 
     #[test]
