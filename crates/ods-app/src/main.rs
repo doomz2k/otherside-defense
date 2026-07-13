@@ -193,6 +193,12 @@ pub struct Core {
     pub base_dirty: bool,
     /// Soldier index whose paper-doll equip window is open.
     pub equip_for: Option<usize>,
+    /// Screen-change fade: 1 = fully black, easing to 0.
+    pub fade: f32,
+    /// Where the globe camera is swinging to, if anywhere: (yaw, pitch).
+    pub geo_swing: Option<(f32, f32)>,
+    /// Pan the battle camera to visible demon action during their turn.
+    pub event_cam: bool,
     pub selected_region: Option<Region>,
     globe_built_for: Option<Option<Region>>,
     /// The title screen's frozen skirmish, slowly orbited.
@@ -202,7 +208,7 @@ pub struct Core {
     last_cursor: (f32, f32),
     last_frame: Instant,
     /// Seconds since launch; feeds the emissive-material pulse.
-    clock: f32,
+    pub clock: f32,
 }
 
 impl ApplicationHandler for App {
@@ -292,6 +298,9 @@ impl Core {
             base_camera,
             base_dirty: false,
             equip_for: None,
+            fade: 0.0,
+            geo_swing: None,
+            event_cam: cfg.event_cam,
             selected_region: None,
             globe_built_for: None,
             menu_built: false,
@@ -315,6 +324,7 @@ impl Core {
             anim_speed: self.anim_speed,
             pixel_scale: self.renderer.pixel_scale(),
             crt: self.renderer.crt(),
+            event_cam: self.event_cam,
             binds: self
                 .binds
                 .iter()
@@ -333,6 +343,7 @@ impl Core {
         self.renderer.set_globe(&vertices, &indices);
         self.globe_built_for = Some(self.selected_region);
         self.screen = Screen::Geoscape;
+        self.fade = 1.0;
     }
 
     /// Switch to the Basescape: the selected chapterhouse as a diorama.
@@ -346,6 +357,7 @@ impl Core {
         self.renderer.set_figures(&verts, &indices);
         self.base_dirty = false;
         self.screen = Screen::Base;
+        self.fade = 1.0;
     }
 
     /// Build the title screen's voxel diorama: a small skirmish scene,
@@ -382,6 +394,7 @@ impl Core {
         self.battle = Some(BattleScreen::new(&mut self.renderer, battle, None));
         self.menu_built = false;
         self.screen = Screen::Battle;
+        self.fade = 1.0;
     }
 
     /// Returns true when the app should exit.
@@ -480,7 +493,7 @@ impl Core {
                         MouseScrollDelta::LineDelta(_, y) => y,
                         MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
                     };
-                    b.camera.zoom(1.0 - scroll * 0.1);
+                    b.zoom_by(1.0 - scroll * 0.1);
                 }
             }
             // A binding is listening: the next key press becomes its home.
@@ -518,6 +531,7 @@ impl Core {
         let dt = self.last_frame.elapsed().as_secs_f32().min(0.1);
         self.last_frame = Instant::now();
         self.clock = (self.clock + dt) % 3600.0;
+        self.fade = (self.fade - dt * 2.2).max(0.0);
 
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let ctx = self.egui_ctx.clone();
@@ -534,6 +548,7 @@ impl Core {
                 if let Some(b) = self.battle.as_mut() {
                     let (w, h) = self.renderer.size();
                     b.anim_speed = self.anim_speed;
+                    b.event_cam = self.event_cam;
                     b.update_frame(dt, &mut self.renderer, self.audio.as_ref(), w, h);
                     let vp = b.camera_vp(self.renderer.aspect());
                     // Night fights are lit low and flat.
@@ -549,8 +564,20 @@ impl Core {
                 if let Some(a) = self.audio.as_mut() {
                     a.music(Some(audio::MusicTrack::Vigil));
                 }
-                // The world turns on its own until the player grabs it.
-                if !self.geo_drag {
+                // The world turns on its own until the player grabs it —
+                // or eases toward whatever the war just pointed at.
+                if let Some((ty, tp)) = self.geo_swing {
+                    let tau = std::f32::consts::TAU;
+                    let dy = (ty - self.geo_camera.yaw + std::f32::consts::PI).rem_euclid(tau)
+                        - std::f32::consts::PI;
+                    let dp = tp - self.geo_camera.pitch;
+                    if self.geo_drag || (dy.abs() < 0.02 && dp.abs() < 0.02) {
+                        self.geo_swing = None;
+                    } else {
+                        self.geo_camera.yaw += dy * (dt * 3.5).min(1.0);
+                        self.geo_camera.pitch += dp * (dt * 3.5).min(1.0);
+                    }
+                } else if !self.geo_drag {
                     self.geo_camera.yaw += dt * 0.08;
                 }
                 if self.globe_built_for != Some(self.selected_region) {
@@ -584,6 +611,14 @@ impl Core {
                                 self.day_progress = 0.0;
                                 for e in &events {
                                     self.log.push(chronicle::narrate(c, e));
+                                    if let ods_geo::GeoEvent::RiftDetected { id, .. } = e
+                                        && let Some(r) = c.rifts.iter().find(|r| r.id == *id)
+                                    {
+                                        self.geo_swing = Some((
+                                            r.lon.to_radians(),
+                                            r.lat.to_radians().clamp(0.15, 1.2),
+                                        ));
+                                    }
                                 }
                                 break;
                             }
@@ -669,6 +704,18 @@ impl Core {
         if self.show_options && self.screen != Screen::Battle {
             self.options_window(ctx);
         }
+        // Screen changes arrive out of black.
+        if self.fade > 0.0 {
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("screen-fade"),
+            ));
+            painter.rect_filled(
+                ctx.viewport_rect(),
+                0.0,
+                egui::Color32::from_black_alpha((self.fade.clamp(0.0, 1.0) * 255.0) as u8),
+            );
+        }
     }
 
     fn options_window(&mut self, ctx: &egui::Context) {
@@ -733,6 +780,13 @@ impl Core {
                     self.renderer.set_pixel_scale(scale);
                     self.save_config();
                 }
+                if ui
+                    .checkbox(&mut self.event_cam, "Event camera")
+                    .on_hover_text("pan to visible demon action during their turn")
+                    .changed()
+                {
+                    self.save_config();
+                }
                 let mut crt = self.renderer.crt();
                 if ui.checkbox(&mut crt, "CRT dressing").on_hover_text(
                     "scanlines, a whisper of phosphor mask, corners that fall away",
@@ -786,12 +840,70 @@ impl Core {
     }
 
     fn launch_mission(&mut self, kind: ods_geo::MissionKind) {
+        use ods_geo::MissionKind as MK;
+        use ods_sim::battle::{MissionRule, Weather};
         let Some(c) = &mut self.campaign else { return };
         match c.begin_mission(kind) {
             Ok((battle, token)) => {
-                self.battle = Some(BattleScreen::new(&mut self.renderer, battle, Some(token)));
+                // The briefing card: everything known before boots touch dirt.
+                let mut lines = vec![format!(
+                    "Operation: {}",
+                    token.kind().label().to_uppercase()
+                )];
+                let ground = match kind {
+                    MK::Rift(id) => c
+                        .rifts
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| format!("{} — {} country", r.region.name(), r.region.biome().name())),
+                    MK::Nest(id) => c
+                        .nests
+                        .iter()
+                        .find(|n| n.id == id)
+                        .map(|n| format!("{} — a standing nest", n.region.name())),
+                    MK::Purge(region) => Some(format!("{} — the patron's manor", region.name())),
+                    MK::Reckoning => Some("the chapterhouse itself".to_string()),
+                    _ => Some("the Otherside".to_string()),
+                };
+                if let Some(g) = ground {
+                    lines.push(format!("Ground: {g}"));
+                }
+                match battle.weather {
+                    Weather::Clear => {}
+                    Weather::Sandstorm => lines.push("! Sky: sandstorm — sight and aim suffer".into()),
+                    Weather::Snowfall => lines.push("! Sky: snowfall — every step costs more".into()),
+                    Weather::Rain => lines.push("! Sky: rain — fire gutters, sound drowns".into()),
+                }
+                if battle.vision_tiles < 14 {
+                    lines.push("! Night assault — sight is short; carry the flares high".into());
+                }
+                match battle.rule {
+                    MissionRule::Standard => {
+                        lines.push("Orders: banish the incursion — kill or demolish".into())
+                    }
+                    MissionRule::Evacuate { needed, turns } => lines.push(format!(
+                        "! Orders: walk {needed} civilian(s) to the gondola inside {turns} turns"
+                    )),
+                    MissionRule::Interrupt { turns } => lines.push(format!(
+                        "! Orders: the ritual completes in {turns} turns — the obelisk must fall"
+                    )),
+                    MissionRule::Snatch { .. } => {
+                        lines.push("! Orders: the ringleader is wanted ALIVE".into())
+                    }
+                }
+                let squad: Vec<String> = token
+                    .squad()
+                    .iter()
+                    .map(|&i| c.soldiers[i].name.clone())
+                    .collect();
+                lines.push(format!("Squad: {}", squad.join(", ")));
+
+                let mut screen = BattleScreen::new(&mut self.renderer, battle, Some(token));
+                screen.briefing = Some(lines);
+                self.battle = Some(screen);
                 self.menu_built = false;
                 self.screen = Screen::Battle;
+                self.fade = 1.0;
             }
             Err(e) => self.log.push(format!("cannot stage the mission: {e:?}")),
         }
@@ -836,6 +948,7 @@ impl Core {
                 }
                 _ => {
                     self.screen = Screen::Menu;
+                    self.fade = 1.0;
                 }
             }
         }

@@ -80,6 +80,20 @@ pub struct BattleScreen {
     hidden_timer: f32,
     /// Battle pacing: scales the walk glide (set from the options screen).
     pub anim_speed: f32,
+    /// Pan the camera to visible demon action during their turn.
+    pub event_cam: bool,
+    /// The mission briefing card; input holds until DEPLOY is pressed.
+    pub briefing: Option<Vec<String>>,
+    /// Seconds left of the entry sweep down off the gondola.
+    intro: f32,
+    intro_from: Vec3,
+    intro_to: Vec3,
+    /// Where the camera is easing (zoom, yaw, and any event to look at).
+    zoom_target: f32,
+    yaw_target: f32,
+    look_target: Option<Vec3>,
+    /// (fx_clock stamp, unit) of the last click, for double-click centering.
+    last_click: (f32, Option<UnitId>),
     pub cursor: (f32, f32),
     pub right_drag: bool,
     pub last_cursor: (f32, f32),
@@ -89,14 +103,31 @@ impl BattleScreen {
     pub fn new(renderer: &mut Renderer, battle: Battle, token: Option<MissionToken>) -> Self {
         let (min, max) = battle.tiles.bounds();
         let center = ((min + max).as_vec3() / 2.0) * TILE_VOXELS as f32;
+        // The sweep: open over the gondola on the west edge, glide out.
+        let intro_from = Vec3::new(
+            (min.x as f32 + 2.5) * TILE_VOXELS as f32,
+            center.y,
+            0.0,
+        );
+        let intro_to = Vec3::new(center.x, center.y, 0.0);
+        let base_distance = 420.0 * VS_F;
         let mut screen = Self {
             battle,
             token,
             camera: {
-                let mut cam = OrbitCamera::isometric(Vec3::new(center.x, center.y, 0.0));
-                cam.distance *= VS_F; // the field doubled; stand back to match
+                let mut cam = OrbitCamera::isometric(intro_from);
+                cam.distance = base_distance * 1.6;
                 cam
             },
+            event_cam: true,
+            briefing: None,
+            intro: 1.5,
+            intro_from,
+            intro_to,
+            zoom_target: base_distance,
+            yaw_target: ods_render::ISO_YAW,
+            look_target: None,
+            last_click: (0.0, None),
             log: vec!["The squad deploys.".to_string()],
             selected: None,
             fire_mode: FireMode::Snap,
@@ -136,6 +167,14 @@ impl BattleScreen {
     // Input from the window (only reaches us when egui didn't consume it)
 
     pub fn click(&mut self, renderer: &mut Renderer, audio: Option<&Audio>, width: f32, height: f32) {
+        if self.briefing.is_some() {
+            return; // the card holds the field
+        }
+        if self.intro > 0.0 {
+            self.intro = 0.0; // a click skips the sweep
+            self.camera.target = self.intro_to;
+            return;
+        }
         if self.battle.winner.is_some() || self.demon_turn_pending {
             return;
         }
@@ -157,6 +196,13 @@ impl BattleScreen {
         if let Some(id) = self.battle.unit_at(tile) {
             match self.battle.unit(id).side {
                 Side::Order => {
+                    // A double-click swings the camera to them.
+                    if self.last_click.1 == Some(id)
+                        && self.fx_clock - self.last_click.0 < 0.35
+                    {
+                        self.look_target = Some(self.unit_pos(id, 0.0) * Vec3::new(1.0, 1.0, 0.0));
+                    }
+                    self.last_click = (self.fx_clock, Some(id));
                     self.selected = Some(id);
                     self.refresh_scene(renderer);
                 }
@@ -178,6 +224,13 @@ impl BattleScreen {
     }
 
     pub fn key(&mut self, renderer: &mut Renderer, audio: Option<&Audio>, code: KeyCode) {
+        if self.briefing.is_some() {
+            return; // the card holds the field
+        }
+        if self.intro > 0.0 {
+            self.intro = 0.0;
+            self.camera.target = self.intro_to;
+        }
         match code {
             KeyCode::Escape => {
                 if self.grenade_armed {
@@ -320,8 +373,8 @@ impl BattleScreen {
                     self.apply(renderer, audio, result);
                 }
             }
-            KeyCode::KeyQ => self.camera.snap_turn(1),
-            KeyCode::KeyE => self.camera.snap_turn(-1),
+            KeyCode::KeyQ => self.yaw_target += std::f32::consts::FRAC_PI_2,
+            KeyCode::KeyE => self.yaw_target -= std::f32::consts::FRAC_PI_2,
             KeyCode::KeyW => self.camera.pan(0.0, PAN_STEP),
             KeyCode::KeyS => self.camera.pan(0.0, -PAN_STEP),
             KeyCode::KeyA => self.camera.pan(-PAN_STEP, 0.0),
@@ -335,6 +388,12 @@ impl BattleScreen {
         // classic tabletop angle survives casual mouse movement (Q/E snap
         // back to the true diagonals).
         self.camera.orbit(dx * -0.008, dy * 0.003);
+        self.yaw_target = self.camera.yaw;
+    }
+
+    /// Smooth zoom: the wheel moves the target, the camera eases after it.
+    pub fn zoom_by(&mut self, factor: f32) {
+        self.zoom_target = (self.zoom_target * factor).clamp(60.0, 3200.0);
     }
 
     // ------------------------------------------------------------------
@@ -875,6 +934,37 @@ impl BattleScreen {
                 });
             });
 
+        // The briefing card: everything known, one DEPLOY button.
+        if let Some(lines) = self.briefing.clone() {
+            let mut deploy = false;
+            egui::Window::new("MISSION BRIEFING")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, -20.0])
+                .show(ctx, |ui| {
+                    ui.set_min_width(340.0);
+                    for line in &lines {
+                        if let Some(rest) = line.strip_prefix("! ") {
+                            ui.colored_label(egui::Color32::from_rgb(230, 170, 90), rest);
+                        } else {
+                            ui.label(line);
+                        }
+                    }
+                    ui.add_space(10.0);
+                    ui.vertical_centered(|ui| {
+                        if ui
+                            .button(egui::RichText::new("  D E P L O Y  ").size(18.0).strong())
+                            .clicked()
+                        {
+                            deploy = true;
+                        }
+                    });
+                });
+            if deploy {
+                self.briefing = None;
+            }
+        }
+
         if let Some(winner) = self.battle.winner {
             egui::Window::new("Battle over")
                 .collapsible(false)
@@ -965,6 +1055,14 @@ impl BattleScreen {
         for e in events {
             self.log.push(describe(e, &self.battle));
             self.spawn_fx(e, audio);
+            // The event camera glances at demon action the squad can see.
+            if self.event_cam
+                && let Event::Fired { unit, target, .. } = e
+                && self.battle.unit(*unit).side == Side::Demons
+            {
+                self.look_target =
+                    Some(self.unit_pos(*target, 0.0) * Vec3::new(1.0, 1.0, 0.0));
+            }
         }
         self.refresh_chunks(renderer);
         self.refresh_scene(renderer);
@@ -1319,6 +1417,48 @@ impl BattleScreen {
         width: f32,
         height: f32,
     ) {
+        // The entry sweep: hold on the gondola, then glide out over the
+        // field (the briefing card pauses it; a click skips it).
+        if self.briefing.is_none() && self.intro > 0.0 {
+            self.intro = (self.intro - dt).max(0.0);
+            let t = 1.0 - self.intro / 1.5;
+            let s = t * t * (3.0 - 2.0 * t);
+            self.camera.target = self.intro_from.lerp(self.intro_to, s);
+            self.camera.distance = self.zoom_target * (1.6 - 0.6 * s);
+        }
+        // Camera easing: zoom, quarter-turns, and event glances all lerp.
+        if self.intro <= 0.0 {
+            self.camera.distance +=
+                (self.zoom_target - self.camera.distance) * (dt * 10.0).min(1.0);
+        }
+        let dyaw = self.yaw_target - self.camera.yaw;
+        if dyaw.abs() > 0.0005 {
+            self.camera.yaw += dyaw * (dt * 9.0).min(1.0);
+        }
+        if let Some(look) = self.look_target {
+            let d = (look - self.camera.target) * Vec3::new(1.0, 1.0, 0.0);
+            if d.length() < 2.0 {
+                self.look_target = None;
+            } else {
+                self.camera.target += d * (dt * 5.0).min(1.0);
+            }
+        }
+        // Edge scrolling: the cursor against the window rim pans the field.
+        if self.intro <= 0.0 && self.briefing.is_none() {
+            let m = 10.0;
+            let step = 420.0 * VS_F * dt;
+            if self.cursor.0 > 0.0 && self.cursor.0 < m {
+                self.camera.pan(-step, 0.0);
+            } else if self.cursor.0 > width - m && self.cursor.0 < width {
+                self.camera.pan(step, 0.0);
+            }
+            if self.cursor.1 > 0.0 && self.cursor.1 < m {
+                self.camera.pan(0.0, step);
+            } else if self.cursor.1 > height - m && self.cursor.1 < height {
+                self.camera.pan(0.0, -step);
+            }
+        }
+
         // The curtain lifts: the demons take their turn behind it.
         if self.demon_turn_pending {
             self.hidden_timer -= dt;

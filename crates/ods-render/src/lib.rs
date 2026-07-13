@@ -6,7 +6,7 @@
 mod camera;
 mod renderer;
 
-pub use camera::OrbitCamera;
+pub use camera::{ISO_YAW, OrbitCamera};
 pub use renderer::{LitVertex, OverlayVertex, Renderer, UiFrame};
 
 use bytemuck::{Pod, Zeroable};

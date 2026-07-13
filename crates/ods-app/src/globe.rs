@@ -235,6 +235,40 @@ pub fn build_markers(campaign: &Campaign, time: f32) -> (Vec<LitVertex>, Vec<u32
         push(rift.lat, rift.lon, size, color);
     }
 
+    // Sorties crawl their great-circle routes: the zeppelin as a small
+    // gold mote, with the road ahead dotted out to the rift.
+    for sortie in &campaign.sorties {
+        let Some(rift) = campaign.rifts.iter().find(|r| r.id == sortie.rift_id) else {
+            continue;
+        };
+        let total = sortie.days_total.max(1) as f32;
+        let progress = (1.0 - sortie.days_left as f32 / total).clamp(0.0, 1.0);
+        let lerp = |t: f32| -> (f32, f32) {
+            // Straight lat/lon interpolation, shortest way around.
+            let mut dlon = rift.lon - sortie.from.1;
+            if dlon > 180.0 {
+                dlon -= 360.0;
+            }
+            if dlon < -180.0 {
+                dlon += 360.0;
+            }
+            (
+                sortie.from.0 + (rift.lat - sortie.from.0) * t,
+                sortie.from.1 + dlon * t,
+            )
+        };
+        // The road ahead, dotted.
+        let mut t = progress;
+        while t < 1.0 {
+            let (lat, lon) = lerp(t);
+            push(lat, lon, 1.4, [0.9, 0.8, 0.5, 1.0]);
+            t += 0.08;
+        }
+        // The ship itself, bobbing on the wind.
+        let (lat, lon) = lerp(progress);
+        push(lat, lon, 4.0 + 0.5 * (time * 3.0).sin(), [1.0, 0.85, 0.35, 1.0]);
+    }
+
     (vertices, indices)
 }
 

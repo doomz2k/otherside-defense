@@ -18,6 +18,54 @@ pub enum GeoAction {
 
 impl Core {
     pub fn menu_ui(&mut self, ctx: &egui::Context) {
+        // Embers rise off the diorama behind everything, and a slow sigil
+        // ring turns behind the title.
+        let screen = ctx.viewport_rect();
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Background,
+            egui::Id::new("title-dressing"),
+        ));
+        let t = self.clock;
+        let hash = |i: u32| -> f32 {
+            let mut h = i.wrapping_mul(2654435761).wrapping_add(0x9E3779B9);
+            h ^= h >> 15;
+            ((h.wrapping_mul(2246822519) >> 9) & 1023) as f32 / 1023.0
+        };
+        for i in 0..44u32 {
+            let hx = hash(i);
+            let speed = 14.0 + hash(i + 100) * 26.0;
+            let cycle = screen.height() + 40.0;
+            let y = screen.max.y - ((t * speed + hash(i + 200) * cycle) % cycle);
+            let x = screen.min.x
+                + hx * screen.width()
+                + (t * (0.6 + hash(i + 300)) + i as f32).sin() * 9.0;
+            let flicker = 0.4 + 0.6 * ((t * 3.0 + i as f32 * 1.7).sin() * 0.5 + 0.5);
+            let a = (flicker * 130.0) as u8;
+            painter.circle_filled(
+                egui::pos2(x, y),
+                1.0 + hash(i + 400) * 1.8,
+                egui::Color32::from_rgba_unmultiplied(255, 130 + (hash(i + 500) * 60.0) as u8, 40, a),
+            );
+        }
+        // The sigil: two counter-turning rings high behind the card.
+        let sigil_c = egui::pos2(screen.center().x, screen.min.y + 108.0);
+        let pulse = 0.5 + 0.5 * (t * 1.1).sin();
+        painter.circle_stroke(
+            sigil_c,
+            64.0 + pulse * 3.0,
+            egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(190, 40, 30, 90)),
+        );
+        painter.circle_stroke(
+            sigil_c,
+            52.0 - pulse * 3.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(150, 30, 24, 70)),
+        );
+        for k in 0..5 {
+            let a = t * 0.35 + k as f32 * std::f32::consts::TAU / 5.0;
+            let p = sigil_c + egui::vec2(a.cos(), a.sin()) * 58.0;
+            painter.circle_filled(p, 2.2, egui::Color32::from_rgba_unmultiplied(220, 60, 40, 120));
+        }
+
         // The voxel diorama smoulders behind a transparent panel; the menu
         // itself sits on a parchment-dark card.
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| {
@@ -31,6 +79,15 @@ impl Core {
                 card.show(ui, |ui| self.menu_card(ui));
             });
         });
+
+        // The build wears its number quietly.
+        painter.text(
+            screen.max - egui::vec2(10.0, 8.0),
+            egui::Align2::RIGHT_BOTTOM,
+            format!("v{}", env!("CARGO_PKG_VERSION")),
+            egui::FontId::proportional(11.0),
+            egui::Color32::from_gray(110),
+        );
     }
 
     fn menu_card(&mut self, ui: &mut egui::Ui) {
@@ -376,15 +433,23 @@ impl Core {
                     .rifts
                     .iter()
                     .filter(|r| r.detected)
-                    .map(|r| (r.id, r.kind, r.region, r.days_left, r.is_stabilized()))
+                    .map(|r| (r.id, r.kind, r.region, r.days_left, r.is_stabilized(), r.lat, r.lon))
                     .collect();
                 if rifts.is_empty() {
                     ui.label("No detected rifts. The augurs keep watch.");
                 }
-                for (id, kind, region, days_left, stabilized) in rifts {
+                for (id, kind, region, days_left, stabilized, lat, lon) in rifts {
                     let local = c.bases.iter().any(|b| b.region == region);
                     let sortie = c.sorties.iter().find(|s| s.rift_id == id).copied();
                     ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .small_button("⌖")
+                            .on_hover_text("swing the globe to it")
+                            .clicked()
+                        {
+                            self.geo_swing =
+                                Some((lon.to_radians(), lat.to_radians().clamp(0.15, 1.2)));
+                        }
                         ui.label(format!(
                             "{} in {} ({}) — {days_left}d{}",
                             kind.name(),

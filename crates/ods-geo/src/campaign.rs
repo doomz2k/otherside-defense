@@ -164,6 +164,12 @@ pub struct Sortie {
     /// Mauled by a sky-hunt en route: the squad lands at three-quarter blood.
     #[serde(default)]
     pub bloodied: bool,
+    /// The full flight length, for drawing progress along the route.
+    #[serde(default)]
+    pub days_total: u32,
+    /// Where the flight left from (lat, lon) — the route's other end.
+    #[serde(default)]
+    pub from: (f32, f32),
 }
 
 /// How a gargoyle sky-hunt on a sortie ended.
@@ -1399,7 +1405,31 @@ impl Campaign {
         for &i in &squad {
             self.soldiers[i].aboard = Some(rift_id);
         }
-        self.sorties.push(Sortie { rift_id, days_left: days, lead, bloodied: false });
+        // The route's home end: the chapterhouse nearest the rift.
+        let to = self
+            .rifts
+            .iter()
+            .find(|r| r.id == rift_id)
+            .map(|r| (r.lat, r.lon))
+            .unwrap_or((0.0, 0.0));
+        let from = self
+            .bases
+            .iter()
+            .map(|b| b.region.centroid())
+            .min_by(|a, b| {
+                Region::arc_degrees(*a, to)
+                    .partial_cmp(&Region::arc_degrees(*b, to))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or((50.0, 15.0));
+        self.sorties.push(Sortie {
+            rift_id,
+            days_left: days,
+            lead,
+            bloodied: false,
+            days_total: days,
+            from,
+        });
         Ok(days)
     }
 

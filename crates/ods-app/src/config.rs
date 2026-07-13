@@ -12,6 +12,9 @@ pub struct Config {
     pub anim_speed: f32,
     pub pixel_scale: u32,
     pub crt: bool,
+    /// Pan the battle camera to visible demon action during their turn.
+    #[serde(default)]
+    pub event_cam: bool,
     /// Only the bindings that differ from default: (action label, key name).
     #[serde(default)]
     pub binds: Vec<(String, String)>,
@@ -25,6 +28,7 @@ impl Default for Config {
             anim_speed: 1.0,
             pixel_scale: 3,
             crt: false,
+            event_cam: true,
             binds: Vec::new(),
         }
     }
