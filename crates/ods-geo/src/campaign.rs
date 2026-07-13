@@ -500,6 +500,17 @@ pub struct MissionToken {
     base: usize,
 }
 
+impl MissionToken {
+    pub fn kind(&self) -> MissionKind {
+        self.kind
+    }
+
+    /// Roster indices of the deployed squad, in deployment order.
+    pub fn squad(&self) -> &[usize] {
+        &self.squad_idx
+    }
+}
+
 /// The campaign's running ledger of deeds, kept for the war room and the
 /// end-of-campaign accounting.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

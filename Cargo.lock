@@ -1913,6 +1913,7 @@ dependencies = [
  "ods-sim",
  "ods-voxel",
  "rodio",
+ "serde",
  "serde_json",
  "winit",
 ]

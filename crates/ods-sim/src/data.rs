@@ -1,7 +1,10 @@
 //! Data-driven balance: weapon and species tables parsed from RON.
 //!
-//! The tables ship embedded in the binary, but a file at `./data/<name>.ron`
-//! beside the executable overrides them at startup — the modding hook.
+//! The tables ship embedded in the binary. Two modding hooks stack on top
+//! at startup:
+//!   1. `./data/<name>.ron` beside the executable REPLACES a whole table.
+//!   2. every `./mods/<mod>/<name>.ron` OVERLAYS entries onto the result,
+//!      in alphabetical mod order — a mod ships only the keys it changes.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -42,9 +45,41 @@ pub struct SpeciesDef {
     pub armor: (i32, i32, i32),
 }
 
-fn load<T: serde::de::DeserializeOwned>(file: &str, embedded: &str) -> T {
+fn load<T: serde::de::DeserializeOwned>(file: &str, embedded: &str) -> HashMap<String, T> {
     let text = std::fs::read_to_string(format!("data/{file}")).unwrap_or_else(|_| embedded.to_string());
-    ron::from_str(&text).unwrap_or_else(|e| panic!("bad {file}: {e}"))
+    let mut table: HashMap<String, T> =
+        ron::from_str(&text).unwrap_or_else(|e| panic!("bad {file}: {e}"));
+    // Mods overlay, alphabetically, later mods winning contested keys.
+    let mut mods: Vec<std::path::PathBuf> = std::fs::read_dir("mods")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    mods.sort();
+    for dir in mods {
+        let path = dir.join(file);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            match apply_overlay(&mut table, &text) {
+                Ok(n) => eprintln!("mods: {} overlays {n} entr(ies) of {file}", dir.display()),
+                Err(e) => eprintln!("mods: BAD {} — ignored: {e}", path.display()),
+            }
+        }
+    }
+    table
+}
+
+/// Merge a RON table fragment onto an existing table. Returns how many
+/// entries the fragment carried.
+fn apply_overlay<T: serde::de::DeserializeOwned>(
+    table: &mut HashMap<String, T>,
+    text: &str,
+) -> Result<usize, ron::error::SpannedError> {
+    let overlay: HashMap<String, T> = ron::from_str(text)?;
+    let n = overlay.len();
+    table.extend(overlay);
+    Ok(n)
 }
 
 pub fn weapons() -> &'static HashMap<String, WeaponDef> {
@@ -59,6 +94,28 @@ pub fn species() -> &'static HashMap<String, SpeciesDef> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mod_overlays_replace_only_what_they_name() {
+        let mut table = super::load::<super::WeaponDef>(
+            "weapons.ron",
+            include_str!("../data/weapons.ron"),
+        );
+        let stock_hellspit = table["hellspit"].power;
+        let n = super::apply_overlay(
+            &mut table,
+            r#"{ "rifle": (power: 99, snap_cost_pct: 25, aimed_cost_pct: 50,
+                 snap_acc: 60, aimed_acc: 110, auto: None,
+                 breach_radius: 0.0, melee: false, arcing: false) }"#,
+        )
+        .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(table["rifle"].power, 99, "the named key is overridden");
+        assert_eq!(table["hellspit"].power, stock_hellspit, "the rest survive");
+        // A broken fragment reports instead of corrupting the table.
+        assert!(super::apply_overlay::<super::WeaponDef>(&mut table, "not ron").is_err());
+        assert_eq!(table["rifle"].power, 99);
+    }
+
     #[test]
     fn embedded_tables_parse_and_cover_the_roster() {
         let w = super::weapons();

@@ -13,6 +13,7 @@ mod audio;
 mod basescape;
 mod battle_screen;
 mod chronicle;
+mod config;
 mod figures;
 mod geoscape;
 mod globe;
@@ -40,6 +41,19 @@ pub fn slot_path(slot: usize) -> String {
     format!("otherside-save-{slot}.json")
 }
 
+pub fn autosave_history_path(n: usize) -> String {
+    format!("otherside-autosave-{n}.json")
+}
+
+/// Rolling autosaves: the newest is AUTOSAVE_PATH, and the last three
+/// generations survive behind it — one bad day never eats the record.
+pub fn write_autosave(c: &ods_geo::Campaign) {
+    let _ = std::fs::rename(autosave_history_path(2), autosave_history_path(3));
+    let _ = std::fs::rename(autosave_history_path(1), autosave_history_path(2));
+    let _ = std::fs::rename(AUTOSAVE_PATH, autosave_history_path(1));
+    let _ = std::fs::write(AUTOSAVE_PATH, c.save_to_string());
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--headless") {
@@ -53,6 +67,76 @@ fn main() -> anyhow::Result<()> {
     let mut app = App { core: None };
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// The after-action report: what the field cost and who distinguished
+/// themselves on it.
+pub struct Debrief {
+    pub victory: bool,
+    pub label: String,
+    pub turns: u32,
+    pub demons_slain: u32,
+    pub captures: u32,
+    pub civilians: (u32, u32),
+    pub fallen: Vec<String>,
+    pub commendations: Vec<String>,
+}
+
+impl Debrief {
+    fn from_report(label: &str, report: &ods_geo::BattleReport, names: &[String]) -> Self {
+        let name = |i: usize| -> String {
+            names.get(i).cloned().unwrap_or_else(|| format!("soldier #{i}"))
+        };
+        let mut commendations = Vec::new();
+        if let Some((i, _, xp)) = report
+            .survivors
+            .iter()
+            .filter(|(_, _, xp)| xp.kills >= 2)
+            .max_by_key(|(_, _, xp)| xp.kills)
+        {
+            commendations.push(format!("⚔ The Reaper's Due — {} ({} kills)", name(*i), xp.kills));
+        }
+        if let Some((i, _, xp)) = report
+            .survivors
+            .iter()
+            .filter(|(_, _, xp)| xp.shots_fired >= 4 && xp.shots_hit * 100 >= xp.shots_fired * 60)
+            .max_by_key(|(_, _, xp)| xp.shots_hit * 100 / xp.shots_fired)
+        {
+            commendations.push(format!(
+                "🎯 Sharpshooter — {} ({}/{} shots told)",
+                name(*i),
+                xp.shots_hit,
+                xp.shots_fired
+            ));
+        }
+        if let Some((i, _, xp)) = report
+            .survivors
+            .iter()
+            .filter(|(_, _, xp)| xp.reaction_shots >= 2)
+            .max_by_key(|(_, _, xp)| xp.reaction_shots)
+        {
+            commendations.push(format!(
+                "⚡ The Watchful — {} ({} reaction shots)",
+                name(*i),
+                xp.reaction_shots
+            ));
+        }
+        for (i, _, xp) in &report.survivors {
+            if xp.dread_survived > 0 {
+                commendations.push(format!("🕯 Unbroken — {} stared into it and held", name(*i)));
+            }
+        }
+        Self {
+            victory: report.victory,
+            label: label.to_string(),
+            turns: report.turns,
+            demons_slain: report.demons_slain,
+            captures: report.captured_grunts + report.captured_overseers,
+            civilians: (report.civilians_saved, report.civilians_dead),
+            fallen: report.dead.iter().map(|&i| name(i)).collect(),
+            commendations,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -94,6 +178,11 @@ pub struct Core {
     pub cam_sense: f32,
     /// Battle pacing multiplier: how fast figures glide (0.5..=3).
     pub anim_speed: f32,
+    /// The rebindable battle keys and, while listening, which is rebinding.
+    pub binds: Vec<config::Bind>,
+    pub rebinding: Option<usize>,
+    /// The after-action report awaiting review on the Geoscape.
+    pub debrief: Option<Debrief>,
     audio: Option<audio::Audio>,
     /// The big spinning world.
     geo_camera: OrbitCamera,
@@ -144,7 +233,16 @@ impl ApplicationHandler for App {
 
 impl Core {
     fn new(window: Arc<Window>) -> anyhow::Result<Self> {
-        let renderer = Renderer::new(window.clone())?;
+        let cfg = config::Config::load();
+        let mut binds = config::default_binds();
+        config::apply_saved(&mut binds, &cfg.binds);
+        let mut renderer = Renderer::new(window.clone())?;
+        renderer.set_pixel_scale(cfg.pixel_scale);
+        renderer.set_crt(cfg.crt);
+        let mut audio = audio::Audio::new();
+        if let Some(a) = audio.as_mut() {
+            a.set_volume(cfg.volume);
+        }
         let egui_ctx = egui::Context::default();
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),
@@ -182,10 +280,13 @@ impl Core {
             show_options: false,
             geo_speed: 0,
             day_progress: 0.0,
-            volume: 1.0,
-            cam_sense: 1.0,
-            anim_speed: 1.0,
-            audio: audio::Audio::new(),
+            volume: cfg.volume,
+            cam_sense: cfg.cam_sense,
+            anim_speed: cfg.anim_speed,
+            binds,
+            rebinding: None,
+            debrief: None,
+            audio,
             geo_camera,
             geo_drag: false,
             base_camera,
@@ -204,6 +305,24 @@ impl Core {
 
     pub(crate) fn audio_mut(&mut self) -> Option<&mut audio::Audio> {
         self.audio.as_mut()
+    }
+
+    /// Persist the player's preferences (called whenever one changes).
+    pub fn save_config(&self) {
+        config::Config {
+            volume: self.volume,
+            cam_sense: self.cam_sense,
+            anim_speed: self.anim_speed,
+            pixel_scale: self.renderer.pixel_scale(),
+            crt: self.renderer.crt(),
+            binds: self
+                .binds
+                .iter()
+                .filter(|b| b.current != b.default)
+                .map(|b| (b.label.to_string(), config::code_name(b.current)))
+                .collect(),
+        }
+        .save();
     }
 
     /// Switch to the Geoscape and (re)install the globe scene.
@@ -360,11 +479,27 @@ impl Core {
                     b.camera.zoom(1.0 - scroll * 0.1);
                 }
             }
+            // A binding is listening: the next key press becomes its home.
+            WindowEvent::KeyboardInput { event, .. }
+                if self.rebinding.is_some() && event.state == ElementState::Pressed =>
+            {
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    if code == winit::keyboard::KeyCode::Escape {
+                        self.rebinding = None;
+                    } else if config::REBINDABLE.contains(&code)
+                        && let Some(i) = self.rebinding.take()
+                    {
+                        self.binds[i].current = code;
+                        self.save_config();
+                    }
+                }
+            }
             WindowEvent::KeyboardInput { event, .. }
                 if self.screen == Screen::Battle && !response.consumed =>
             {
                 if event.state == ElementState::Pressed
                     && let PhysicalKey::Code(code) = event.physical_key
+                    && let Some(code) = config::translate(&self.binds, code)
                     && let Some(b) = self.battle.as_mut()
                 {
                     b.key(&mut self.renderer, self.audio.as_ref(), code);
@@ -450,7 +585,7 @@ impl Core {
                             }
                         }
                         if crossed > 0 {
-                            let _ = std::fs::write(AUTOSAVE_PATH, c.save_to_string());
+                            write_autosave(c);
                         }
                     }
                 }
@@ -548,9 +683,15 @@ impl Core {
                     if let Some(a) = self.audio_mut() {
                         a.set_volume(volume);
                     }
+                    self.save_config();
                 }
                 ui.label("Camera sensitivity");
-                ui.add(egui::Slider::new(&mut self.cam_sense, 0.3..=2.5).show_value(false));
+                if ui
+                    .add(egui::Slider::new(&mut self.cam_sense, 0.3..=2.5).show_value(false))
+                    .changed()
+                {
+                    self.save_config();
+                }
                 ui.label(
                     egui::RichText::new(
                         "Applies to right-drag orbiting on both the globe and the field.",
@@ -559,12 +700,83 @@ impl Core {
                     .small(),
                 );
                 ui.label("Battle pace");
-                ui.add(egui::Slider::new(&mut self.anim_speed, 0.5..=3.0).show_value(false));
+                if ui
+                    .add(egui::Slider::new(&mut self.anim_speed, 0.5..=3.0).show_value(false))
+                    .changed()
+                {
+                    self.save_config();
+                }
                 ui.label(
                     egui::RichText::new("How fast figures cross the field; right for instant.")
                         .weak()
                         .small(),
                 );
+
+                ui.separator();
+                ui.label("Pixel scale");
+                let mut scale = self.renderer.pixel_scale();
+                ui.horizontal(|ui| {
+                    for s in 1..=4u32 {
+                        if ui
+                            .add(egui::Button::selectable(scale == s, format!("{s}×")))
+                            .clicked()
+                        {
+                            scale = s;
+                        }
+                    }
+                });
+                if scale != self.renderer.pixel_scale() {
+                    self.renderer.set_pixel_scale(scale);
+                    self.save_config();
+                }
+                let mut crt = self.renderer.crt();
+                if ui.checkbox(&mut crt, "CRT dressing").on_hover_text(
+                    "scanlines, a whisper of phosphor mask, corners that fall away",
+                ).changed()
+                {
+                    self.renderer.set_crt(crt);
+                    self.save_config();
+                }
+
+                ui.separator();
+                egui::CollapsingHeader::new("Battle keys").show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            "Click a key to rebind it; Escape cancels. Camera keys stay put.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                    let mut start: Option<usize> = None;
+                    let mut reset = false;
+                    egui::Grid::new("keybinds").striped(true).show(ui, |ui| {
+                        for (i, b) in self.binds.iter().enumerate() {
+                            ui.label(b.label);
+                            let text = if self.rebinding == Some(i) {
+                                "press a key…".to_string()
+                            } else {
+                                config::code_name(b.current)
+                            };
+                            if ui.small_button(text).clicked() {
+                                start = Some(i);
+                            }
+                            ui.end_row();
+                        }
+                    });
+                    if ui.small_button("Reset all").clicked() {
+                        reset = true;
+                    }
+                    if let Some(i) = start {
+                        self.rebinding = Some(i);
+                    }
+                    if reset {
+                        for b in &mut self.binds {
+                            b.current = b.default;
+                        }
+                        self.rebinding = None;
+                        self.save_config();
+                    }
+                });
             });
         self.show_options = open;
     }
@@ -595,7 +807,15 @@ impl Core {
             self.menu_built = false;
             match (screen.token.take(), &mut self.campaign) {
                 (Some(token), Some(c)) => {
+                    // Names now: the roster shrinks when the report lands.
+                    let names: Vec<String> = token
+                        .squad()
+                        .iter()
+                        .map(|&i| c.soldiers[i].name.clone())
+                        .collect();
+                    let label = token.kind().label().to_string();
                     let report = c.conclude_mission(token, &screen.battle);
+                    self.debrief = Some(Debrief::from_report(&label, &report, &names));
                     self.log.push(if report.victory {
                         format!(
                             "Mission complete: {} demons slain, {} soldiers lost.",

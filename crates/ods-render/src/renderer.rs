@@ -353,6 +353,8 @@ impl OverlayVertex {
 const BLIT_SHADER: &str = r#"
 @group(0) @binding(0) var scene_tex: texture_2d<f32>;
 @group(0) @binding(1) var scene_smp: sampler;
+// x: pixel scale, y: CRT flag, z/w: screen size.
+@group(0) @binding(2) var<uniform> params: vec4<f32>;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -372,13 +374,27 @@ fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return textureSample(scene_tex, scene_smp, in.uv);
+    var color = textureSample(scene_tex, scene_smp, in.uv).rgb;
+    if params.y > 0.5 {
+        // The tube: a dark scanline per virtual pixel row, a whisper of
+        // phosphor mask, and corners that fall away.
+        let scale = max(i32(params.x), 1);
+        if i32(in.clip.y) % scale == 0 {
+            color *= 0.80;
+        }
+        if i32(in.clip.x) % 3 == 0 {
+            color *= 0.94;
+        }
+        let centered = in.uv - vec2<f32>(0.5, 0.5);
+        color *= 1.0 - dot(centered, centered) * 0.45;
+    }
+    return vec4<f32>(color, 1.0);
 }
 "#;
 
-/// The world renders at 1/PIXEL_SCALE resolution and upscales with hard
-/// nearest-neighbor pixels — 1994 in the cheapest honest way. The UI paints
-/// at full resolution on top.
+/// Default virtual-pixel size: the world renders at 1/scale resolution and
+/// upscales with hard nearest-neighbor pixels — 1994 in the cheapest honest
+/// way. The UI paints at full resolution on top.
 const PIXEL_SCALE: u32 = 3;
 
 #[repr(C)]
@@ -407,6 +423,10 @@ pub struct Renderer {
     blit_layout: wgpu::BindGroupLayout,
     blit_bind_group: wgpu::BindGroup,
     blit_sampler: wgpu::Sampler,
+    blit_params: wgpu::Buffer,
+    /// Virtual pixel size (1..=4) and the CRT dressing toggle.
+    pixel_scale: u32,
+    crt: bool,
     voxel_pipeline: wgpu::RenderPipeline,
     overlay_pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
@@ -444,13 +464,18 @@ impl Renderer {
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .context("surface is not supported by the adapter")?;
         surface.configure(&device, &config);
-        let (scene_view, depth_view) = create_scene_targets(&device, &config);
+        let (scene_view, depth_view) = create_scene_targets(&device, &config, PIXEL_SCALE);
 
         let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("blit-sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
+        });
+        let blit_params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("blit-params"),
+            contents: bytemuck::bytes_of(&[PIXEL_SCALE as f32, 0.0f32, 0.0, 0.0]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("blit-layout"),
@@ -471,10 +496,20 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let blit_bind_group =
-            create_blit_bind(&device, &blit_layout, &scene_view, &blit_sampler);
+            create_blit_bind(&device, &blit_layout, &scene_view, &blit_sampler, &blit_params);
         let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("blit-shader"),
             source: wgpu::ShaderSource::Wgsl(BLIT_SHADER.into()),
@@ -737,6 +772,9 @@ impl Renderer {
             blit_layout,
             blit_bind_group,
             blit_sampler,
+            blit_params,
+            pixel_scale: PIXEL_SCALE,
+            crt: false,
             voxel_pipeline,
             overlay_pipeline,
             camera_buffer,
@@ -821,7 +859,12 @@ impl Renderer {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
-        let (scene_view, depth_view) = create_scene_targets(&self.device, &self.config);
+        self.rebuild_scene_targets();
+    }
+
+    fn rebuild_scene_targets(&mut self) {
+        let (scene_view, depth_view) =
+            create_scene_targets(&self.device, &self.config, self.pixel_scale);
         self.scene_view = scene_view;
         self.depth_view = depth_view;
         self.blit_bind_group = create_blit_bind(
@@ -829,7 +872,47 @@ impl Renderer {
             &self.blit_layout,
             &self.scene_view,
             &self.blit_sampler,
+            &self.blit_params,
         );
+        self.write_blit_params();
+    }
+
+    fn write_blit_params(&self) {
+        self.queue.write_buffer(
+            &self.blit_params,
+            0,
+            bytemuck::bytes_of(&[
+                self.pixel_scale as f32,
+                if self.crt { 1.0f32 } else { 0.0 },
+                self.config.width as f32,
+                self.config.height as f32,
+            ]),
+        );
+    }
+
+    pub fn pixel_scale(&self) -> u32 {
+        self.pixel_scale
+    }
+
+    pub fn crt(&self) -> bool {
+        self.crt
+    }
+
+    /// Change the virtual pixel size (1 = sharp, 4 = chunky).
+    pub fn set_pixel_scale(&mut self, scale: u32) {
+        let scale = scale.clamp(1, 4);
+        if scale != self.pixel_scale {
+            self.pixel_scale = scale;
+            self.rebuild_scene_targets();
+        }
+    }
+
+    /// Dress the upscale as a tube: scanlines, mask, corner falloff.
+    pub fn set_crt(&mut self, on: bool) {
+        if on != self.crt {
+            self.crt = on;
+            self.write_blit_params();
+        }
     }
 
     pub fn aspect(&self) -> f32 {
@@ -1070,10 +1153,11 @@ impl Renderer {
 fn create_scene_targets(
     device: &wgpu::Device,
     config: &wgpu::SurfaceConfiguration,
+    pixel_scale: u32,
 ) -> (wgpu::TextureView, wgpu::TextureView) {
     let size = wgpu::Extent3d {
-        width: (config.width / PIXEL_SCALE).max(1),
-        height: (config.height / PIXEL_SCALE).max(1),
+        width: (config.width / pixel_scale).max(1),
+        height: (config.height / pixel_scale).max(1),
         depth_or_array_layers: 1,
     };
     let color = device
@@ -1108,6 +1192,7 @@ fn create_blit_bind(
     layout: &wgpu::BindGroupLayout,
     scene: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
+    params: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("blit-bind"),
@@ -1120,6 +1205,10 @@ fn create_blit_bind(
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: params.as_entire_binding(),
             },
         ],
     })

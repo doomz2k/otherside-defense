@@ -62,6 +62,12 @@ impl Core {
                     candidates.push((crate::slot_path(slot), format!("slot {slot}")));
                 }
                 candidates.push((crate::AUTOSAVE_PATH.to_string(), "autosave".to_string()));
+                for n in 1..=3usize {
+                    candidates.push((
+                        crate::autosave_history_path(n),
+                        format!("autosave −{n} day(s)"),
+                    ));
+                }
                 for (path, label) in candidates {
                     if !std::path::Path::new(&path).exists() {
                         continue;
@@ -208,7 +214,7 @@ impl Core {
             if advanced {
                 self.day_progress = 0.0;
                 // The world remembers, whether or not you asked it to.
-                let _ = std::fs::write(crate::AUTOSAVE_PATH, c.save_to_string());
+                crate::write_autosave(c);
             }
             ui.separator();
 
@@ -1089,6 +1095,64 @@ impl Core {
                 if !open {
                     self.equip_for = None;
                 }
+            }
+        }
+
+        // -------------------------------------------- after-action debrief
+        if let Some(d) = &self.debrief {
+            let mut dismiss = false;
+            egui::Window::new(if d.victory {
+                "AFTER ACTION — THE FIELD HELD"
+            } else {
+                "AFTER ACTION — REPELLED"
+            })
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, -30.0])
+            .show(ctx, |ui| {
+                ui.strong(&d.label);
+                ui.label(format!(
+                    "{} turns · {} demons slain{}{}",
+                    d.turns,
+                    d.demons_slain,
+                    if d.captures > 0 {
+                        format!(" · {} bound alive", d.captures)
+                    } else {
+                        String::new()
+                    },
+                    if d.civilians.0 + d.civilians.1 > 0 {
+                        format!(" · civilians {} saved / {} lost", d.civilians.0, d.civilians.1)
+                    } else {
+                        String::new()
+                    },
+                ));
+                if !d.fallen.is_empty() {
+                    ui.separator();
+                    ui.colored_label(
+                        egui::Color32::from_rgb(200, 90, 80),
+                        "The Wall remembers:",
+                    );
+                    for name in &d.fallen {
+                        ui.label(format!("  ✝ {name}"));
+                    }
+                }
+                if !d.commendations.is_empty() {
+                    ui.separator();
+                    ui.colored_label(
+                        egui::Color32::from_rgb(230, 200, 120),
+                        "Commendations:",
+                    );
+                    for line in &d.commendations {
+                        ui.label(format!("  {line}"));
+                    }
+                }
+                ui.add_space(6.0);
+                if ui.button("Dismiss").clicked() {
+                    dismiss = true;
+                }
+            });
+            if dismiss {
+                self.debrief = None;
             }
         }
 
