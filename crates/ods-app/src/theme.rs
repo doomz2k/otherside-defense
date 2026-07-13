@@ -42,5 +42,22 @@ pub fn apply(ctx: &egui::Context) {
     v.window_corner_radius = egui::CornerRadius::same(3);
     v.menu_corner_radius = egui::CornerRadius::same(3);
 
+    // Crisp period cabinetry: no soft drop shadows anywhere.
+    v.window_shadow.color = egui::Color32::TRANSPARENT;
+    v.popup_shadow.color = egui::Color32::TRANSPARENT;
+
+    // One typographic scale for the whole war office.
+    use egui::{FontFamily, FontId, TextStyle};
+    style.text_styles = [
+        (TextStyle::Heading, FontId::new(18.0, FontFamily::Proportional)),
+        (TextStyle::Body, FontId::new(13.5, FontFamily::Proportional)),
+        (TextStyle::Monospace, FontId::new(12.5, FontFamily::Monospace)),
+        (TextStyle::Button, FontId::new(13.5, FontFamily::Proportional)),
+        (TextStyle::Small, FontId::new(10.5, FontFamily::Proportional)),
+    ]
+    .into();
+    style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+    style.spacing.button_padding = egui::vec2(8.0, 3.0);
+
     ctx.set_style(style);
 }

@@ -17,6 +17,8 @@ mod config;
 mod figures;
 mod geoscape;
 mod globe;
+mod icons;
+mod pixfont;
 mod theme;
 
 use std::sync::Arc;
@@ -199,6 +201,8 @@ pub struct Core {
     pub geo_swing: Option<(f32, f32)>,
     /// Pan the battle camera to visible demon action during their turn.
     pub event_cam: bool,
+    /// The controls overlay ([F1]).
+    pub show_help: bool,
     pub selected_region: Option<Region>,
     globe_built_for: Option<Option<Region>>,
     /// The title screen's frozen skirmish, slowly orbited.
@@ -301,6 +305,7 @@ impl Core {
             fade: 0.0,
             geo_swing: None,
             event_cam: cfg.event_cam,
+            show_help: false,
             selected_region: None,
             globe_built_for: None,
             menu_built: false,
@@ -511,6 +516,14 @@ impl Core {
                     }
                 }
             }
+            // The controls overlay answers on every screen.
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && event.physical_key
+                        == PhysicalKey::Code(winit::keyboard::KeyCode::F1) =>
+            {
+                self.show_help = !self.show_help;
+            }
             WindowEvent::KeyboardInput { event, .. }
                 if self.screen == Screen::Battle && !response.consumed =>
             {
@@ -704,6 +717,42 @@ impl Core {
         if self.show_options && self.screen != Screen::Battle {
             self.options_window(ctx);
         }
+        // The controls overlay [F1].
+        if self.show_help {
+            let mut open = true;
+            egui::Window::new("Controls  [F1]")
+                .open(&mut open)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    egui::Grid::new("help-grid").striped(true).show(ui, |ui| {
+                        for b in &self.binds {
+                            ui.label(b.label);
+                            ui.label(config::code_name(b.current));
+                            ui.end_row();
+                        }
+                        for (what, key) in [
+                            ("Fire modes", "1 / 2 / 3"),
+                            ("Throw flare", "L"),
+                            ("Turn the field", "Q / E"),
+                            ("Pan", "W A S D / screen edge"),
+                            ("Orbit", "right-drag"),
+                            ("Zoom", "wheel"),
+                            ("Center on soldier", "double-click"),
+                            ("Cancel / deselect", "Esc"),
+                        ] {
+                            ui.label(what);
+                            ui.label(key);
+                            ui.end_row();
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new("Rebind battle keys in Options.").weak().small(),
+                    );
+                });
+            self.show_help = open;
+        }
+
         // Screen changes arrive out of black.
         if self.fade > 0.0 {
             let painter = ctx.layer_painter(egui::LayerId::new(

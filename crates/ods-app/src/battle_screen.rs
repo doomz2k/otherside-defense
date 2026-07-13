@@ -67,8 +67,8 @@ pub struct BattleScreen {
     hover: Option<IVec3>,
     hover_path: Option<(Vec<IVec3>, i32)>,
     reachable: Vec<(IVec3, i32)>,
-    /// Big announcement text and its remaining seconds.
-    banner: Option<(String, f32)>,
+    /// Big announcement text, its remaining seconds, and its full life.
+    banner: Option<(String, f32, f32)>,
     /// Cutaway: hide everything above z=16 to see ground-floor interiors.
     floor_cap: bool,
     /// Tint the ground known demons can see ([T]).
@@ -142,7 +142,7 @@ impl BattleScreen {
             hover: None,
             hover_path: None,
             reachable: Vec::new(),
-            banner: Some(("THE SQUAD DEPLOYS".to_string(), 1.6)),
+            banner: Some(("THE SQUAD DEPLOYS".to_string(), 1.6, 1.6)),
             floor_cap: false,
             show_threat: false,
             show_map: false,
@@ -776,12 +776,12 @@ impl BattleScreen {
                 pulse * 0.55,
                 egui::Stroke::new(1.0, egui::Color32::from_rgb(110, 14, 12)),
             );
-            painter.text(
+            crate::pixfont::draw_centered(
+                &painter,
                 center,
-                egui::Align2::CENTER_CENTER,
-                "HIDDEN MOVEMENT",
-                egui::FontId::proportional(30.0),
+                5.0,
                 egui::Color32::from_rgb(200, 170, 130),
+                "HIDDEN MOVEMENT",
             );
             painter.text(
                 center + egui::vec2(0.0, 34.0),
@@ -792,18 +792,21 @@ impl BattleScreen {
             );
         }
 
-        if let Some((text, ttl)) = &self.banner {
+        if let Some((text, ttl, total)) = &self.banner {
+            // Slide in hard, settle, fade out — in the pixel banner face.
             let alpha = (ttl.min(0.6) / 0.6 * 255.0) as u8;
-            egui::Area::new(egui::Id::new("banner"))
-                .anchor(egui::Align2::CENTER_TOP, [0.0, 120.0])
-                .show(ctx, |ui| {
-                    ui.label(
-                        egui::RichText::new(text)
-                            .size(30.0)
-                            .strong()
-                            .color(egui::Color32::from_rgba_unmultiplied(255, 235, 200, alpha)),
-                    );
-                });
+            let slide = (1.0 - ((total - ttl) / 0.18).min(1.0)) * 26.0;
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("banner"),
+            ));
+            crate::pixfont::draw_centered(
+                &painter,
+                egui::pos2(ctx.viewport_rect().center().x, 140.0 - slide),
+                4.0,
+                egui::Color32::from_rgba_unmultiplied(255, 225, 170, alpha),
+                text,
+            );
         }
 
         // The console: the whole squad at a glance along the very bottom,
@@ -842,20 +845,23 @@ impl BattleScreen {
                             ui.spacing_mut().item_spacing.y = 2.0;
                             let short =
                                 u.name.split_whitespace().last().unwrap_or(&u.name);
-                            let mut tags = String::new();
-                            if u.kneeling {
-                                tags.push('🧎');
-                            }
-                            if u.wounds > 0 {
-                                tags.push('🩸');
-                            }
-                            if u.possessed > 0 {
-                                tags.push('👁');
-                            }
-                            if !u.conscious {
-                                tags.push('✖');
-                            }
-                            ui.label(egui::RichText::new(format!("{short} {tags}")).small());
+                            ui.horizontal(|ui| {
+                                use crate::icons::{self, Icon};
+                                ui.spacing_mut().item_spacing.x = 2.0;
+                                ui.label(egui::RichText::new(short).small());
+                                if u.kneeling {
+                                    icons::draw(ui, Icon::Kneel, 11.0).on_hover_text("kneeling");
+                                }
+                                if u.wounds > 0 {
+                                    icons::draw(ui, Icon::Blood, 11.0).on_hover_text("bleeding");
+                                }
+                                if u.possessed > 0 {
+                                    icons::draw(ui, Icon::Eye, 11.0).on_hover_text("mind seized");
+                                }
+                                if !u.conscious {
+                                    icons::draw(ui, Icon::Down, 11.0).on_hover_text("down");
+                                }
+                            });
                             mini_bar(
                                 ui,
                                 u.health as f32 / u.health_max.max(1) as f32,
@@ -902,15 +908,20 @@ impl BattleScreen {
                             }
                         }
                         ui.label(egui::RichText::new(plate).small().weak());
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "🧨 {}   ✚ {}{}",
-                                u.grenades,
-                                u.heal_charges,
-                                if u.blade { "   🗡" } else { "" }
-                            ))
-                            .small(),
-                        );
+                        ui.horizontal(|ui| {
+                            use crate::icons::{self, Icon};
+                            ui.spacing_mut().item_spacing.x = 3.0;
+                            icons::draw(ui, Icon::Charge, 12.0).on_hover_text("hellfire charges");
+                            ui.label(egui::RichText::new(u.grenades.to_string()).small());
+                            icons::draw(ui, Icon::Dressing, 12.0).on_hover_text("field dressings");
+                            ui.label(egui::RichText::new(u.heal_charges.to_string()).small());
+                            icons::draw(ui, Icon::Flare, 12.0).on_hover_text("witchfire flares");
+                            ui.label(egui::RichText::new(u.flares.to_string()).small());
+                            if u.blade {
+                                icons::draw(ui, Icon::Blade, 12.0)
+                                    .on_hover_text("consecrated blade: ripostes melee");
+                            }
+                        });
                     });
                 }
                 ui.separator();
@@ -929,7 +940,7 @@ impl BattleScreen {
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
                     for line in &self.log {
-                        ui.label(line);
+                        ui.colored_label(crate::geoscape::log_color(line), line);
                     }
                 });
             });
@@ -1117,10 +1128,18 @@ impl BattleScreen {
     }
 
     fn float(&mut self, over: UnitId, text: impl Into<String>, color: egui::Color32) {
+        let mut world = self.unit_pos(over, 20.0);
+        // Stack, don't overlap: each floater sharing the spot rides higher.
+        let crowd = self
+            .floaters
+            .iter()
+            .filter(|f| (f.world - world).truncate().length() < TILE_VOXELS as f32 * 1.5)
+            .count();
+        world.z += crowd as f32 * 5.5 * VS_F;
         self.floaters.push(FloatText {
             text: text.into(),
             color,
-            world: self.unit_pos(over, 20.0),
+            world,
             age: 0.0,
             life: 1.4,
         });
@@ -1239,14 +1258,14 @@ impl BattleScreen {
                     Side::Order => "THE ORDER MOVES",
                     Side::Demons => "THE OTHERSIDE STIRS",
                 };
-                self.banner = Some((text.to_string(), 1.1));
+                self.banner = Some((text.to_string(), 1.1, 1.1));
             }
             Event::BattleOver { winner } => {
                 let (text, sound) = match winner {
                     Side::Order => ("THE FIELD IS OURS", Sound::Victory),
                     Side::Demons => ("THE LINE BREAKS", Sound::Defeat),
                 };
-                self.banner = Some((text.to_string(), 3.0));
+                self.banner = Some((text.to_string(), 3.0, 3.0));
                 play(sound);
             }
             Event::Fired { unit, target, .. } => {
@@ -1524,7 +1543,7 @@ impl BattleScreen {
             renderer.set_figures(&fig_verts, &fig_indices);
         }
 
-        if let Some((_, ttl)) = &mut self.banner {
+        if let Some((_, ttl, _)) = &mut self.banner {
             *ttl -= dt;
             if *ttl <= 0.0 {
                 self.banner = None;
@@ -2156,12 +2175,51 @@ fn push_tile_quad(
     indices.extend([0, 1, 2, 0, 2, 3].map(|k| first + k));
 }
 
+/// Somewhere a person would say, not a coordinate.
+fn place_name(battle: &Battle, at: IVec3) -> String {
+    let (min, max) = battle.tiles.bounds();
+    let base = if at.x <= min.x + 5 && (10..=13).contains(&at.y) {
+        "the gondola".to_string()
+    } else if (16..=20).contains(&at.x) && (2..=6).contains(&at.y) {
+        "the watchtower".to_string()
+    } else if at.x >= max.x - 3 && (10..=14).contains(&at.y) {
+        "the obelisk ground".to_string()
+    } else if (9..=14).contains(&at.x) && (8..=15).contains(&at.y) {
+        "the shelter yard".to_string()
+    } else {
+        let third_x = (max.x - min.x) / 3;
+        let third_y = (max.y - min.y) / 3;
+        let ew = if at.x < min.x + third_x {
+            "west"
+        } else if at.x >= max.x - third_x {
+            "east"
+        } else {
+            ""
+        };
+        let ns = if at.y < min.y + third_y {
+            "south"
+        } else if at.y >= max.y - third_y {
+            "north"
+        } else {
+            ""
+        };
+        match (ns, ew) {
+            ("", "") => "the open middle".to_string(),
+            (n, "") => format!("the {n} field"),
+            ("", e) => format!("the {e} field"),
+            (n, e) => format!("the {n}-{e} field"),
+        }
+    };
+    if at.z > 0 { format!("upstairs over {base}") } else { base }
+}
+
 fn describe(event: &Event, battle: &Battle) -> String {
     let name = |id: &UnitId| battle.unit(*id).name.clone();
+    let place = |at: &IVec3| place_name(battle, *at);
     match event {
         Event::TurnStarted { side, turn } => format!("— turn {turn}: {side:?} to move —"),
         Event::Moved { unit, to, tu_left, .. } => {
-            format!("{} moves to {to} ({tu_left} TU left)", name(unit))
+            format!("{} moves through {} ({tu_left} TU left)", name(unit), place(to))
         }
         Event::Fired { unit, target, mode, reaction, hit } => format!(
             "{}{} fires ({mode:?}) at {} — {}",
@@ -2196,22 +2254,22 @@ fn describe(event: &Event, battle: &Battle) -> String {
             format!("!!! the rot finishes its work: {} is one of THEM now", name(unit))
         }
         Event::SummoningScribed { at } => {
-            format!("!!! a summoning circle scribes itself at {at} — foul it or face what comes")
+            format!("!!! a summoning circle scribes itself in {} — foul it or face what comes", place(at))
         }
         Event::Summoned { unit } => {
             format!("!!! the circle delivers: {} steps through", name(unit))
         }
         Event::SummoningDisrupted { at } => {
-            format!("the summoning at {at} is fouled — nothing comes through")
+            format!("the summoning in {} is fouled — nothing comes through", place(at))
         }
         Event::WardInscribed { at } => {
-            format!("a ward burns witchfire-bright at {at}")
+            format!("a ward burns witchfire-bright in {}", place(at))
         }
         Event::WardBurned { unit, at } => {
-            format!("{} crosses the ward at {at} — and the ward answers", name(unit))
+            format!("{} crosses the ward in {} — and the ward answers", name(unit), place(at))
         }
         Event::CorruptionSpread { at } => {
-            format!("the obelisk's veins reach {at}")
+            format!("the obelisk's veins reach {}", place(at))
         }
         Event::Whispered { unit } => {
             format!("{} stands on corrupted ground... the ground knows their name", name(unit))
@@ -2233,17 +2291,17 @@ fn describe(event: &Event, battle: &Battle) -> String {
         }
         Event::TimeExpired => "!!! too late. The clock has taken the field".to_string(),
         Event::FloorCollapsed { at } => {
-            format!("!!! the floor at {at} gives way and comes down")
+            format!("!!! the floor gives way over {} and comes down", place(at))
         }
         Event::AtrocityFound { unit, at } => {
-            format!("!!! {} finds what the demons left at {at}. Nobody should see this.", name(unit))
+            format!("!!! {} finds what the demons left in {}. Nobody should see this.", name(unit), place(at))
         }
         Event::TerrainDestroyed { voxels, .. } => {
             format!("terrain shattered ({voxels} voxels)")
         }
-        Event::Threw { unit, at } => format!("{} lobs a hellfire charge at {at}", name(unit)),
+        Event::Threw { unit, at } => format!("{} lobs a hellfire charge into {}", name(unit), place(at)),
         Event::Exploded { at, voxels } => {
-            format!("detonation at {at} ({voxels} voxels destroyed)")
+            format!("detonation in {} ({voxels} voxels destroyed)", place(at))
         }
         Event::Wounded { unit, total } => {
             format!("{} is bleeding ({total} open wounds)", name(unit))
@@ -2283,21 +2341,21 @@ fn describe(event: &Event, battle: &Battle) -> String {
         }
         Event::Turned { unit, .. } => format!("{} takes a new watch arc", name(unit)),
         Event::ChargeDropped { at, timer } => {
-            format!("a primed charge drops at {at} — {timer} half-turns on the fuse")
+            format!("a primed charge drops in {} — {timer} half-turns on the fuse", place(at))
         }
-        Event::SmokePopped { at } => format!("smoke blooms at {at}"),
-        Event::FireStarted { at } => format!("fire takes hold at {at}"),
-        Event::FlareThrown { at } => format!("a witchfire flare burns at {at} — light holds there"),
+        Event::SmokePopped { at } => format!("smoke blooms over {}", place(at)),
+        Event::FireStarted { at } => format!("fire takes hold in {}", place(at)),
+        Event::FlareThrown { at } => format!("a witchfire flare burns in {} — light holds there", place(at)),
         Event::Burned { unit, amount } => format!("{} burns ({amount})", name(unit)),
-        Event::DoorOpened { at } => format!("a door swings open at {at}"),
+        Event::DoorOpened { at } => format!("a door swings open in {}", place(at)),
         Event::Possessed { unit, by } => {
             format!("!!! {} SEIZES {}'s MIND !!!", name(by), name(unit))
         }
         Event::PossessionEnds { unit } => format!("{} is their own again", name(unit)),
         Event::WallSmashed { at, voxels } => {
-            format!("!!! masonry EXPLODES inward at {at} ({voxels} voxels) !!!")
+            format!("!!! masonry EXPLODES inward in {} ({voxels} voxels) !!!", place(at))
         }
-        Event::Fell { unit, to } => format!("{} falls to {to}", name(unit)),
+        Event::Fell { unit, to } => format!("{} falls — down into {}", name(unit), place(to)),
         Event::CarriedUp { unit, carried } => {
             format!("{} shoulders {}", name(unit), name(carried))
         }
@@ -2306,7 +2364,7 @@ fn describe(event: &Event, battle: &Battle) -> String {
         }
         Event::Scavenged { unit } => format!("{} takes up a fallen weapon", name(unit)),
         Event::NoiseInDark { near } => {
-            format!("something shrieks in the dark, near {near}...")
+            format!("something shrieks in the dark, out in {}...", place(near))
         }
         Event::BattleOver { winner } => format!("=== BATTLE OVER: {winner:?} wins ==="),
     }

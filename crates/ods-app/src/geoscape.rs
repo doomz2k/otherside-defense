@@ -92,7 +92,20 @@ impl Core {
 
     fn menu_card(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("OTHERSIDE DEFENSE").size(34.0).strong());
+                // The wordmark, in the house pixel face.
+                let px = 4.0;
+                let w = crate::pixfont::width("OTHERSIDE DEFENSE", px);
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(w + 2.0 * px, 8.0 * px),
+                    egui::Sense::hover(),
+                );
+                crate::pixfont::draw_centered(
+                    &ui.painter_at(rect.expand(8.0)),
+                    rect.center(),
+                    px,
+                    egui::Color32::from_rgb(226, 184, 96),
+                    "OTHERSIDE DEFENSE",
+                );
                 ui.label("The rifts are opening. The Order answers.");
                 ui.add_space(20.0);
 
@@ -174,16 +187,20 @@ impl Core {
         // ------------------------------------------------------ top bar
         egui::TopBottomPanel::top("geo-top").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
+                use crate::icons::{self, Icon};
                 ui.label(format!("Treasury {}k", c.funds));
                 ui.label(format!("Score {}", c.month_score));
-                ui.label(format!("🜏 {}", c.brimstone));
-                ui.label(format!("⛓ {}", c.hellsteel));
-                ui.label(format!("🧨 {}", c.grenade_stock));
-                ui.label(format!("✚ {}", c.dressing_stock));
-                ui.label(format!(
-                    "⛓ cells: {}g/{}o",
-                    c.prisoners.grunts, c.prisoners.overseers
-                ));
+                ui.separator();
+                icons::stat(ui, Icon::Brimstone, c.brimstone.to_string(), "brimstone salvage");
+                icons::stat(ui, Icon::Hellsteel, c.hellsteel.to_string(), "hellsteel salvage");
+                icons::stat(ui, Icon::Charge, c.grenade_stock.to_string(), "hellfire charges in stores");
+                icons::stat(ui, Icon::Dressing, c.dressing_stock.to_string(), "field dressings in stores");
+                icons::stat(
+                    ui,
+                    Icon::Cells,
+                    format!("{}g/{}o", c.prisoners.grunts, c.prisoners.overseers),
+                    "bound demons in the cells (grunts/overseers)",
+                );
                 if c.blood_moon.is_some() {
                     ui.colored_label(
                         egui::Color32::from_rgb(255, 60, 50),
@@ -926,7 +943,7 @@ impl Core {
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
                     for line in &self.log {
-                        ui.label(line);
+                        ui.colored_label(log_color(line), line);
                     }
                 });
             });
@@ -1810,5 +1827,18 @@ fn paper_doll(ui: &mut egui::Ui, c: &mut Campaign, si: usize, log: &mut Vec<Stri
         if let Err(e) = outcome {
             log.push(format!("cannot issue: {e:?}"));
         }
+    }
+}
+
+/// The log wears its severity: alarms red, milestones gold, reports plain.
+pub(crate) fn log_color(line: &str) -> egui::Color32 {
+    if line.contains("!!!") || line.contains("###") {
+        egui::Color32::from_rgb(225, 110, 90)
+    } else if line.contains("***") {
+        egui::Color32::from_rgb(225, 190, 110)
+    } else if line.contains("===") || line.contains("VICTORY") {
+        egui::Color32::from_rgb(200, 200, 160)
+    } else {
+        egui::Color32::from_rgb(200, 190, 170)
     }
 }
