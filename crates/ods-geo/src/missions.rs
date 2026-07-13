@@ -255,7 +255,15 @@ fn make_units(squad: &[&Soldier], kits: &[(u32, u32)], research: &ResearchState)
 
 fn make_unit(id: u32, s: &Soldier, kit: (u32, u32), research: &ResearchState) -> Unit {
     // Placeholder tile; the scenario builders assign the real deployment.
-    let mut u = Unit::soldier(id, &s.name, glam::IVec3::ZERO);
+    // A callsign, if the soldier carries one, is worn into the name.
+    let display_name = if s.callsign.trim().is_empty() {
+        s.name.clone()
+    } else if let Some((first, rest)) = s.name.split_once(' ') {
+        format!("{first} '{}' {rest}", s.callsign.trim())
+    } else {
+        format!("'{}' {}", s.callsign.trim(), s.name)
+    };
+    let mut u = Unit::soldier(id, &display_name, glam::IVec3::ZERO);
     u.tu_max = s.stats.tu;
     u.reactions = s.stats.reactions;
     u.accuracy = s.stats.accuracy;

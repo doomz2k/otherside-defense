@@ -240,6 +240,10 @@ pub struct SoldierStats {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Soldier {
     pub name: String,
+    /// What the squad actually shouts across the field. Optional; worn
+    /// between the given and family name on the roster and in battle.
+    #[serde(default)]
+    pub callsign: String,
     pub stats: SoldierStats,
     /// Days until fit for duty. 0 = ready.
     pub recovery_days: u32,
@@ -909,6 +913,7 @@ impl Campaign {
         self.recruits_hired += 1;
         Soldier {
             name,
+            callsign: String::new(),
             stats: SoldierStats {
                 tu: 50 + self.rng.roll(11) as i32,
                 health: 28 + self.rng.roll(9) as i32,

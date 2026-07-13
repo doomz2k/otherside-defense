@@ -10,6 +10,7 @@
 //!   --campaign [N]   N-month narrated campaign
 
 mod audio;
+mod basescape;
 mod battle_screen;
 mod chronicle;
 mod figures;
@@ -58,6 +59,8 @@ fn main() -> anyhow::Result<()> {
 pub enum Screen {
     Menu,
     Geoscape,
+    /// The chapterhouse diorama: build, hire, research, forge.
+    Base,
     Battle,
 }
 
@@ -82,7 +85,6 @@ pub struct Core {
     pub show_codex: bool,
     pub show_stats: bool,
     pub show_options: bool,
-    pub show_bases: bool,
     /// Geoscape time compression: 0 holds, 1..=3 run the calendar.
     pub geo_speed: u8,
     /// How far through the current day the clock stands (0..1).
@@ -96,6 +98,12 @@ pub struct Core {
     /// The big spinning world.
     geo_camera: OrbitCamera,
     geo_drag: bool,
+    /// The chapterhouse diorama's slow orbit.
+    base_camera: OrbitCamera,
+    /// The diorama needs rebuilding (construction started, base switched).
+    pub base_dirty: bool,
+    /// Soldier index whose paper-doll equip window is open.
+    pub equip_for: Option<usize>,
     pub selected_region: Option<Region>,
     globe_built_for: Option<Option<Region>>,
     /// The title screen's frozen skirmish, slowly orbited.
@@ -152,6 +160,8 @@ impl Core {
         geo_camera.pitch = 0.35;
         let mut menu_camera = OrbitCamera::isometric(Vec3::new(96.0, 96.0, 10.0));
         menu_camera.distance = 220.0 * ods_sim::VS as f32;
+        let mut base_camera = OrbitCamera::isometric(basescape::scene_center());
+        base_camera.distance = 420.0;
 
         Ok(Self {
             window,
@@ -170,7 +180,6 @@ impl Core {
             show_codex: false,
             show_stats: false,
             show_options: false,
-            show_bases: false,
             geo_speed: 0,
             day_progress: 0.0,
             volume: 1.0,
@@ -179,6 +188,9 @@ impl Core {
             audio: audio::Audio::new(),
             geo_camera,
             geo_drag: false,
+            base_camera,
+            base_dirty: false,
+            equip_for: None,
             selected_region: None,
             globe_built_for: None,
             menu_built: false,
@@ -202,6 +214,19 @@ impl Core {
         self.renderer.set_globe(&vertices, &indices);
         self.globe_built_for = Some(self.selected_region);
         self.screen = Screen::Geoscape;
+    }
+
+    /// Switch to the Basescape: the selected chapterhouse as a diorama.
+    pub fn enter_base(&mut self) {
+        let Some(c) = &self.campaign else { return };
+        self.renderer.clear_scene();
+        self.menu_built = false;
+        self.globe_built_for = None;
+        let bi = self.selected_base.min(c.bases.len() - 1);
+        let (verts, indices) = basescape::build_base_scene(&c.bases[bi]);
+        self.renderer.set_figures(&verts, &indices);
+        self.base_dirty = false;
+        self.screen = Screen::Base;
     }
 
     /// Build the title screen's voxel diorama: a small skirmish scene,
@@ -250,11 +275,18 @@ impl Core {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x as f32, position.y as f32);
-                if self.screen == Screen::Geoscape && self.geo_drag && !response.consumed {
+                if self.geo_drag && !response.consumed {
                     let dx = self.cursor.0 - self.last_cursor.0;
                     let dy = self.cursor.1 - self.last_cursor.1;
-                    self.geo_camera
-                        .orbit(dx * -0.006 * self.cam_sense, dy * 0.006 * self.cam_sense);
+                    match self.screen {
+                        Screen::Geoscape => self
+                            .geo_camera
+                            .orbit(dx * -0.006 * self.cam_sense, dy * 0.006 * self.cam_sense),
+                        Screen::Base => self
+                            .base_camera
+                            .orbit(dx * -0.006 * self.cam_sense, dy * 0.003 * self.cam_sense),
+                        _ => {}
+                    }
                 }
                 self.last_cursor = self.cursor;
                 let sense = self.cam_sense;
@@ -269,13 +301,16 @@ impl Core {
                 }
             }
             WindowEvent::MouseInput { state, button, .. }
-                if self.screen == Screen::Geoscape && !response.consumed =>
+                if matches!(self.screen, Screen::Geoscape | Screen::Base)
+                    && !response.consumed =>
             {
                 match button {
                     MouseButton::Right | MouseButton::Middle => {
                         self.geo_drag = state == ElementState::Pressed;
                     }
-                    MouseButton::Left if state == ElementState::Pressed => {
+                    MouseButton::Left
+                        if state == ElementState::Pressed && self.screen == Screen::Geoscape =>
+                    {
                         let (w, h) = self.renderer.size();
                         let (origin, dir) =
                             self.geo_camera.screen_ray(self.cursor.0, self.cursor.1, w, h);
@@ -285,14 +320,20 @@ impl Core {
                 }
             }
             WindowEvent::MouseWheel { delta, .. }
-                if self.screen == Screen::Geoscape && !response.consumed =>
+                if matches!(self.screen, Screen::Geoscape | Screen::Base)
+                    && !response.consumed =>
             {
                 let scroll = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
                 };
-                self.geo_camera.zoom(1.0 - scroll * 0.1);
-                self.geo_camera.distance = self.geo_camera.distance.max(320.0);
+                if self.screen == Screen::Geoscape {
+                    self.geo_camera.zoom(1.0 - scroll * 0.1);
+                    self.geo_camera.distance = self.geo_camera.distance.max(320.0);
+                } else {
+                    self.base_camera.zoom(1.0 - scroll * 0.1);
+                    self.base_camera.distance = self.base_camera.distance.clamp(180.0, 900.0);
+                }
             }
             WindowEvent::MouseInput { state, button, .. }
                 if self.screen == Screen::Battle && !response.consumed =>
@@ -430,6 +471,22 @@ impl Core {
                 let vp = self.geo_camera.view_proj(self.renderer.aspect());
                 self.renderer.set_camera(vp, sun, self.clock);
             }
+            Screen::Base => {
+                if let Some(a) = self.audio.as_mut() {
+                    a.music(Some(audio::MusicTrack::Vigil));
+                }
+                if self.base_dirty
+                    && let Some(c) = &self.campaign
+                {
+                    let bi = self.selected_base.min(c.bases.len() - 1);
+                    let (verts, indices) = basescape::build_base_scene(&c.bases[bi]);
+                    self.renderer.set_figures(&verts, &indices);
+                    self.base_dirty = false;
+                }
+                self.base_camera.yaw += dt * 0.04;
+                let vp = self.base_camera.view_proj(self.renderer.aspect());
+                self.renderer.set_camera(vp, Vec3::new(0.4, 0.5, 0.75), self.clock);
+            }
             Screen::Menu => {
                 if let Some(a) = self.audio.as_mut() {
                     a.music(Some(audio::MusicTrack::Vigil));
@@ -457,10 +514,14 @@ impl Core {
     fn ui(&mut self, ctx: &egui::Context) {
         match self.screen {
             Screen::Menu => self.menu_ui(ctx),
-            Screen::Geoscape => {
-                let action = self.geoscape_ui(ctx);
-                if let GeoAction::LeadMission(kind) = action {
-                    self.launch_mission(kind);
+            Screen::Geoscape => match self.geoscape_ui(ctx) {
+                GeoAction::LeadMission(kind) => self.launch_mission(kind),
+                GeoAction::EnterBase => self.enter_base(),
+                GeoAction::None => {}
+            },
+            Screen::Base => {
+                if self.base_ui(ctx) {
+                    self.enter_geoscape();
                 }
             }
             Screen::Battle => self.battle_ui(ctx),
@@ -522,7 +583,7 @@ impl Core {
 
     fn battle_ui(&mut self, ctx: &egui::Context) {
         let leave = match self.battle.as_mut() {
-            Some(b) => b.hud(ctx, &mut self.renderer, self.audio.as_ref()),
+            Some(b) => b.hud(ctx, &mut self.renderer, self.audio.as_ref(), self.campaign.as_ref()),
             None => {
                 self.screen = Screen::Menu;
                 return;

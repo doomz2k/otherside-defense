@@ -69,6 +69,8 @@ pub struct BattleScreen {
     floor_cap: bool,
     /// Tint the ground known demons can see ([T]).
     show_threat: bool,
+    /// The big tactical map ([M]).
+    show_map: bool,
     /// Battle pacing: scales the walk glide (set from the options screen).
     pub anim_speed: f32,
     pub cursor: (f32, f32),
@@ -104,6 +106,7 @@ impl BattleScreen {
             banner: Some(("THE SQUAD DEPLOYS".to_string(), 1.6)),
             floor_cap: false,
             show_threat: false,
+            show_map: false,
             anim_speed: 1.0,
             cursor: (0.0, 0.0),
             right_drag: false,
@@ -289,6 +292,7 @@ impl BattleScreen {
                 self.show_threat = !self.show_threat;
                 self.refresh_scene(renderer);
             }
+            KeyCode::KeyM => self.show_map = !self.show_map,
             KeyCode::KeyQ => self.camera.snap_turn(1),
             KeyCode::KeyE => self.camera.snap_turn(-1),
             KeyCode::KeyW => self.camera.pan(0.0, PAN_STEP),
@@ -310,7 +314,13 @@ impl BattleScreen {
     // HUD
 
     /// Returns true when the player asked to leave the battle.
-    pub fn hud(&mut self, ctx: &egui::Context, renderer: &mut Renderer, audio: Option<&Audio>) -> bool {
+    pub fn hud(
+        &mut self,
+        ctx: &egui::Context,
+        renderer: &mut Renderer,
+        audio: Option<&Audio>,
+        codex: Option<&ods_geo::Campaign>,
+    ) -> bool {
         let mut leave = false;
 
         egui::TopBottomPanel::top("battle-top").show(ctx, |ui| {
@@ -503,7 +513,7 @@ impl BattleScreen {
                     }
                 }
                 ui.separator();
-                ui.weak("[Q]/[E] turn the field  [F] floor cutaway  [T] threat  [O] door  [V] smoke  [B] bind  [K] kneel  [X] amputate  [R] ward  [Y] rally");
+                ui.weak("[Q]/[E] turn the field  [F] floor cutaway  [T] threat  [M] map  [O] door  [V] smoke  [B] bind  [K] kneel  [X] amputate  [R] ward  [Y] rally");
             });
         });
 
@@ -513,8 +523,84 @@ impl BattleScreen {
             .collapsible(true)
             .resizable(false)
             .show(ctx, |ui| {
-                self.minimap(ui);
+                self.minimap(ui, 6.0, false);
             });
+
+        // The tactical map [M]: the whole field at reading size; click a
+        // tile and the camera walks there.
+        if self.show_map {
+            let mut open = true;
+            let mut jump: Option<IVec3> = None;
+            egui::Window::new("Tactical map [M]")
+                .open(&mut open)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.weak("click anywhere to swing the camera there");
+                    jump = self.minimap(ui, 13.0, true);
+                });
+            if let Some(tile) = jump {
+                let p = (tile * TILE_VOXELS).as_vec3() + Vec3::new(HALF_TILE, HALF_TILE, 0.0);
+                self.camera.target.x = p.x;
+                self.camera.target.y = p.y;
+            }
+            self.show_map = open;
+        }
+
+        // The field codex: hover a demon and the bestiary answers with
+        // what the Order actually knows about the breed.
+        if let Some(tile) = self.hover
+            && let Some(enemy) = self
+                .battle
+                .unit_at(tile)
+                .filter(|&e| self.battle.unit(e).side == Side::Demons)
+        {
+            let species = self.battle.unit(enemy).species;
+            egui::Window::new("Field codex")
+                .anchor(egui::Align2::LEFT_TOP, [8.0, 120.0])
+                .collapsible(false)
+                .resizable(false)
+                .title_bar(false)
+                .show(ctx, |ui| {
+                    ui.strong(species.name());
+                    ui.set_max_width(240.0);
+                    match codex {
+                        // In a campaign the codex only says what's earned.
+                        Some(c) => {
+                            ui.label(
+                                egui::RichText::new(crate::geoscape::bestiary_lore(species))
+                                    .small(),
+                            );
+                            if c.codex_slain.contains(&species) {
+                                let key = species.name().to_lowercase().replace(' ', "_");
+                                if let Some(d) = ods_sim::data::species().get(&key) {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "Necropsy: {} TU · {} HP · armor {}/{}/{}",
+                                            d.tu, d.health, d.armor.0, d.armor.1, d.armor.2
+                                        ))
+                                        .small()
+                                        .color(egui::Color32::from_rgb(200, 150, 120)),
+                                    );
+                                }
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("no necropsy on record")
+                                        .weak()
+                                        .small(),
+                                );
+                            }
+                        }
+                        // A skirmish teaches freely.
+                        None => {
+                            ui.label(
+                                egui::RichText::new(crate::geoscape::bestiary_lore(species))
+                                    .small(),
+                            );
+                        }
+                    }
+                });
+        }
 
         self.draw_floaters(ctx, renderer.aspect());
 
@@ -1332,14 +1418,26 @@ impl BattleScreen {
         cam.view_proj(aspect)
     }
 
-    fn minimap(&mut self, ui: &mut egui::Ui) {
+    /// The table map at `px` per tile. When clickable, returns the tile
+    /// the player tapped (for camera jumps).
+    fn minimap(&mut self, ui: &mut egui::Ui, px: f32, clickable: bool) -> Option<IVec3> {
         let (min, max) = self.battle.tiles.bounds();
         let size = max - min;
-        let px = 6.0f32;
-        let (rect, _resp) = ui.allocate_exact_size(
+        let (rect, resp) = ui.allocate_exact_size(
             egui::vec2(size.x as f32 * px, size.y as f32 * px),
-            egui::Sense::hover(),
+            if clickable { egui::Sense::click() } else { egui::Sense::hover() },
         );
+        let clicked = if resp.clicked() {
+            resp.interact_pointer_pos().map(|p| {
+                IVec3::new(
+                    min.x + ((p.x - rect.min.x) / px) as i32,
+                    min.y + ((rect.max.y - p.y) / px) as i32,
+                    0,
+                )
+            })
+        } else {
+            None
+        };
         let paint = ui.painter_at(rect);
         let visible = self.battle.visible_tiles(Side::Order);
         for y in min.y..max.y {
@@ -1419,6 +1517,7 @@ impl BattleScreen {
                 );
             }
         }
+        clicked
     }
 
     fn select_next_soldier(&mut self) {

@@ -12,6 +12,8 @@ use crate::{Core, SAVE_PATH, Screen};
 pub enum GeoAction {
     None,
     LeadMission(MissionKind),
+    /// Walk into the chapterhouse: the Basescape diorama.
+    EnterBase,
 }
 
 impl Core {
@@ -211,11 +213,8 @@ impl Core {
             ui.separator();
 
             let wide = [ui.available_width(), 24.0];
-            if ui
-                .add_sized(wide, egui::Button::selectable(self.show_bases, "🏰 Chapterhouses"))
-                .clicked()
-            {
-                self.show_bases = !self.show_bases;
+            if ui.add_sized(wide, egui::Button::new("🏰 Chapterhouses")).clicked() {
+                action = GeoAction::EnterBase;
             }
             if ui
                 .add_sized(wide, egui::Button::selectable(self.show_codex, "📖 Bestiary"))
@@ -713,7 +712,13 @@ impl Core {
                         }
                         ui.end_row();
                         for (si, s) in c.soldiers.iter().enumerate() {
-                            ui.label(&s.name);
+                            if ui
+                                .small_button(&s.name)
+                                .on_hover_text("open the armoury mirror: paper doll, identity")
+                                .clicked()
+                            {
+                                self.equip_for = Some(si);
+                            }
                             if ui.small_button(s.weapon_key.replace('_', " ")).clicked() {
                                 act = Some((si, 0));
                             }
@@ -843,206 +848,6 @@ impl Core {
             });
         });
 
-        // ------------------------------------------------- chapterhouses
-        egui::Window::new("Chapterhouses")
-            .open(&mut self.show_bases)
-            .default_width(380.0)
-            .show(ctx, |ui| {
-            egui::ScrollArea::vertical().max_height(560.0).show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for (i, b) in c.bases.iter().enumerate() {
-                        ui.selectable_value(&mut self.selected_base, i, b.region.name());
-                    }
-                });
-                self.selected_base = self.selected_base.min(c.bases.len() - 1);
-                let bi = self.selected_base;
-                ui.heading(format!("Chapterhouse — {}", c.bases[bi].region.name()));
-
-                ui.horizontal_wrapped(|ui| {
-                    for f in Facility::BUILDABLE {
-                        ui.selectable_value(
-                            &mut self.build_choice,
-                            f,
-                            format!("{} ({}k)", f.name(), f.cost()),
-                        );
-                    }
-                });
-                ui.add_space(4.0);
-
-                egui::Grid::new("base-grid").spacing([2.0, 2.0]).show(ui, |ui| {
-                    for y in 0..GRID {
-                        for x in 0..GRID {
-                            let cell = c.bases[bi].facility_at(x, y);
-                            let label = match cell {
-                                Some((f, true)) => {
-                                    f.name().chars().next().unwrap_or('?').to_string()
-                                }
-                                Some((_, false)) => "⏳".to_string(),
-                                None => "·".to_string(),
-                            };
-                            let button = egui::Button::new(label).min_size(egui::vec2(30.0, 30.0));
-                            let resp = ui.add(button);
-                            let resp = match cell {
-                                Some((f, true)) => resp.on_hover_text(f.name()),
-                                Some((f, false)) => {
-                                    resp.on_hover_text(format!("{} (building)", f.name()))
-                                }
-                                None => resp.on_hover_text("empty"),
-                            };
-                            if resp.clicked()
-                                && cell.is_none()
-                                && let Err(e) = c.start_build(bi, self.build_choice, x, y)
-                            {
-                                self.log.push(format!("cannot build: {e:?}"));
-                            }
-                        }
-                        ui.end_row();
-                    }
-                });
-
-                // Founding new chapterhouses.
-                ui.add_space(4.0);
-                ui.menu_button(
-                    format!("Found chapterhouse ({}k)…", ods_geo::CHAPTERHOUSE_COST),
-                    |ui| {
-                        for region in ods_geo::Region::ALL {
-                            if c.bases.iter().any(|b| b.region == region) {
-                                continue;
-                            }
-                            if ui.button(region.name()).clicked() {
-                                match c.found_chapterhouse(region) {
-                                    Ok(()) => self.log.push(format!(
-                                        "A new chapterhouse rises in {}.",
-                                        region.name()
-                                    )),
-                                    Err(e) => self.log.push(format!("cannot found: {e:?}")),
-                                }
-                                ui.close();
-                            }
-                        }
-                    },
-                );
-
-                ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .button(format!("Soldier ({}k)", ods_geo::SOLDIER_HIRE_COST))
-                        .clicked()
-                    {
-                        match c.hire_soldier() {
-                            Ok(s) => {
-                                let line = format!("Recruited {}.", s.name);
-                                self.log.push(line);
-                            }
-                            Err(e) => self.log.push(format!("cannot hire: {e:?}")),
-                        }
-                    }
-                    if ui
-                        .button(format!("Occultist ({}k)", ods_geo::OCCULTIST_HIRE_COST))
-                        .clicked()
-                    {
-                        match c.hire_occultist() {
-                            Ok(()) => self.log.push("An occultist joins.".to_string()),
-                            Err(e) => self.log.push(format!("cannot hire: {e:?}")),
-                        }
-                    }
-                    if ui
-                        .button(format!("Artificer ({}k)", ods_geo::ARTIFICER_HIRE_COST))
-                        .clicked()
-                    {
-                        match c.hire_artificer() {
-                            Ok(()) => self.log.push("An artificer joins.".to_string()),
-                            Err(e) => self.log.push(format!("cannot hire: {e:?}")),
-                        }
-                    }
-                });
-                ui.label(format!(
-                    "{} soldiers, {} occultists, {} artificers / {} beds",
-                    c.soldiers.len(),
-                    c.occultists,
-                    c.artificers,
-                    c.quarters_capacity()
-                ));
-
-                if c.bases.iter().any(|b| b.count_active(Facility::TrainingGround) > 0) {
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label("Drills:");
-                        for f in ods_geo::Focus::ALL {
-                            ui.selectable_value(&mut c.training_focus, f, f.name());
-                        }
-                    });
-                }
-
-                ui.add_space(6.0);
-                ui.heading("Forbidden Codex");
-                match &c.research.active {
-                    Some((project, left)) => {
-                        let done = project.cost().saturating_sub(*left) as f32;
-                        ui.add(
-                            egui::ProgressBar::new(done / project.cost() as f32)
-                                .text(format!("{} — {left} pts left", project.name())),
-                        );
-                    }
-                    None => {
-                        ui.label("The scriptorium is idle.");
-                    }
-                }
-                for project in Project::ALL {
-                    if c.research.is_complete(project) {
-                        ui.label(format!("✓ {}", project.name()));
-                        continue;
-                    }
-                    let (brim, steel) = project.materials();
-                    let (grunts, overseers) = project.prisoners();
-                    let mut needs = String::new();
-                    if brim + steel > 0 {
-                        needs.push_str(&format!(" +{brim}🜏 {steel}⛓"));
-                    }
-                    if grunts + overseers > 0 {
-                        needs.push_str(&format!(" +{grunts}g/{overseers}o bound"));
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.button("Start").clicked()
-                            && let Err(e) = c.start_research(project)
-                        {
-                            self.log.push(format!("cannot research: {e:?}"));
-                        }
-                        ui.label(format!("{} ({}pts{needs})", project.name(), project.cost()));
-                    });
-                }
-
-                ui.add_space(6.0);
-                ui.heading("Workshop");
-                match &c.manufacture {
-                    Some((item, left)) => {
-                        let done = item.cost().saturating_sub(*left) as f32;
-                        ui.add(
-                            egui::ProgressBar::new(done / item.cost() as f32)
-                                .text(format!("{} — {left} left", item.name())),
-                        );
-                    }
-                    None => {
-                        ui.label(if c.workshop_capacity() == 0 {
-                            "No workshop built."
-                        } else {
-                            "The benches are idle."
-                        });
-                    }
-                }
-                for item in ManufactureItem::ALL {
-                    let (brim, steel) = item.materials();
-                    ui.horizontal(|ui| {
-                        if ui.button("Make").clicked()
-                            && let Err(e) = c.start_manufacture(item)
-                        {
-                            self.log.push(format!("cannot make: {e:?}"));
-                        }
-                        ui.label(format!("{} ({}pts, {brim}🜏 {steel}⛓)", item.name(), item.cost()));
-                    });
-                }
-            });
-        });
 
         // ------------------------------------------------------- log
         egui::TopBottomPanel::bottom("geo-log")
@@ -1254,6 +1059,39 @@ impl Core {
             self.show_stats = open;
         }
 
+        // ------------------------------------------- the armoury mirror
+        // A soldier stands before the glass: identity above, the paper
+        // doll below, every slot clickable.
+        if let Some(si) = self.equip_for {
+            if si >= c.soldiers.len() {
+                self.equip_for = None;
+            } else {
+                let mut open = true;
+                egui::Window::new("The Armoury Mirror")
+                    .open(&mut open)
+                    .default_width(300.0)
+                    .resizable(false)
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Name");
+                            ui.text_edit_singleline(&mut c.soldiers[si].name);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Callsign");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut c.soldiers[si].callsign)
+                                    .hint_text("what the squad shouts"),
+                            );
+                        });
+                        ui.separator();
+                        paper_doll(ui, c, si, &mut self.log);
+                    });
+                if !open {
+                    self.equip_for = None;
+                }
+            }
+        }
+
         // -------------------------------------------------- game over/won
         let (mut wants_chronicle, mut wants_dawn, mut wants_menu) = (false, false, false);
         if let Some(outcome) = c.over {
@@ -1314,10 +1152,61 @@ impl Core {
 
         action
     }
+
+    /// The Basescape screen: the diorama orbits behind, the desk sits on
+    /// the right. Returns true when the commander walks back out.
+    pub fn base_ui(&mut self, ctx: &egui::Context) -> bool {
+        let mut back = false;
+        let Some(c) = &mut self.campaign else {
+            self.screen = Screen::Menu;
+            return false;
+        };
+
+        egui::TopBottomPanel::top("base-top").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("⬅ Geoscape").clicked() {
+                    back = true;
+                }
+                ui.separator();
+                let bi = self.selected_base.min(c.bases.len() - 1);
+                ui.strong(format!(
+                    "Chapterhouse — {}   ·   Treasury {}k   ·   🜏 {}   ⛓ {}",
+                    c.bases[bi].region.name(),
+                    c.funds,
+                    c.brimstone,
+                    c.hellsteel
+                ));
+            });
+        });
+
+        egui::SidePanel::right("base-desk").default_width(390.0).show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                chapterhouse_panel(
+                    ui,
+                    c,
+                    &mut self.selected_base,
+                    &mut self.build_choice,
+                    &mut self.log,
+                    &mut self.base_dirty,
+                );
+            });
+        });
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new("right-drag: walk around the halls · scroll: zoom")
+                        .weak()
+                        .small(),
+                );
+            });
+        back
+    }
 }
 
 /// What the field reports say about each breed, once it has been met.
-fn bestiary_lore(species: ods_sim::units::Species) -> &'static str {
+pub(crate) fn bestiary_lore(species: ods_sim::units::Species) -> &'static str {
     use ods_sim::units::Species as S;
     match species {
         S::Soldier => "One of ours.",
@@ -1434,4 +1323,363 @@ fn seed_from_clock() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(1999)
+}
+
+/// The chapterhouse desk: build grid, founding, hiring, drills, the Codex,
+/// and the Workshop. Shared by the Basescape's side panel.
+fn chapterhouse_panel(
+    ui: &mut egui::Ui,
+    c: &mut Campaign,
+    selected_base: &mut usize,
+    build_choice: &mut Facility,
+    log: &mut Vec<String>,
+    base_dirty: &mut bool,
+) {
+    let before = (*selected_base, snapshot(c, *selected_base));
+                ui.horizontal_wrapped(|ui| {
+                    for (i, b) in c.bases.iter().enumerate() {
+                        ui.selectable_value(selected_base, i, b.region.name());
+                    }
+                });
+                *selected_base = (*selected_base).min(c.bases.len() - 1);
+                let bi = *selected_base;
+                ui.heading(format!("Chapterhouse — {}", c.bases[bi].region.name()));
+
+                ui.horizontal_wrapped(|ui| {
+                    for f in Facility::BUILDABLE {
+                        ui.selectable_value(
+                            build_choice,
+                            f,
+                            format!("{} ({}k)", f.name(), f.cost()),
+                        );
+                    }
+                });
+                ui.add_space(4.0);
+
+                egui::Grid::new("base-grid").spacing([2.0, 2.0]).show(ui, |ui| {
+                    for y in 0..GRID {
+                        for x in 0..GRID {
+                            let cell = c.bases[bi].facility_at(x, y);
+                            let label = match cell {
+                                Some((f, true)) => {
+                                    f.name().chars().next().unwrap_or('?').to_string()
+                                }
+                                Some((_, false)) => "⏳".to_string(),
+                                None => "·".to_string(),
+                            };
+                            let button = egui::Button::new(label).min_size(egui::vec2(30.0, 30.0));
+                            let resp = ui.add(button);
+                            let resp = match cell {
+                                Some((f, true)) => resp.on_hover_text(f.name()),
+                                Some((f, false)) => {
+                                    resp.on_hover_text(format!("{} (building)", f.name()))
+                                }
+                                None => resp.on_hover_text("empty"),
+                            };
+                            if resp.clicked()
+                                && cell.is_none()
+                                && let Err(e) = c.start_build(bi, *build_choice, x, y)
+                            {
+                                log.push(format!("cannot build: {e:?}"));
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+
+                // Founding new chapterhouses.
+                ui.add_space(4.0);
+                ui.menu_button(
+                    format!("Found chapterhouse ({}k)…", ods_geo::CHAPTERHOUSE_COST),
+                    |ui| {
+                        for region in ods_geo::Region::ALL {
+                            if c.bases.iter().any(|b| b.region == region) {
+                                continue;
+                            }
+                            if ui.button(region.name()).clicked() {
+                                match c.found_chapterhouse(region) {
+                                    Ok(()) => log.push(format!(
+                                        "A new chapterhouse rises in {}.",
+                                        region.name()
+                                    )),
+                                    Err(e) => log.push(format!("cannot found: {e:?}")),
+                                }
+                                ui.close();
+                            }
+                        }
+                    },
+                );
+
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .button(format!("Soldier ({}k)", ods_geo::SOLDIER_HIRE_COST))
+                        .clicked()
+                    {
+                        match c.hire_soldier() {
+                            Ok(s) => {
+                                let line = format!("Recruited {}.", s.name);
+                                log.push(line);
+                            }
+                            Err(e) => log.push(format!("cannot hire: {e:?}")),
+                        }
+                    }
+                    if ui
+                        .button(format!("Occultist ({}k)", ods_geo::OCCULTIST_HIRE_COST))
+                        .clicked()
+                    {
+                        match c.hire_occultist() {
+                            Ok(()) => log.push("An occultist joins.".to_string()),
+                            Err(e) => log.push(format!("cannot hire: {e:?}")),
+                        }
+                    }
+                    if ui
+                        .button(format!("Artificer ({}k)", ods_geo::ARTIFICER_HIRE_COST))
+                        .clicked()
+                    {
+                        match c.hire_artificer() {
+                            Ok(()) => log.push("An artificer joins.".to_string()),
+                            Err(e) => log.push(format!("cannot hire: {e:?}")),
+                        }
+                    }
+                });
+                ui.label(format!(
+                    "{} soldiers, {} occultists, {} artificers / {} beds",
+                    c.soldiers.len(),
+                    c.occultists,
+                    c.artificers,
+                    c.quarters_capacity()
+                ));
+
+                if c.bases.iter().any(|b| b.count_active(Facility::TrainingGround) > 0) {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Drills:");
+                        for f in ods_geo::Focus::ALL {
+                            ui.selectable_value(&mut c.training_focus, f, f.name());
+                        }
+                    });
+                }
+
+                ui.add_space(6.0);
+                ui.heading("Forbidden Codex");
+                match &c.research.active {
+                    Some((project, left)) => {
+                        let done = project.cost().saturating_sub(*left) as f32;
+                        ui.add(
+                            egui::ProgressBar::new(done / project.cost() as f32)
+                                .text(format!("{} — {left} pts left", project.name())),
+                        );
+                    }
+                    None => {
+                        ui.label("The scriptorium is idle.");
+                    }
+                }
+                for project in Project::ALL {
+                    if c.research.is_complete(project) {
+                        ui.label(format!("✓ {}", project.name()));
+                        continue;
+                    }
+                    let (brim, steel) = project.materials();
+                    let (grunts, overseers) = project.prisoners();
+                    let mut needs = String::new();
+                    if brim + steel > 0 {
+                        needs.push_str(&format!(" +{brim}🜏 {steel}⛓"));
+                    }
+                    if grunts + overseers > 0 {
+                        needs.push_str(&format!(" +{grunts}g/{overseers}o bound"));
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Start").clicked()
+                            && let Err(e) = c.start_research(project)
+                        {
+                            log.push(format!("cannot research: {e:?}"));
+                        }
+                        ui.label(format!("{} ({}pts{needs})", project.name(), project.cost()));
+                    });
+                }
+
+                ui.add_space(6.0);
+                ui.heading("Workshop");
+                match &c.manufacture {
+                    Some((item, left)) => {
+                        let done = item.cost().saturating_sub(*left) as f32;
+                        ui.add(
+                            egui::ProgressBar::new(done / item.cost() as f32)
+                                .text(format!("{} — {left} left", item.name())),
+                        );
+                    }
+                    None => {
+                        ui.label(if c.workshop_capacity() == 0 {
+                            "No workshop built."
+                        } else {
+                            "The benches are idle."
+                        });
+                    }
+                }
+                for item in ManufactureItem::ALL {
+                    let (brim, steel) = item.materials();
+                    ui.horizontal(|ui| {
+                        if ui.button("Make").clicked()
+                            && let Err(e) = c.start_manufacture(item)
+                        {
+                            log.push(format!("cannot make: {e:?}"));
+                        }
+                        ui.label(format!("{} ({}pts, {brim}🜏 {steel}⛓)", item.name(), item.cost()));
+                    });
+                }
+    // Anything that changed the halls redraws the diorama.
+    if before.0 != *selected_base || before.1 != snapshot(c, *selected_base) {
+        *base_dirty = true;
+    }
+}
+
+/// A cheap fingerprint of a base's construction state.
+fn snapshot(c: &Campaign, bi: usize) -> (usize, usize) {
+    let bi = bi.min(c.bases.len() - 1);
+    let cells = c.bases[bi].occupied_cells().len();
+    (c.bases.len(), cells)
+}
+
+/// The paper doll: a painted silhouette wearing what the soldier wears,
+/// with a clickable slot beside each piece of it.
+fn paper_doll(ui: &mut egui::Ui, c: &mut Campaign, si: usize, log: &mut Vec<String>) {
+    use ods_geo::ArmorTier;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(270.0, 210.0), egui::Sense::hover());
+    let paint = ui.painter_at(rect);
+    let s = &c.soldiers[si];
+    let cx = rect.center().x;
+    let top = rect.min.y + 6.0;
+
+    let armor_color = match s.armor {
+        ArmorTier::Vestments => egui::Color32::from_rgb(88, 74, 58),
+        ArmorTier::Plate => egui::Color32::from_rgb(120, 126, 138),
+        ArmorTier::Aegis => egui::Color32::from_rgb(168, 142, 70),
+    };
+    let skin = egui::Color32::from_rgb(196, 160, 130);
+    let cloth = egui::Color32::from_rgb(60, 52, 46);
+
+    // Head, and the circlet's teal ring when worn.
+    paint.circle_filled(egui::pos2(cx, top + 20.0), 14.0, skin);
+    if s.has_circlet {
+        paint.circle_stroke(
+            egui::pos2(cx, top + 14.0),
+            15.0,
+            egui::Stroke::new(2.5, egui::Color32::from_rgb(40, 220, 195)),
+        );
+    }
+    // Torso in the armor's color; pauldron nubs when armored.
+    paint.rect_filled(
+        egui::Rect::from_center_size(egui::pos2(cx, top + 66.0), egui::vec2(46.0, 56.0)),
+        4.0,
+        armor_color,
+    );
+    if s.armor != ArmorTier::Vestments {
+        for side in [-1.0f32, 1.0] {
+            paint.rect_filled(
+                egui::Rect::from_center_size(
+                    egui::pos2(cx + side * 27.0, top + 44.0),
+                    egui::vec2(12.0, 10.0),
+                ),
+                3.0,
+                armor_color,
+            );
+        }
+    }
+    // Arms and legs.
+    for side in [-1.0f32, 1.0] {
+        paint.rect_filled(
+            egui::Rect::from_center_size(
+                egui::pos2(cx + side * 31.0, top + 72.0),
+                egui::vec2(9.0, 44.0),
+            ),
+            3.0,
+            cloth,
+        );
+        paint.rect_filled(
+            egui::Rect::from_center_size(
+                egui::pos2(cx + side * 11.0, top + 122.0),
+                egui::vec2(12.0, 52.0),
+            ),
+            3.0,
+            cloth,
+        );
+    }
+    // The weapon along the right arm; the blade at the left hip.
+    paint.rect_filled(
+        egui::Rect::from_center_size(egui::pos2(cx + 42.0, top + 70.0), egui::vec2(6.0, 62.0)),
+        2.0,
+        egui::Color32::from_rgb(50, 44, 38),
+    );
+    if s.has_blade {
+        paint.rect_filled(
+            egui::Rect::from_center_size(egui::pos2(cx - 36.0, top + 96.0), egui::vec2(4.0, 26.0)),
+            1.0,
+            egui::Color32::from_rgb(200, 200, 190),
+        );
+    }
+    // Relic charm over the heart.
+    if s.relic.is_some() {
+        paint.circle_filled(egui::pos2(cx - 12.0, top + 52.0), 4.5, egui::Color32::GOLD);
+    }
+
+    // The slots down each margin, clicking straight into the armoury.
+    let mut act: Option<u8> = None;
+    let slot = |ui: &mut egui::Ui, y: f32, right: bool, label: String, hover: &str| -> bool {
+        let w = 86.0;
+        let x = if right { rect.max.x - w - 2.0 } else { rect.min.x + 2.0 };
+        ui.put(
+            egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, 20.0)),
+            egui::Button::new(egui::RichText::new(label).small()),
+        )
+        .on_hover_text(hover)
+        .clicked()
+    };
+    let s = &c.soldiers[si];
+    if slot(ui, top + 8.0, false, format!("◎ {}", if s.has_circlet { "circlet" } else { "—" }), "warded circlet: takes one psi blow") {
+        act = Some(2);
+    }
+    if slot(ui, top + 44.0, false, format!("🛡 {}", s.armor.name()), "cycle armor tier") {
+        act = Some(3);
+    }
+    if slot(
+        ui,
+        top + 80.0,
+        false,
+        match &s.relic {
+            Some(r) => format!("★ {}", r.name),
+            None => "★ relic —".to_string(),
+        },
+        "take the first relic from the reliquary / return this one",
+    ) {
+        act = Some(4);
+    }
+    if slot(ui, top + 8.0, true, format!("⚔ {}", s.weapon_key.replace('_', " ")), "cycle issued weapon") {
+        act = Some(0);
+    }
+    if slot(ui, top + 44.0, true, format!("🗡 {}", if s.has_blade { "blade" } else { "—" }), "consecrated blade: ripostes melee") {
+        act = Some(1);
+    }
+
+    if let Some(what) = act {
+        let outcome = match what {
+            0 => c.cycle_weapon(si).map(|_| ()),
+            1 => c.toggle_blade(si),
+            2 => c.toggle_circlet(si),
+            3 => c.cycle_armor(si).map(|_| ()),
+            _ => {
+                if c.soldiers[si].relic.is_some() {
+                    c.assign_relic(si, None)
+                } else if c.relic_pool.is_empty() {
+                    log.push("the reliquary is bare".to_string());
+                    Ok(())
+                } else {
+                    c.assign_relic(si, Some(0))
+                }
+            }
+        };
+        if let Err(e) = outcome {
+            log.push(format!("cannot issue: {e:?}"));
+        }
+    }
 }
