@@ -1936,6 +1936,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "glam",
+ "naga",
  "ods-voxel",
  "pollster",
  "wgpu",

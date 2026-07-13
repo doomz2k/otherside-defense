@@ -75,7 +75,7 @@ impl BattleScreen {
         let mut screen = Self {
             battle,
             token,
-            camera: OrbitCamera::new(Vec3::new(center.x, center.y, 0.0)),
+            camera: OrbitCamera::isometric(Vec3::new(center.x, center.y, 0.0)),
             log: vec!["The squad deploys.".to_string()],
             selected: None,
             fire_mode: FireMode::Snap,
@@ -271,6 +271,8 @@ impl BattleScreen {
                 self.floor_cap = !self.floor_cap;
                 self.remesh_all(renderer);
             }
+            KeyCode::KeyQ => self.camera.snap_turn(1),
+            KeyCode::KeyE => self.camera.snap_turn(-1),
             KeyCode::KeyW => self.camera.pan(0.0, 12.0),
             KeyCode::KeyS => self.camera.pan(0.0, -12.0),
             KeyCode::KeyA => self.camera.pan(-12.0, 0.0),
@@ -280,7 +282,10 @@ impl BattleScreen {
     }
 
     pub fn drag(&mut self, dx: f32, dy: f32) {
-        self.camera.orbit(dx * -0.008, dy * 0.008);
+        // Horizontal drag walks around the field; vertical is damped so the
+        // classic tabletop angle survives casual mouse movement (Q/E snap
+        // back to the true diagonals).
+        self.camera.orbit(dx * -0.008, dy * 0.003);
     }
 
     // ------------------------------------------------------------------
@@ -464,7 +469,7 @@ impl BattleScreen {
                     }
                 }
                 ui.separator();
-                ui.weak("[F] floor cutaway  [O] door  [V] smoke  [B] bind  [K] kneel  [X] amputate  [R] ward  [Y] rally");
+                ui.weak("[Q]/[E] turn the field  [F] floor cutaway  [O] door  [V] smoke  [B] bind  [K] kneel  [X] amputate  [R] ward  [Y] rally");
             });
         });
 

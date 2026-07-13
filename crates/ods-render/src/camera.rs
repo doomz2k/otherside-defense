@@ -13,16 +13,36 @@ pub struct OrbitCamera {
     pub pitch: f32,
     pub distance: f32,
     pub fov_y: f32,
+    /// Orthographic projection: the classic isometric tabletop. No
+    /// perspective convergence — X-COM's eye.
+    pub ortho: bool,
 }
+
+/// The classic dimetric battle angle: down the diagonal, ~35° above.
+pub const ISO_YAW: f32 = -std::f32::consts::FRAC_PI_4;
+pub const ISO_PITCH: f32 = 0.615;
 
 impl OrbitCamera {
     pub fn new(target: Vec3) -> Self {
         Self {
             target,
-            yaw: -std::f32::consts::FRAC_PI_4,
+            yaw: ISO_YAW,
             pitch: 0.9,
             distance: 420.0,
             fov_y: 45f32.to_radians(),
+            ortho: false,
+        }
+    }
+
+    /// The Battlescape's eye: orthographic, down the diagonal, X-COM angle.
+    pub fn isometric(target: Vec3) -> Self {
+        Self {
+            target,
+            yaw: ISO_YAW,
+            pitch: ISO_PITCH,
+            distance: 420.0,
+            fov_y: 45f32.to_radians(),
+            ortho: true,
         }
     }
 
@@ -34,8 +54,29 @@ impl OrbitCamera {
 
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
         let view = Mat4::look_at_rh(self.eye(), self.target, Vec3::Z);
-        let proj = Mat4::perspective_rh(self.fov_y, aspect.max(0.01), 1.0, 4000.0);
+        let aspect = aspect.max(0.01);
+        let proj = if self.ortho {
+            let half_h = self.distance * 0.42;
+            Mat4::orthographic_rh(
+                -half_h * aspect,
+                half_h * aspect,
+                -half_h,
+                half_h,
+                -2000.0,
+                4000.0,
+            )
+        } else {
+            Mat4::perspective_rh(self.fov_y, aspect, 1.0, 4000.0)
+        };
         proj * view
+    }
+
+    /// Rotate the view a quarter-turn around the field, staying on the
+    /// diagonal facings (X-COM's four-way battlescape rotation).
+    pub fn snap_turn(&mut self, steps: i32) {
+        let quarter = std::f32::consts::FRAC_PI_2;
+        let k = ((self.yaw - ISO_YAW) / quarter).round() + steps as f32;
+        self.yaw = ISO_YAW + k * quarter;
     }
 
     /// World-space ray through a screen pixel.

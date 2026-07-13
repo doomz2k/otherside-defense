@@ -13,3 +13,6 @@ pollster = { workspace = true }
 anyhow = { workspace = true }
 egui = { workspace = true }
 egui-wgpu = { workspace = true }
+
+[dev-dependencies]
+naga = { version = "27", features = ["wgsl-in"] }
