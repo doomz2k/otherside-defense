@@ -5,9 +5,19 @@ use winit::keyboard::KeyCode;
 
 pub const CONFIG_PATH: &str = "otherside-config.json";
 
+fn one() -> f32 {
+    1.0
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Config {
     pub volume: f32,
+    #[serde(default = "one")]
+    pub music_volume: f32,
+    #[serde(default = "one")]
+    pub sfx_volume: f32,
+    #[serde(default = "one")]
+    pub ambient_volume: f32,
     pub cam_sense: f32,
     pub anim_speed: f32,
     pub pixel_scale: u32,
@@ -24,6 +34,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             volume: 1.0,
+            music_volume: 1.0,
+            sfx_volume: 1.0,
+            ambient_volume: 1.0,
             cam_sense: 1.0,
             anim_speed: 1.0,
             pixel_scale: 3,

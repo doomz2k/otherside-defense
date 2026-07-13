@@ -94,6 +94,10 @@ pub struct BattleScreen {
     look_target: Option<Vec3>,
     /// (fx_clock stamp, unit) of the last click, for double-click centering.
     last_click: (f32, Option<UnitId>),
+    /// The field's standing soundscape, chosen once from the ground.
+    pub ambient: crate::audio::Ambient,
+    /// How hot the field is right now (0 quiet .. 1 open contact).
+    pub contact: f32,
     pub cursor: (f32, f32),
     pub right_drag: bool,
     pub last_cursor: (f32, f32),
@@ -128,6 +132,8 @@ impl BattleScreen {
             yaw_target: ods_render::ISO_YAW,
             look_target: None,
             last_click: (0.0, None),
+            ambient: crate::audio::Ambient::Temperate,
+            contact: 0.0,
             log: vec!["The squad deploys.".to_string()],
             selected: None,
             fire_mode: FireMode::Snap,
@@ -153,6 +159,7 @@ impl BattleScreen {
             right_drag: false,
             last_cursor: (0.0, 0.0),
         };
+        screen.ambient = choose_ambient(&screen.battle);
         renderer.clear_scene();
         // The bedrock the field sits on: built once, never dirty.
         let (bmin, bmax) = screen.battle.tiles.bounds();
@@ -973,6 +980,9 @@ impl BattleScreen {
                 });
             if deploy {
                 self.briefing = None;
+                if let Some(a) = audio {
+                    a.play(Sound::Deploy);
+                }
             }
         }
 
@@ -1058,7 +1068,12 @@ impl BattleScreen {
     ) {
         match result {
             Ok(events) => self.consume(renderer, audio, &events),
-            Err(e) => self.log.push(format!("cannot: {e:?}")),
+            Err(e) => {
+                if let Some(a) = audio {
+                    a.play(Sound::Error);
+                }
+                self.log.push(format!("cannot: {e:?}"));
+            }
         }
     }
 
@@ -1338,6 +1353,10 @@ impl BattleScreen {
                     life: 0.5,
                 });
                 self.emit(audio, Sound::Death, p);
+                let fallen = self.battle.unit(*unit);
+                if fallen.side == Side::Order && !fallen.civilian {
+                    play(Sound::Mourning);
+                }
             }
             // Boots tell the ground they walk on: earth, planking, snow.
             Event::Moved { to, .. } => {
@@ -1877,6 +1896,9 @@ impl BattleScreen {
 
     fn refresh_scene(&mut self, renderer: &mut Renderer) {
         let visible = self.battle.visible_tiles(Side::Order);
+        // The soundscape reads the field: open contact heats the score.
+        self.contact =
+            (self.battle.visible_enemies(Side::Order).len() as f32 / 3.0).min(1.0);
 
         self.reachable = match self.selected {
             Some(id) if self.battle.unit(id).is_active() => self.battle.reachable(id),
@@ -2368,4 +2390,39 @@ fn describe(event: &Event, battle: &Battle) -> String {
         }
         Event::BattleOver { winner } => format!("=== BATTLE OVER: {winner:?} wins ==="),
     }
+}
+
+
+/// Read the field once and pick its standing soundscape: weather first,
+/// then the ground itself.
+fn choose_ambient(battle: &Battle) -> crate::audio::Ambient {
+    use crate::audio::Ambient;
+    use ods_sim::battle::Weather;
+    match battle.weather {
+        Weather::Rain => return Ambient::Rain,
+        Weather::Sandstorm => return Ambient::Sandstorm,
+        _ => {}
+    }
+    let (min, max) = battle.tiles.bounds();
+    let mid = (min + max) / 2;
+    let ground = battle.world.voxel(
+        mid * TILE_VOXELS
+            + IVec3::new(TILE_VOXELS / 2, TILE_VOXELS / 2, scenario::GROUND_TOP - 1),
+    );
+    if ground == scenario::MAT_SAND {
+        return crate::audio::Ambient::Desert;
+    }
+    if ground == scenario::MAT_SNOW || ground == scenario::MAT_GLINT {
+        return crate::audio::Ambient::Tundra;
+    }
+    // Canopy check: enough foliage overhead reads as jungle.
+    let mut canopy = 0;
+    for (dx, dy) in [(3, 3), (-4, 5), (6, -3), (-5, -5), (0, 7)] {
+        let t = mid + IVec3::new(dx, dy, 0);
+        let p = t * TILE_VOXELS + IVec3::new(TILE_VOXELS / 2, TILE_VOXELS / 2, TILE_VOXELS + 2);
+        if battle.world.voxel(p) == scenario::MAT_FOLIAGE {
+            canopy += 1;
+        }
+    }
+    if canopy >= 2 { Ambient::Jungle } else { Ambient::Temperate }
 }

@@ -326,14 +326,24 @@ impl Core {
                 ui.horizontal(|ui| {
                     if ui.button("💾 Quick").clicked() {
                         match std::fs::write(SAVE_PATH, c.save_to_string()) {
-                            Ok(()) => self.log.push("Saved.".to_string()),
+                            Ok(()) => {
+                                self.log.push("Saved.".to_string());
+                                if let Some(a) = &self.audio {
+                                    a.play(crate::audio::Sound::SaveChime);
+                                }
+                            }
                             Err(e) => self.log.push(format!("save failed: {e}")),
                         }
                     }
                     for slot in 1..=3usize {
                         if ui.button(format!("S{slot}")).clicked() {
                             match std::fs::write(crate::slot_path(slot), c.save_to_string()) {
-                                Ok(()) => self.log.push(format!("Saved to slot {slot}.")),
+                                Ok(()) => {
+                                    self.log.push(format!("Saved to slot {slot}."));
+                                    if let Some(a) = &self.audio {
+                                        a.play(crate::audio::Sound::SaveChime);
+                                    }
+                                }
                                 Err(e) => self.log.push(format!("save failed: {e}")),
                             }
                         }

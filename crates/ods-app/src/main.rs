@@ -175,8 +175,11 @@ pub struct Core {
     pub geo_speed: u8,
     /// How far through the current day the clock stands (0..1).
     pub day_progress: f32,
-    /// Master volume (0..=1) and orbit-drag sensitivity (0.3..=2.5).
+    /// Master volume (0..=1), the three buses, and orbit-drag sensitivity.
     pub volume: f32,
+    pub music_volume: f32,
+    pub sfx_volume: f32,
+    pub ambient_volume: f32,
     pub cam_sense: f32,
     /// Battle pacing multiplier: how fast figures glide (0.5..=3).
     pub anim_speed: f32,
@@ -185,7 +188,7 @@ pub struct Core {
     pub rebinding: Option<usize>,
     /// The after-action report awaiting review on the Geoscape.
     pub debrief: Option<Debrief>,
-    audio: Option<audio::Audio>,
+    pub(crate) audio: Option<audio::Audio>,
     /// The big spinning world.
     geo_camera: OrbitCamera,
     geo_drag: bool,
@@ -251,6 +254,9 @@ impl Core {
         renderer.set_crt(cfg.crt);
         let mut audio = audio::Audio::new();
         if let Some(a) = audio.as_mut() {
+            a.music_volume = cfg.music_volume;
+            a.sfx_volume = cfg.sfx_volume;
+            a.ambient_volume = cfg.ambient_volume;
             a.set_volume(cfg.volume);
         }
         let egui_ctx = egui::Context::default();
@@ -291,6 +297,9 @@ impl Core {
             geo_speed: 0,
             day_progress: 0.0,
             volume: cfg.volume,
+            music_volume: cfg.music_volume,
+            sfx_volume: cfg.sfx_volume,
+            ambient_volume: cfg.ambient_volume,
             cam_sense: cfg.cam_sense,
             anim_speed: cfg.anim_speed,
             binds,
@@ -325,6 +334,9 @@ impl Core {
     pub fn save_config(&self) {
         config::Config {
             volume: self.volume,
+            music_volume: self.music_volume,
+            sfx_volume: self.sfx_volume,
+            ambient_volume: self.ambient_volume,
             cam_sense: self.cam_sense,
             anim_speed: self.anim_speed,
             pixel_scale: self.renderer.pixel_scale(),
@@ -555,8 +567,12 @@ impl Core {
 
         match self.screen {
             Screen::Battle => {
-                if let Some(a) = self.audio.as_mut() {
+                if let (Some(a), Some(b)) = (self.audio.as_mut(), self.battle.as_ref()) {
                     a.music(Some(audio::MusicTrack::Warfront));
+                    a.ambient(Some(b.ambient));
+                    // Contact heats the score and hushes the birds.
+                    a.set_intensity(b.contact);
+                    a.set_ambient_level(if b.contact > 0.0 { 0.25 } else { 1.0 });
                 }
                 if let Some(b) = self.battle.as_mut() {
                     let (w, h) = self.renderer.size();
@@ -576,6 +592,8 @@ impl Core {
             Screen::Geoscape => {
                 if let Some(a) = self.audio.as_mut() {
                     a.music(Some(audio::MusicTrack::Vigil));
+                    a.ambient(Some(audio::Ambient::HighWind));
+                    a.set_ambient_level(1.0);
                 }
                 // The world turns on its own until the player grabs it —
                 // or eases toward whatever the war just pointed at.
@@ -618,19 +636,38 @@ impl Core {
                             self.day_progress -= 1.0;
                             crossed += 1;
                             let events = c.advance_day();
+                            if let Some(a) = &self.audio {
+                                a.play(audio::Sound::DayTick);
+                            }
                             if !events.is_empty() {
                                 // Something happened: the clock waits.
                                 self.geo_speed = 0;
                                 self.day_progress = 0.0;
+                                if let Some(a) = &self.audio {
+                                    a.play(audio::Sound::PauseDrum);
+                                }
                                 for e in &events {
                                     self.log.push(chronicle::narrate(c, e));
-                                    if let ods_geo::GeoEvent::RiftDetected { id, .. } = e
-                                        && let Some(r) = c.rifts.iter().find(|r| r.id == *id)
-                                    {
-                                        self.geo_swing = Some((
-                                            r.lon.to_radians(),
-                                            r.lat.to_radians().clamp(0.15, 1.2),
-                                        ));
+                                    match e {
+                                        ods_geo::GeoEvent::RiftDetected { id, .. } => {
+                                            if let Some(a) = &self.audio {
+                                                a.play(audio::Sound::AugurSting);
+                                            }
+                                            if let Some(r) =
+                                                c.rifts.iter().find(|r| r.id == *id)
+                                            {
+                                                self.geo_swing = Some((
+                                                    r.lon.to_radians(),
+                                                    r.lat.to_radians().clamp(0.15, 1.2),
+                                                ));
+                                            }
+                                        }
+                                        ods_geo::GeoEvent::BloodMoonRises => {
+                                            if let Some(a) = &self.audio {
+                                                a.play(audio::Sound::MoonHorn);
+                                            }
+                                        }
+                                        _ => {}
                                     }
                                 }
                                 break;
@@ -661,6 +698,8 @@ impl Core {
             Screen::Base => {
                 if let Some(a) = self.audio.as_mut() {
                     a.music(Some(audio::MusicTrack::Vigil));
+                    a.ambient(Some(audio::Ambient::Halls));
+                    a.set_ambient_level(1.0);
                 }
                 if self.base_dirty
                     && let Some(c) = &self.campaign
@@ -677,6 +716,8 @@ impl Core {
             Screen::Menu => {
                 if let Some(a) = self.audio.as_mut() {
                     a.music(Some(audio::MusicTrack::Vigil));
+                    a.ambient(Some(audio::Ambient::HighWind));
+                    a.set_ambient_level(1.0);
                 }
                 // A frozen skirmish smoulders behind the title.
                 if !self.menu_built {
@@ -782,6 +823,39 @@ impl Core {
                     let volume = self.volume;
                     if let Some(a) = self.audio_mut() {
                         a.set_volume(volume);
+                    }
+                    self.save_config();
+                }
+                // The three buses under the master.
+                let mut bus_changed = false;
+                for (label, value) in [
+                    ("Music", 0usize),
+                    ("Effects", 1),
+                    ("Ambience", 2),
+                ] {
+                    let v = match value {
+                        0 => &mut self.music_volume,
+                        1 => &mut self.sfx_volume,
+                        _ => &mut self.ambient_volume,
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(label).small());
+                        if ui
+                            .add(egui::Slider::new(v, 0.0..=1.0).show_value(false))
+                            .changed()
+                        {
+                            bus_changed = true;
+                        }
+                    });
+                }
+                if bus_changed {
+                    let (m, fx, amb) =
+                        (self.music_volume, self.sfx_volume, self.ambient_volume);
+                    if let Some(a) = self.audio_mut() {
+                        a.music_volume = m;
+                        a.sfx_volume = fx;
+                        a.ambient_volume = amb;
+                        a.apply_bus_volumes();
                     }
                     self.save_config();
                 }
