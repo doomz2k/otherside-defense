@@ -360,8 +360,12 @@ impl Core {
         // Every figure on parade — the diorama has no fog of war.
         let visible: std::collections::HashSet<glam::IVec3> =
             battle.units.iter().map(|u| u.tile).collect();
-        let (verts, indices) =
-            figures::build_figures(&battle, &visible, &std::collections::HashMap::new());
+        let (verts, indices) = figures::build_figures(
+            &battle,
+            &visible,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        );
         self.renderer.set_figures(&verts, &indices);
         let (min, max) = battle.tiles.bounds();
         let center = ((min + max).as_vec3() / 2.0) * ods_sim::TILE_VOXELS as f32;

@@ -12,6 +12,8 @@ pub struct MeshData {
     pub normals: Vec<[f32; 3]>,
     /// Material id per vertex (uniform across each quad).
     pub materials: Vec<u32>,
+    /// Baked ambient occlusion per vertex, 0..=1 (1 = fully open corner).
+    pub aos: Vec<f32>,
     pub indices: Vec<u32>,
 }
 
@@ -57,11 +59,48 @@ impl MeshData {
                     self.positions.push(p);
                     self.normals.push(normal);
                     self.materials.push(material as u32);
+                    self.aos.push(1.0);
                 }
                 self.indices.extend([0, 1, 2, 0, 2, 3].map(|k| first + k));
             }
         }
     }
+}
+
+/// AO for one face: probe the eight neighbors of the face's air cell and
+/// grade each of its four corners. Returned in [p00, p10, p11, p01] order.
+fn face_ao(
+    air: IVec3,
+    u: usize,
+    v: usize,
+    solid: &impl Fn(IVec3) -> bool,
+) -> [u8; 4] {
+    let probe = |su: i32, sv: i32| -> bool {
+        let mut p = air;
+        p[u] += su;
+        p[v] += sv;
+        solid(p)
+    };
+    let corner = |su: i32, sv: i32| -> u8 {
+        corner_ao(probe(su, 0), probe(0, sv), probe(su, sv))
+    };
+    [corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1)]
+}
+
+/// Corner AO levels, 0..=3: 3 is a fully open corner, 0 a pinched one.
+/// The classic rule: two perpendicular side occluders pinch the corner
+/// completely; otherwise every occluding neighbor costs a level.
+fn corner_ao(side1: bool, side2: bool, corner: bool) -> u8 {
+    if side1 && side2 {
+        0
+    } else {
+        3 - (side1 as u8 + side2 as u8 + corner as u8)
+    }
+}
+
+/// The brightness a baked AO level maps to.
+fn ao_level(level: u8) -> f32 {
+    0.55 + 0.15 * level as f32
 }
 
 /// Greedy-mesh one chunk.
@@ -81,9 +120,11 @@ pub fn mesh_chunk_capped(world: &VoxelWorld, chunk: IVec3, cap: Option<i32>) -> 
     let n = CHUNK_SIZE as usize;
     let mut mesh = MeshData::default();
 
-    // A mask cell holds (material, is_front_face) for a face lying on the
-    // current slice plane, or None where no face is needed.
-    let mut mask: Vec<Option<(u8, bool)>> = vec![None; n * n];
+    // A mask cell holds (material, is_front_face, corner AO levels) for a
+    // face lying on the current slice plane, or None where no face is
+    // needed. AO rides in the mask so cells only merge when their baked
+    // shading agrees — the greedy pass stays correct.
+    let mut mask: Vec<Option<(u8, bool, [u8; 4])>> = vec![None; n * n];
 
     for d in 0..3 {
         let u = (d + 1) % 3;
@@ -108,20 +149,29 @@ pub fn mesh_chunk_capped(world: &VoxelWorld, chunk: IVec3, cap: Option<i32>) -> 
                             _ => v,
                         }
                     };
+                    let solid = |p: IVec3| sample(origin + p).is_solid();
                     let a = sample(origin + pa);
                     let b = sample(origin + pb);
                     mask[(j * CHUNK_SIZE + i) as usize] = match (a.is_solid(), b.is_solid()) {
                         // Front face (+d) of voxel `a` — only if `a` is ours.
-                        (true, false) if slice > 0 => Some((a.0, true)),
+                        (true, false) if slice > 0 => {
+                            Some((a.0, true, face_ao(pb, u, v, &solid)))
+                        }
                         // Back face (-d) of voxel `b` — only if `b` is ours.
-                        (false, true) if slice < CHUNK_SIZE => Some((b.0, false)),
+                        (false, true) if slice < CHUNK_SIZE => {
+                            Some((b.0, false, face_ao(pa, u, v, &solid)))
+                        }
                         _ => None,
                     };
                 }
             }
 
             // Greedily merge equal mask cells into maximal rectangles.
-            let mut emit = |i: usize, j: usize, w: usize, h: usize, (material, front): (u8, bool)| {
+            let mut emit = |i: usize,
+                            j: usize,
+                            w: usize,
+                            h: usize,
+                            (material, front, ao): (u8, bool, [u8; 4])| {
                 let mut base = IVec3::ZERO;
                 base[d] = slice;
                 base[u] = i as i32;
@@ -143,15 +193,17 @@ pub fn mesh_chunk_capped(world: &VoxelWorld, chunk: IVec3, cap: Option<i32>) -> 
                 normal[d] = if front { 1.0 } else { -1.0 };
 
                 let first = mesh.positions.len() as u32;
-                let quad = if front {
-                    [p00, p10, p11, p01]
+                // AO corner order matches [p00, p10, p11, p01].
+                let (quad, ao4) = if front {
+                    ([p00, p10, p11, p01], [ao[0], ao[1], ao[2], ao[3]])
                 } else {
-                    [p00, p01, p11, p10]
+                    ([p00, p01, p11, p10], [ao[0], ao[3], ao[2], ao[1]])
                 };
-                for p in quad {
+                for (p, a) in quad.into_iter().zip(ao4) {
                     mesh.positions.push(p);
                     mesh.normals.push(normal);
                     mesh.materials.push(material as u32);
+                    mesh.aos.push(ao_level(a));
                 }
                 mesh.indices
                     .extend([0, 1, 2, 0, 2, 3].map(|k| first + k));
@@ -281,5 +333,44 @@ mod tests {
     fn empty_chunk_is_empty_mesh() {
         let world = VoxelWorld::new();
         assert!(mesh_chunk(&world, IVec3::ZERO).is_empty());
+    }
+
+    #[test]
+    fn walls_pinch_the_floor_corners_they_touch() {
+        let mut world = VoxelWorld::new();
+        // A 5x5 floor slab with a single wall voxel standing mid-slab.
+        world.fill_box(IVec3::ZERO, IVec3::new(5, 5, 1), STONE);
+        world.set_voxel(IVec3::new(2, 2, 1), IRON);
+        let mesh = mesh_chunk(&world, IVec3::ZERO);
+        assert_eq!(mesh.aos.len(), mesh.positions.len());
+
+        // Floor vertices under the open sky stay fully lit; the ones that
+        // meet the wall's foot are occluded.
+        let mut open = false;
+        let mut pinched = false;
+        for i in 0..mesh.positions.len() {
+            // Upward floor faces only.
+            if mesh.normals[i] != [0.0, 0.0, 1.0] {
+                continue;
+            }
+            let [x, y, _] = mesh.positions[i];
+            let near_wall = (2.0..=3.0).contains(&x) && (2.0..=3.0).contains(&y);
+            if near_wall && mesh.aos[i] < 0.99 {
+                pinched = true;
+            }
+            if !near_wall && mesh.aos[i] > 0.99 {
+                open = true;
+            }
+        }
+        assert!(pinched, "the wall's foot must darken the floor");
+        assert!(open, "open floor must stay bright");
+    }
+
+    #[test]
+    fn a_lone_voxel_has_fully_open_corners() {
+        let mut world = VoxelWorld::new();
+        world.set_voxel(IVec3::new(3, 4, 5), STONE);
+        let mesh = mesh_chunk(&world, IVec3::ZERO);
+        assert!(mesh.aos.iter().all(|&a| a > 0.99), "nothing occludes it");
     }
 }

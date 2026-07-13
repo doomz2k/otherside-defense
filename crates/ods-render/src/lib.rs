@@ -20,11 +20,13 @@ pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub material: u32,
+    /// Baked ambient occlusion, 0..=1.
+    pub ao: f32,
 }
 
 impl Vertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Uint32];
+    const ATTRIBUTES: [wgpu::VertexAttribute; 4] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Uint32, 3 => Float32];
 
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
@@ -40,6 +42,7 @@ pub fn interleave(mesh: &MeshData) -> Vec<Vertex> {
             position: mesh.positions[i],
             normal: mesh.normals[i],
             material: mesh.materials[i],
+            ao: mesh.aos.get(i).copied().unwrap_or(1.0),
         })
         .collect()
 }
@@ -79,11 +82,13 @@ mod tests {
             positions: vec![[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]],
             normals: vec![[0.0, 1.0, 0.0], [0.0, -1.0, 0.0]],
             materials: vec![7, 9],
+            aos: vec![1.0, 0.7],
             indices: vec![0, 1, 0],
         };
         let verts = interleave(&mesh);
         assert_eq!(verts.len(), 2);
         assert_eq!(verts[1].position, [3.0, 4.0, 5.0]);
         assert_eq!(verts[1].material, 9);
+        assert_eq!(verts[1].ao, 0.7);
     }
 }

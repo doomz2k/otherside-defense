@@ -336,12 +336,23 @@ pub fn blueprint(species: Species) -> &'static [PartBox] {
     }
 }
 
+/// Per-unit animation state the battle screen tracks between frames.
+#[derive(Clone, Copy, Default)]
+pub struct AnimState {
+    /// Walk-cycle phase in radians; 0 means standing still.
+    pub walk: f32,
+    /// Seconds of fire recoil remaining.
+    pub recoil: f32,
+}
+
 /// Build the mesh for every visible unit on the field. `visual` overrides
-/// feet positions for gliding movement (missing entries snap to the tile).
+/// feet positions for gliding movement (missing entries snap to the tile);
+/// `anim` carries walk phases and recoil so the figures move like figures.
 pub fn build_figures(
     battle: &Battle,
     visible: &std::collections::HashSet<IVec3>,
     visual: &std::collections::HashMap<u32, Vec3>,
+    anim: &std::collections::HashMap<u32, AnimState>,
 ) -> (Vec<LitVertex>, Vec<u32>) {
     use ods_sim::units::{Side, Species};
 
@@ -389,7 +400,8 @@ pub fn build_figures(
             continue;
         }
         let feet = visual.get(&u.id.0).copied();
-        push_unit(&mut vertices, &mut indices, u, feet);
+        let state = anim.get(&u.id.0).copied().unwrap_or_default();
+        push_unit(&mut vertices, &mut indices, u, feet, state);
     }
     (vertices, indices)
 }
@@ -419,8 +431,9 @@ fn push_unit(
     indices: &mut Vec<u32>,
     unit: &Unit,
     feet_override: Option<Vec3>,
+    anim: AnimState,
 ) {
-    let feet = feet_override.unwrap_or_else(|| {
+    let mut feet = feet_override.unwrap_or_else(|| {
         (unit.tile * TILE_VOXELS).as_vec3()
             + Vec3::new(
                 TILE_VOXELS as f32 / 2.0,
@@ -428,6 +441,17 @@ fn push_unit(
                 GROUND_TOP as f32,
             )
     });
+    let vs = ods_sim::VS as f32;
+    // The walk: the whole body bobs on the beat of the stride.
+    let moving = unit.is_active() && anim.walk != 0.0;
+    if moving {
+        feet.z += (anim.walk * 2.0).sin().abs() * 0.35 * vs;
+    }
+    let swing = if moving { anim.walk.sin() } else { 0.0 };
+    let face = Vec3::new(unit.facing.x as f32, unit.facing.y as f32, 0.0).normalize_or(Vec3::X);
+    // Recoil: the shot kicks the shooter back off the line for a blink.
+    let kick = if unit.is_active() { anim.recoil.max(0.0) } else { 0.0 };
+    let body_offset = face * (-kick * 9.0 * vs);
 
     // Pose: kneeling compresses; the subdued lie in a heap; the dead
     // flatter still.
@@ -484,9 +508,32 @@ fn push_unit(
             // Drained of struggle.
             color = [color[0] * 0.6, color[1] * 0.6, color[2] * 0.6, 1.0];
         }
-        let vs = ods_sim::VS as f32;
-        let min = feet + Vec3::new(part.min.x, part.min.y, part.min.z * z_scale) * vs;
+        // The stride: legs scissor along the facing, arms answer opposite,
+        // and the swinging leg lifts. The weapon rides the recoil.
+        let mut offset = body_offset;
+        if z_scale >= 0.7 {
+            match part.part {
+                BodyPart::LeftLeg => {
+                    offset += face * (swing * 1.4 * vs);
+                    offset.z += swing.max(0.0) * 0.8 * vs;
+                }
+                BodyPart::RightLeg => {
+                    offset += face * (-swing * 1.4 * vs);
+                    offset.z += (-swing).max(0.0) * 0.8 * vs;
+                }
+                BodyPart::LeftArm => offset += face * (-swing * 0.9 * vs),
+                BodyPart::RightArm | BodyPart::Weapon => {
+                    offset += face * (swing * 0.9 * vs);
+                    if part.part == BodyPart::Weapon {
+                        offset.z += kick * 12.0 * vs;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let min = feet + offset + Vec3::new(part.min.x, part.min.y, part.min.z * z_scale) * vs;
         let max = feet
+            + offset
             + Vec3::new(
                 part.max.x,
                 part.max.y,
@@ -494,6 +541,50 @@ fn push_unit(
             ) * vs;
         push_box(vertices, indices, min, max, color);
     }
+}
+
+/// The bedrock skirt: rough dark rock hanging below the battlefield's rim,
+/// so the map reads as a place instead of a slab floating in the void.
+pub fn build_skirt(min_tile: IVec3, max_tile: IVec3, seed: u64) -> (Vec<LitVertex>, Vec<u32>) {
+    let t = ods_sim::TILE_VOXELS;
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let hash = |x: i32, y: i32| -> f32 {
+        let mut h = (seed as u32)
+            .wrapping_mul(747796405)
+            .wrapping_add(x as u32)
+            .wrapping_mul(2654435761)
+            .wrapping_add(y as u32)
+            .wrapping_mul(1274126177);
+        h ^= h >> 15;
+        ((h >> 8) & 255) as f32 / 255.0
+    };
+    let mut slab = |x0: f32, y0: f32, x1: f32, y1: f32, h: f32| {
+        let depth = (14.0 + 22.0 * h) * ods_sim::VS as f32;
+        let shade = 0.75 + 0.35 * h;
+        let color = [0.14 * shade, 0.12 * shade, 0.10 * shade, 1.0];
+        push_box(
+            &mut vertices,
+            &mut indices,
+            Vec3::new(x0, y0, -depth),
+            Vec3::new(x1, y1, 2.0),
+            color,
+        );
+    };
+    let (x0, y0) = ((min_tile.x * t) as f32, (min_tile.y * t) as f32);
+    let (x1, y1) = ((max_tile.x * t) as f32, (max_tile.y * t) as f32);
+    let hang = 6.0 * ods_sim::VS as f32;
+    for tx in min_tile.x..max_tile.x {
+        let (a, b) = ((tx * t) as f32, ((tx + 1) * t) as f32);
+        slab(a, y0 - hang, b, y0 + 1.0, hash(tx, -1));
+        slab(a, y1 - 1.0, b, y1 + hang, hash(tx, -2));
+    }
+    for ty in min_tile.y..max_tile.y {
+        let (a, b) = ((ty * t) as f32, ((ty + 1) * t) as f32);
+        slab(x0 - hang, a, x0 + 1.0, b, hash(-1, ty));
+        slab(x1 - 1.0, a, x1 + hang, b, hash(-2, ty));
+    }
+    (vertices, indices)
 }
 
 fn push_box(

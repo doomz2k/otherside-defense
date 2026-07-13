@@ -47,12 +47,18 @@ struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) material: u32,
+    @location(3) ao: f32,
 };
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) @interpolate(flat) material: u32,
     @location(2) world: vec3<f32>,
+    @location(3) ao: f32,
+};
+struct FsOut {
+    @location(0) color: vec4<f32>,
+    @location(1) glow: vec4<f32>,
 };
 
 @vertex
@@ -62,6 +68,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.normal = in.normal;
     out.material = in.material;
     out.world = in.position;
+    out.ao = in.ao;
     return out;
 }
 
@@ -89,13 +96,18 @@ fn bayer(frag: vec2<f32>) -> f32 {
 }
 
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_main(in: VsOut) -> FsOut {
+    var out: FsOut;
+    out.glow = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     let base = PALETTE[min(in.material, 21u)];
     if in.material >= 16u && in.material <= 18u {
         // Occult light: full-bright, breathing on the clock. Unlit by sun,
-        // so sigils burn brightest exactly where the night is darkest.
+        // so sigils burn brightest exactly where the night is darkest —
+        // and it bleeds into the glow buffer for the bloom pass.
         let pulse = 0.75 + 0.35 * sin(camera.sun.w * 3.2 + f32(in.material) * 1.9);
-        return vec4<f32>(base * pulse, 1.0);
+        out.color = vec4<f32>(base * pulse, 1.0);
+        out.glow = vec4<f32>(base * pulse * 0.9, 1.0);
+        return out;
     }
     let n = normalize(in.normal);
     // Greedy meshing merges faces: recover WHICH voxel this fragment sits
@@ -106,12 +118,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Face-quantized light, with the sun deciding only how hard the
     // contrast bites (flat per face — no smooth gradients anywhere).
     let sun_bite = 0.7 + 0.3 * max(dot(n, camera.sun.xyz), 0.0);
-    var color = base * face_shade(n) * sun_bite * jitter;
+    // Baked corner occlusion: pits darken, edges pop.
+    var color = base * face_shade(n) * sun_bite * jitter * in.ao;
     // Crush to banded levels with ordered dithering: the 1994 finish.
     let levels = 6.0;
     let d = bayer(in.clip.xy) / levels;
     color = floor((color + d) * levels + 0.5) / levels;
-    return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    out.color = vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    return out;
 }
 "#;
 
@@ -127,6 +141,10 @@ struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) color: vec4<f32>,
 };
+struct FsOut {
+    @location(0) color: vec4<f32>,
+    @location(1) glow: vec4<f32>,
+};
 
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
@@ -137,8 +155,12 @@ fn vs_main(in: VsIn) -> VsOut {
 }
 
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
+fn fs_main(in: VsOut) -> FsOut {
+    var out: FsOut;
+    out.color = in.color;
+    // Hot translucent effects (tracers, flares, blasts) feed the bloom.
+    out.glow = vec4<f32>(in.color.rgb * in.color.a * 0.35, 1.0);
+    return out;
 }
 "#;
 
@@ -180,15 +202,23 @@ fn lit_bayer(frag: vec2<f32>) -> f32 {
     return f32(m[y * 4 + x]) / 16.0 - 0.5;
 }
 
+struct FsOut {
+    @location(0) color: vec4<f32>,
+    @location(1) glow: vec4<f32>,
+};
+
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_main(in: VsOut) -> FsOut {
     let n = normalize(in.normal);
     let sun_bite = 0.7 + 0.3 * max(dot(n, camera.sun.xyz), 0.0);
     var color = in.color.rgb * lit_face_shade(n) * sun_bite;
     let levels = 6.0;
     let d = lit_bayer(in.clip.xy) / levels;
     color = floor((color + d) * levels + 0.5) / levels;
-    return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), in.color.a);
+    var out: FsOut;
+    out.color = vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), in.color.a);
+    out.glow = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    return out;
 }
 "#;
 
@@ -223,11 +253,16 @@ fn globe_bayer(frag: vec2<f32>) -> f32 {
     return f32(m[y * 4 + x]) / 16.0 - 0.5;
 }
 
+struct FsOut {
+    @location(0) color: vec4<f32>,
+    @location(1) glow: vec4<f32>,
+};
+
 // The 1994 planet: flat saturated color, a mapmaker's graticule over
 // everything, and a terminator that falls like a knife — day on one side,
 // night on the other, dithered only along the blade itself.
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_main(in: VsOut) -> FsOut {
     let n = normalize(in.normal);
     var color = in.color.rgb;
 
@@ -248,7 +283,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let levels = 7.0;
     let d = globe_bayer(in.clip.xy) / levels;
     color = floor((color + d) * levels + 0.5) / levels;
-    return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    var out: FsOut;
+    out.color = vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    out.glow = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    return out;
 }
 "#;
 
@@ -286,10 +324,15 @@ fn noise2(p: vec2<f32>) -> f32 {
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
+struct FsOut {
+    @location(0) color: vec4<f32>,
+    @location(1) glow: vec4<f32>,
+};
+
 // The void behind the world is not black: a violet nebula breathes there,
 // and the stars mind their own business.
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_main(in: VsOut) -> FsOut {
     let px = in.clip.xy;
     let p = px * 0.006;
     var neb = noise2(p) * 0.55;
@@ -306,7 +349,48 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let bright = (h - 0.982) / 0.018;
         color += vec3<f32>(0.8, 0.85, 1.0) * bright * tw;
     }
-    return vec4<f32>(color, 1.0);
+    var out: FsOut;
+    out.color = vec4<f32>(color, 1.0);
+    out.glow = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    return out;
+}
+"#;
+
+/// One-pass diamond blur over the glow buffer: cheap, soft, and enough —
+/// the bloom is a candle's halo, not an HDR pipeline.
+const BLUR_SHADER: &str = r#"
+@group(0) @binding(0) var glow_tex: texture_2d<f32>;
+@group(0) @binding(1) var glow_smp: sampler;
+
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
+    var out: VsOut;
+    let x = f32(i32(i & 1u) * 4 - 1);
+    let y = f32(i32(i >> 1u) * 4 - 1);
+    out.clip = vec4<f32>(x, y, 0.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, 1.0 - (y + 1.0) * 0.5);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(glow_tex));
+    let t = vec2<f32>(1.0, 1.0) / dims;
+    var acc = textureSample(glow_tex, glow_smp, in.uv).rgb * 0.28;
+    acc += textureSample(glow_tex, glow_smp, in.uv + vec2<f32>(t.x, 0.0)).rgb * 0.12;
+    acc += textureSample(glow_tex, glow_smp, in.uv - vec2<f32>(t.x, 0.0)).rgb * 0.12;
+    acc += textureSample(glow_tex, glow_smp, in.uv + vec2<f32>(0.0, t.y)).rgb * 0.12;
+    acc += textureSample(glow_tex, glow_smp, in.uv - vec2<f32>(0.0, t.y)).rgb * 0.12;
+    acc += textureSample(glow_tex, glow_smp, in.uv + vec2<f32>(2.0 * t.x, 0.0)).rgb * 0.06;
+    acc += textureSample(glow_tex, glow_smp, in.uv - vec2<f32>(2.0 * t.x, 0.0)).rgb * 0.06;
+    acc += textureSample(glow_tex, glow_smp, in.uv + vec2<f32>(0.0, 2.0 * t.y)).rgb * 0.06;
+    acc += textureSample(glow_tex, glow_smp, in.uv - vec2<f32>(0.0, 2.0 * t.y)).rgb * 0.06;
+    return vec4<f32>(acc, 1.0);
 }
 "#;
 
@@ -355,6 +439,7 @@ const BLIT_SHADER: &str = r#"
 @group(0) @binding(1) var scene_smp: sampler;
 // x: pixel scale, y: CRT flag, z/w: screen size.
 @group(0) @binding(2) var<uniform> params: vec4<f32>;
+@group(0) @binding(3) var glow_tex: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -375,6 +460,8 @@ fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var color = textureSample(scene_tex, scene_smp, in.uv).rgb;
+    // The occult halo rides on top: emissives and hot effects, blurred.
+    color += textureSample(glow_tex, scene_smp, in.uv).rgb * 1.1;
     if params.y > 0.5 {
         // The tube: a dark scanline per virtual pixel row, a whisper of
         // phosphor mask, and corners that fall away.
@@ -419,6 +506,12 @@ pub struct Renderer {
     depth_view: wgpu::TextureView,
     /// The low-resolution canvas the world is painted on.
     scene_view: wgpu::TextureView,
+    /// Emissive-only sibling of the scene, and its blurred halo.
+    glow_view: wgpu::TextureView,
+    glow_blur_view: wgpu::TextureView,
+    blur_pipeline: wgpu::RenderPipeline,
+    blur_layout: wgpu::BindGroupLayout,
+    blur_bind_group: wgpu::BindGroup,
     blit_pipeline: wgpu::RenderPipeline,
     blit_layout: wgpu::BindGroupLayout,
     blit_bind_group: wgpu::BindGroup,
@@ -440,6 +533,8 @@ pub struct Renderer {
     globe_mesh: Option<GpuMesh>,
     marker_mesh: Option<GpuMesh>,
     figure_mesh: Option<GpuMesh>,
+    /// The battlefield's bedrock skirt (static per battle, lit pipeline).
+    skirt_mesh: Option<GpuMesh>,
     fx_mesh: Option<GpuMesh>,
     ui_renderer: egui_wgpu::Renderer,
 }
@@ -464,7 +559,8 @@ impl Renderer {
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .context("surface is not supported by the adapter")?;
         surface.configure(&device, &config);
-        let (scene_view, depth_view) = create_scene_targets(&device, &config, PIXEL_SCALE);
+        let (scene_view, depth_view, glow_view, glow_blur_view) =
+            create_scene_targets(&device, &config, PIXEL_SCALE);
 
         let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("blit-sampler"),
@@ -506,10 +602,82 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
-        let blit_bind_group =
-            create_blit_bind(&device, &blit_layout, &scene_view, &blit_sampler, &blit_params);
+        let blit_bind_group = create_blit_bind(
+            &device,
+            &blit_layout,
+            &scene_view,
+            &blit_sampler,
+            &blit_params,
+            &glow_blur_view,
+        );
+
+        // The halo pass: glow buffer in, soft blur out.
+        let blur_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("blur-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let blur_bind_group =
+            create_blur_bind(&device, &blur_layout, &glow_view, &blit_sampler);
+        let blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("blur-shader"),
+            source: wgpu::ShaderSource::Wgsl(BLUR_SHADER.into()),
+        });
+        let blur_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("blur-pipeline-layout"),
+                bind_group_layouts: &[&blur_layout],
+                push_constant_ranges: &[],
+            });
+        let blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("blur-pipeline"),
+            layout: Some(&blur_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &blur_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &blur_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(config.format.into())],
+            }),
+            multiview: None,
+            cache: None,
+        });
         let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("blit-shader"),
             source: wgpu::ShaderSource::Wgsl(BLIT_SHADER.into()),
@@ -612,7 +780,7 @@ impl Renderer {
                 module: &voxel_shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[Some(config.format.into())],
+                targets: &[Some(config.format.into()), Some(config.format.into())],
             }),
             multiview: None,
             cache: None,
@@ -643,11 +811,26 @@ impl Renderer {
                 module: &overlay_shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    // Glow accumulates: overlapping hot effects stack up.
+                    Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent::OVER,
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
             }),
             multiview: None,
             cache: None,
@@ -682,7 +865,7 @@ impl Renderer {
                 module: &lit_shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[Some(config.format.into())],
+                targets: &[Some(config.format.into()), Some(config.format.into())],
             }),
             multiview: None,
             cache: None,
@@ -717,7 +900,7 @@ impl Renderer {
                 module: &globe_shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[Some(config.format.into())],
+                targets: &[Some(config.format.into()), Some(config.format.into())],
             }),
             multiview: None,
             cache: None,
@@ -749,7 +932,7 @@ impl Renderer {
                 module: &starfield_shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[Some(config.format.into())],
+                targets: &[Some(config.format.into()), Some(config.format.into())],
             }),
             multiview: None,
             cache: None,
@@ -768,6 +951,11 @@ impl Renderer {
             config,
             depth_view,
             scene_view,
+            glow_view,
+            glow_blur_view,
+            blur_pipeline,
+            blur_layout,
+            blur_bind_group,
             blit_pipeline,
             blit_layout,
             blit_bind_group,
@@ -788,6 +976,7 @@ impl Renderer {
             globe_mesh: None,
             marker_mesh: None,
             figure_mesh: None,
+            skirt_mesh: None,
             fx_mesh: None,
             ui_renderer,
         })
@@ -801,7 +990,13 @@ impl Renderer {
         self.globe_mesh = None;
         self.marker_mesh = None;
         self.figure_mesh = None;
+        self.skirt_mesh = None;
         self.fx_mesh = None;
+    }
+
+    /// Install the battlefield's bedrock skirt (built once per battle).
+    pub fn set_skirt(&mut self, vertices: &[LitVertex], indices: &[u32]) {
+        self.skirt_mesh = self.upload_lit(vertices, indices);
     }
 
     fn upload_lit(&self, vertices: &[LitVertex], indices: &[u32]) -> Option<GpuMesh> {
@@ -863,16 +1058,25 @@ impl Renderer {
     }
 
     fn rebuild_scene_targets(&mut self) {
-        let (scene_view, depth_view) =
+        let (scene_view, depth_view, glow_view, glow_blur_view) =
             create_scene_targets(&self.device, &self.config, self.pixel_scale);
         self.scene_view = scene_view;
         self.depth_view = depth_view;
+        self.glow_view = glow_view;
+        self.glow_blur_view = glow_blur_view;
         self.blit_bind_group = create_blit_bind(
             &self.device,
             &self.blit_layout,
             &self.scene_view,
             &self.blit_sampler,
             &self.blit_params,
+            &self.glow_blur_view,
+        );
+        self.blur_bind_group = create_blur_bind(
+            &self.device,
+            &self.blur_layout,
+            &self.glow_view,
+            &self.blit_sampler,
         );
         self.write_blit_params();
     }
@@ -1013,20 +1217,31 @@ impl Renderer {
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.scene_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.03,
-                            g: 0.03,
-                            b: 0.05,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.scene_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.03,
+                                g: 0.03,
+                                b: 0.05,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.glow_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    }),
+                ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_view,
                     depth_ops: Some(wgpu::Operations {
@@ -1065,8 +1280,9 @@ impl Renderer {
             }
 
             let lit_meshes: Vec<&GpuMesh> = self
-                .marker_mesh
+                .skirt_mesh
                 .iter()
+                .chain(self.marker_mesh.iter())
                 .chain(self.figure_mesh.iter())
                 .collect();
             if !lit_meshes.is_empty() {
@@ -1090,6 +1306,28 @@ impl Renderer {
                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                 }
             }
+        }
+
+        // Soften the glow buffer into the halo the blit pass adds back.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("glow-blur-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.glow_blur_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.blur_pipeline);
+            pass.set_bind_group(0, &self.blur_bind_group, &[]);
+            pass.draw(0..3, 0..1);
         }
 
         // The low-res world lands on the swapchain as hard, honest pixels.
@@ -1154,24 +1392,30 @@ fn create_scene_targets(
     device: &wgpu::Device,
     config: &wgpu::SurfaceConfiguration,
     pixel_scale: u32,
-) -> (wgpu::TextureView, wgpu::TextureView) {
+) -> (wgpu::TextureView, wgpu::TextureView, wgpu::TextureView, wgpu::TextureView) {
     let size = wgpu::Extent3d {
         width: (config.width / pixel_scale).max(1),
         height: (config.height / pixel_scale).max(1),
         depth_or_array_layers: 1,
     };
-    let color = device
-        .create_texture(&wgpu::TextureDescriptor {
-            label: Some("scene-lowres"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: config.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        })
-        .create_view(&Default::default());
+    let color_target = |label: &str| -> wgpu::TextureView {
+        device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default())
+    };
+    let color = color_target("scene-lowres");
+    let glow = color_target("scene-glow");
+    let glow_blur = color_target("scene-glow-blur");
     let depth = device
         .create_texture(&wgpu::TextureDescriptor {
             label: Some("scene-depth"),
@@ -1184,7 +1428,29 @@ fn create_scene_targets(
             view_formats: &[],
         })
         .create_view(&Default::default());
-    (color, depth)
+    (color, depth, glow, glow_blur)
+}
+
+fn create_blur_bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    glow: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("blur-bind"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(glow),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
 }
 
 fn create_blit_bind(
@@ -1193,6 +1459,7 @@ fn create_blit_bind(
     scene: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
     params: &wgpu::Buffer,
+    glow_blur: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("blit-bind"),
@@ -1209,6 +1476,10 @@ fn create_blit_bind(
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: params.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(glow_blur),
             },
         ],
     })
@@ -1228,6 +1499,7 @@ mod shader_tests {
             ("blit", super::BLIT_SHADER),
             ("globe", super::GLOBE_SHADER),
             ("starfield", super::STARFIELD_SHADER),
+            ("blur", super::BLUR_SHADER),
         ] {
             let module = naga::front::wgsl::parse_str(src)
                 .unwrap_or_else(|e| panic!("{name} shader fails to parse: {e}"));

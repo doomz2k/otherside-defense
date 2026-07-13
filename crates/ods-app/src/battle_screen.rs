@@ -61,6 +61,8 @@ pub struct BattleScreen {
     fx_clock: f32,
     /// Visual (lerped) feet positions per unit index — the glide.
     visual: HashMap<u32, Vec3>,
+    /// Walk phases and recoil per unit — the figures' pulse.
+    anim: HashMap<u32, figures::AnimState>,
     /// Tile under the cursor, plus a cached move preview to it.
     hover: Option<IVec3>,
     hover_path: Option<(Vec<IVec3>, i32)>,
@@ -105,6 +107,7 @@ impl BattleScreen {
             shake: 0.0,
             fx_clock: 0.0,
             visual: HashMap::new(),
+            anim: HashMap::new(),
             hover: None,
             hover_path: None,
             reachable: Vec::new(),
@@ -120,6 +123,10 @@ impl BattleScreen {
             last_cursor: (0.0, 0.0),
         };
         renderer.clear_scene();
+        // The bedrock the field sits on: built once, never dirty.
+        let (bmin, bmax) = screen.battle.tiles.bounds();
+        let (skirt_verts, skirt_idx) = figures::build_skirt(bmin, bmax, 0xBEDD0C);
+        renderer.set_skirt(&skirt_verts, &skirt_idx);
         screen.refresh_chunks(renderer);
         screen.refresh_scene(renderer);
         screen
@@ -1145,6 +1152,8 @@ impl BattleScreen {
                 play(sound);
             }
             Event::Fired { unit, target, .. } => {
+                // The shooter takes the kick.
+                self.anim.entry(unit.0).or_default().recoil = 0.14;
                 let side = self.battle.unit(*unit).side;
                 let color = if side == Side::Order {
                     [1.0, 0.9, 0.4, 0.9]
@@ -1340,25 +1349,38 @@ impl BattleScreen {
             self.refresh_scene(renderer);
         }
 
-        // The glide: visual positions chase the sim tiles.
+        // The glide: visual positions chase the sim tiles, and the walk
+        // cycle beats while they do.
         let mut moved = false;
         for u in &self.battle.units {
             let target = (u.tile * TILE_VOXELS).as_vec3()
                 + Vec3::new(HALF_TILE, HALF_TILE, ods_sim::scenario::GROUND_TOP as f32);
             let entry = self.visual.entry(u.id.0).or_insert(target);
             let delta = target - *entry;
+            let state = self.anim.entry(u.id.0).or_default();
+            if state.recoil > 0.0 {
+                state.recoil = (state.recoil - dt).max(0.0);
+                moved = true;
+            }
             if delta.length_squared() > 0.05 {
                 *entry += delta * (dt * 9.0 * self.anim_speed).min(1.0);
+                state.walk += dt * 11.0 * self.anim_speed;
                 moved = true;
-            } else if *entry != target {
-                *entry = target;
-                moved = true;
+            } else {
+                if *entry != target {
+                    *entry = target;
+                    moved = true;
+                }
+                if state.walk != 0.0 {
+                    state.walk = 0.0;
+                    moved = true;
+                }
             }
         }
         if moved {
             let visible = self.battle.visible_tiles(Side::Order);
             let (fig_verts, fig_indices) =
-                figures::build_figures(&self.battle, &visible, &self.visual);
+                figures::build_figures(&self.battle, &visible, &self.visual, &self.anim);
             renderer.set_figures(&fig_verts, &fig_indices);
         }
 
@@ -1704,7 +1726,7 @@ impl BattleScreen {
 
         // Body-part voxel figures for every visible unit.
         let (fig_verts, fig_indices) =
-            figures::build_figures(&self.battle, &visible, &self.visual);
+            figures::build_figures(&self.battle, &visible, &self.visual, &self.anim);
         renderer.set_figures(&fig_verts, &fig_indices);
 
         let mut verts: Vec<OverlayVertex> = Vec::new();
