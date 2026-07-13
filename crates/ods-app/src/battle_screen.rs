@@ -67,6 +67,10 @@ pub struct BattleScreen {
     banner: Option<(String, f32)>,
     /// Cutaway: hide everything above z=16 to see ground-floor interiors.
     floor_cap: bool,
+    /// Tint the ground known demons can see ([T]).
+    show_threat: bool,
+    /// Battle pacing: scales the walk glide (set from the options screen).
+    pub anim_speed: f32,
     pub cursor: (f32, f32),
     pub right_drag: bool,
     pub last_cursor: (f32, f32),
@@ -99,6 +103,8 @@ impl BattleScreen {
             reachable: Vec::new(),
             banner: Some(("THE SQUAD DEPLOYS".to_string(), 1.6)),
             floor_cap: false,
+            show_threat: false,
+            anim_speed: 1.0,
             cursor: (0.0, 0.0),
             right_drag: false,
             last_cursor: (0.0, 0.0),
@@ -279,6 +285,10 @@ impl BattleScreen {
                 self.floor_cap = !self.floor_cap;
                 self.remesh_all(renderer);
             }
+            KeyCode::KeyT => {
+                self.show_threat = !self.show_threat;
+                self.refresh_scene(renderer);
+            }
             KeyCode::KeyQ => self.camera.snap_turn(1),
             KeyCode::KeyE => self.camera.snap_turn(-1),
             KeyCode::KeyW => self.camera.pan(0.0, PAN_STEP),
@@ -447,16 +457,32 @@ impl BattleScreen {
                         if let Some(enemy) = self.battle.unit_at(tile).filter(|&e| {
                             self.battle.unit(e).side == Side::Demons
                         }) {
-                            let u = self.battle.unit(id);
-                            let seen = self.battle.can_see(id, enemy);
+                            // The shot forecast: the resolver's true odds.
                             let mut line = format!("Target: {}", self.battle.unit(enemy).name);
+                            let mut seen = true;
                             for (label, mode) in
                                 [("snap", FireMode::Snap), ("aimed", FireMode::Aimed), ("auto", FireMode::Auto)]
                             {
-                                if let (Some(chance), Some(cost)) =
-                                    (u.hit_chance(mode), u.fire_cost(mode))
-                                {
-                                    line.push_str(&format!("  {label} {chance}% ({cost}TU)"));
+                                if let Some(f) = self.battle.forecast_shot(id, enemy, mode) {
+                                    if f.rounds > 1 {
+                                        line.push_str(&format!(
+                                            "  {label} {}%×{} ({}TU)",
+                                            f.chance, f.rounds, f.cost
+                                        ));
+                                    } else {
+                                        line.push_str(&format!(
+                                            "  {label} {}% ({}TU)",
+                                            f.chance, f.cost
+                                        ));
+                                    }
+                                    seen = f.seen;
+                                    if mode == FireMode::Snap {
+                                        line.push_str(&if f.stun {
+                                            format!("  [SALT: stuns ≤{}]", f.power)
+                                        } else {
+                                            format!("  [dmg 0–{}]", f.power * 2)
+                                        });
+                                    }
                                 }
                             }
                             if !seen {
@@ -477,7 +503,7 @@ impl BattleScreen {
                     }
                 }
                 ui.separator();
-                ui.weak("[Q]/[E] turn the field  [F] floor cutaway  [O] door  [V] smoke  [B] bind  [K] kneel  [X] amputate  [R] ward  [Y] rally");
+                ui.weak("[Q]/[E] turn the field  [F] floor cutaway  [T] threat  [O] door  [V] smoke  [B] bind  [K] kneel  [X] amputate  [R] ward  [Y] rally");
             });
         });
 
@@ -566,6 +592,124 @@ impl BattleScreen {
                     );
                 });
         }
+
+        // The console: the whole squad at a glance along the very bottom,
+        // the way the 1994 strip did it — vitals as bars, click to select.
+        egui::TopBottomPanel::bottom("squad-console").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let ids: Vec<UnitId> = self
+                    .battle
+                    .units
+                    .iter()
+                    .filter(|u| u.side == Side::Order && !u.civilian && u.alive)
+                    .map(|u| u.id)
+                    .collect();
+                let mut select: Option<UnitId> = None;
+                for id in ids {
+                    let u = self.battle.unit(id);
+                    let is_sel = self.selected == Some(id);
+                    let card = egui::Frame::new()
+                        .fill(if is_sel {
+                            egui::Color32::from_rgb(48, 40, 20)
+                        } else {
+                            egui::Color32::from_rgb(22, 18, 16)
+                        })
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            if is_sel {
+                                egui::Color32::from_rgb(230, 190, 90)
+                            } else {
+                                egui::Color32::from_gray(70)
+                            },
+                        ))
+                        .inner_margin(egui::Margin::symmetric(6, 3));
+                    let resp = card
+                        .show(ui, |ui| {
+                            ui.set_width(96.0);
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            let short =
+                                u.name.split_whitespace().last().unwrap_or(&u.name);
+                            let mut tags = String::new();
+                            if u.kneeling {
+                                tags.push('🧎');
+                            }
+                            if u.wounds > 0 {
+                                tags.push('🩸');
+                            }
+                            if u.possessed > 0 {
+                                tags.push('👁');
+                            }
+                            if !u.conscious {
+                                tags.push('✖');
+                            }
+                            ui.label(egui::RichText::new(format!("{short} {tags}")).small());
+                            mini_bar(
+                                ui,
+                                u.health as f32 / u.health_max.max(1) as f32,
+                                egui::Color32::from_rgb(190, 60, 50),
+                            );
+                            mini_bar(
+                                ui,
+                                u.tu as f32 / u.tu_max.max(1) as f32,
+                                egui::Color32::from_rgb(200, 170, 60),
+                            );
+                            mini_bar(
+                                ui,
+                                u.morale as f32 / 100.0,
+                                egui::Color32::from_rgb(150, 90, 200),
+                            );
+                        })
+                        .response;
+                    if resp.interact(egui::Sense::click()).clicked() {
+                        select = Some(id);
+                    }
+                }
+                if let Some(id) = select {
+                    self.selected = Some(id);
+                    self.refresh_scene(renderer);
+                }
+                ui.separator();
+                // The selected soldier's weapon plate.
+                if let Some(id) = self.selected {
+                    let u = self.battle.unit(id);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new(u.weapon.name)
+                                .strong()
+                                .color(egui::Color32::from_rgb(220, 200, 150)),
+                        );
+                        let mut plate = String::new();
+                        for (label, mode) in [
+                            ("snap", FireMode::Snap),
+                            ("aim", FireMode::Aimed),
+                            ("auto", FireMode::Auto),
+                        ] {
+                            if let (Some(c), Some(t)) = (u.hit_chance(mode), u.fire_cost(mode)) {
+                                plate.push_str(&format!("{label} {c}%/{t}TU  "));
+                            }
+                        }
+                        ui.label(egui::RichText::new(plate).small().weak());
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "🧨 {}   ✚ {}{}",
+                                u.grenades,
+                                u.heal_charges,
+                                if u.blade { "   🗡" } else { "" }
+                            ))
+                            .small(),
+                        );
+                    });
+                }
+                ui.separator();
+                let threat = ui
+                    .selectable_label(self.show_threat, "☠ Threat [T]")
+                    .on_hover_text("tint every tile a known demon can see");
+                if threat.clicked() {
+                    self.show_threat = !self.show_threat;
+                    self.refresh_scene(renderer);
+                }
+            });
+        });
 
         egui::TopBottomPanel::bottom("battle-log")
             .default_height(110.0)
@@ -991,7 +1135,7 @@ impl BattleScreen {
             let entry = self.visual.entry(u.id.0).or_insert(target);
             let delta = target - *entry;
             if delta.length_squared() > 0.05 {
-                *entry += delta * (dt * 9.0).min(1.0);
+                *entry += delta * (dt * 9.0 * self.anim_speed).min(1.0);
                 moved = true;
             } else if *entry != target {
                 *entry = target;
@@ -1260,6 +1404,21 @@ impl BattleScreen {
             );
             paint.circle_filled(p, px * 0.45, color);
         }
+        // Ghost intel: hollow rings where lost demons were last seen.
+        for (&id, &tile) in &self.battle.last_known {
+            let u = self.battle.unit(id);
+            if u.is_active() && !visible.contains(&u.tile) {
+                let p = egui::pos2(
+                    rect.min.x + (tile.x - min.x) as f32 * px + px / 2.0,
+                    rect.max.y - (tile.y - min.y) as f32 * px - px / 2.0,
+                );
+                paint.circle_stroke(
+                    p,
+                    px * 0.45,
+                    egui::Stroke::new(1.2, egui::Color32::from_rgb(190, 70, 50)),
+                );
+            }
+        }
     }
 
     fn select_next_soldier(&mut self) {
@@ -1366,6 +1525,38 @@ impl BattleScreen {
                 }
             }
         }
+        // Ghost intel: a demon that slipped out of sight leaves a dim red
+        // box where it was LAST seen — memory, not truth.
+        for (&id, &tile) in &self.battle.last_known {
+            let u = self.battle.unit(id);
+            if u.is_active() && !visible.contains(&u.tile) {
+                push_wire_box(&mut verts, &mut indices, tile, [0.75, 0.22, 0.18, 0.55]);
+                push_tile_quad(&mut verts, &mut indices, tile, [0.6, 0.1, 0.08, 0.10]);
+            }
+        }
+        // The threat overlay [T]: ground watched by every demon the squad
+        // knows about — the seen at their true posts, the lost at their
+        // ghosts. Only painted where the squad itself can see.
+        if self.show_threat {
+            let mut watchers: Vec<IVec3> = self
+                .battle
+                .visible_enemies(Side::Order)
+                .iter()
+                .map(|&id| self.battle.unit(id).tile)
+                .collect();
+            for (&id, &tile) in &self.battle.last_known {
+                let u = self.battle.unit(id);
+                if u.is_active() && !visible.contains(&u.tile) {
+                    watchers.push(tile);
+                }
+            }
+            if !watchers.is_empty() {
+                let watched = self.battle.tiles_seen_from(&watchers);
+                for tile in watched.intersection(&visible) {
+                    push_tile_quad(&mut verts, &mut indices, *tile, [0.9, 0.15, 0.1, 0.12]);
+                }
+            }
+        }
         // Where the selected soldier could stand this turn.
         for (tile, _) in &self.reachable {
             push_tile_quad(&mut verts, &mut indices, *tile, [0.25, 0.8, 0.4, 0.10]);
@@ -1458,6 +1649,17 @@ fn push_wire_box(
         ); // ceiling square
         edge(verts, indices, a, a + Vec3::new(0.0, 0.0, top)); // verticals
     }
+}
+
+/// A slim console gauge: background groove plus a colored fill fraction.
+fn mini_bar(ui: &mut egui::Ui, frac: f32, color: egui::Color32) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width().min(88.0), 4.0), egui::Sense::hover());
+    let paint = ui.painter_at(rect);
+    paint.rect_filled(rect, 1.0, egui::Color32::from_gray(38));
+    let mut fill = rect;
+    fill.set_width(rect.width() * frac.clamp(0.0, 1.0));
+    paint.rect_filled(fill, 1.0, color);
 }
 
 fn push_quad(

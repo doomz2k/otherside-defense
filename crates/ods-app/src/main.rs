@@ -90,6 +90,8 @@ pub struct Core {
     /// Master volume (0..=1) and orbit-drag sensitivity (0.3..=2.5).
     pub volume: f32,
     pub cam_sense: f32,
+    /// Battle pacing multiplier: how fast figures glide (0.5..=3).
+    pub anim_speed: f32,
     audio: Option<audio::Audio>,
     /// The big spinning world.
     geo_camera: OrbitCamera,
@@ -173,6 +175,7 @@ impl Core {
             day_progress: 0.0,
             volume: 1.0,
             cam_sense: 1.0,
+            anim_speed: 1.0,
             audio: audio::Audio::new(),
             geo_camera,
             geo_drag: false,
@@ -350,6 +353,7 @@ impl Core {
                 }
                 if let Some(b) = self.battle.as_mut() {
                     let (w, h) = self.renderer.size();
+                    b.anim_speed = self.anim_speed;
                     b.update_frame(dt, &mut self.renderer, self.audio.as_ref(), w, h);
                     let vp = b.camera_vp(self.renderer.aspect());
                     // Night fights are lit low and flat.
@@ -492,6 +496,13 @@ impl Core {
                     )
                     .weak()
                     .small(),
+                );
+                ui.label("Battle pace");
+                ui.add(egui::Slider::new(&mut self.anim_speed, 0.5..=3.0).show_value(false));
+                ui.label(
+                    egui::RichText::new("How fast figures cross the field; right for instant.")
+                        .weak()
+                        .small(),
                 );
             });
         self.show_options = open;

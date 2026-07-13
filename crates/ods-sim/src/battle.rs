@@ -1,7 +1,7 @@
 //! The Battlescape state machine: actions in, events out, deterministic
 //! given the seed. Nothing here renders; nothing here reads the clock.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use glam::{IVec3, Vec3};
 use ods_voxel::VoxelWorld;
@@ -359,10 +359,29 @@ pub struct Battle {
     pub evacuated: u32,
     /// Noise the squad made where no demon could see (they listen too).
     pub alarm: Vec<IVec3>,
+    /// The squad's memory: where each demon was LAST seen. Kept when sight
+    /// is lost (the HUD draws a ghost there), cleared by the demon's death.
+    pub last_known: HashMap<UnitId, IVec3>,
     /// Unseen demon movement this enemy turn (flushed as cues).
     heard: Vec<IVec3>,
     xp: Vec<Experience>,
     rng: SimRng,
+}
+
+/// What the HUD shows before the trigger is pulled: the true odds the
+/// resolver will roll against, and what a hit is worth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShotForecast {
+    /// Per-round chance to hit, after the high-ground bonus.
+    pub chance: i32,
+    pub cost: i32,
+    pub rounds: u32,
+    /// Weapon power: damage rolls 0..=2x this per hit.
+    pub power: i32,
+    /// Salt-shot: the hit stuns instead of wounding.
+    pub stun: bool,
+    /// Whether the shooter can actually see the target right now.
+    pub seen: bool,
 }
 
 impl Battle {
@@ -398,6 +417,7 @@ impl Battle {
             weather: Weather::default(),
             evacuated: 0,
             alarm: Vec::new(),
+            last_known: HashMap::new(),
             heard: Vec::new(),
             xp,
             rng: SimRng::from_seed(seed),
@@ -653,11 +673,28 @@ impl Battle {
         seen
     }
 
+    /// Refresh the squad's ghost intel: every demon in sight right now gets
+    /// its tile stamped; the dead are forgotten. Runs after every action.
+    fn note_sightings(&mut self) {
+        for id in self.visible_enemies(Side::Order) {
+            let tile = self.unit(id).tile;
+            self.last_known.insert(id, tile);
+        }
+        let units = &self.units;
+        self.last_known.retain(|id, _| units[id.0 as usize].is_active());
+    }
+
     /// Tiles visible to `side`, for fog-of-war rendering.
     pub fn visible_tiles(&self, side: Side) -> HashSet<IVec3> {
+        let viewers: Vec<IVec3> = self.living(side).map(|u| u.tile).collect();
+        self.tiles_seen_from(&viewers)
+    }
+
+    /// Tiles any of the given watch posts can see — fog of war for a side,
+    /// or the threat overlay's ground truth for known demons.
+    pub fn tiles_seen_from(&self, viewers: &[IVec3]) -> HashSet<IVec3> {
         let (min, max) = self.tiles.bounds();
         let mut out = HashSet::new();
-        let viewers: Vec<IVec3> = self.living(side).map(|u| u.tile).collect();
         for z in min.z..max.z {
             for y in min.y..max.y {
                 for x in min.x..max.x {
@@ -676,6 +713,29 @@ impl Battle {
         out
     }
 
+    /// The exact odds `resolve_shot` would roll against, for the HUD's shot
+    /// forecast. No dice are consumed; None means the weapon can't fire so.
+    pub fn forecast_shot(
+        &self,
+        shooter: UnitId,
+        target: UnitId,
+        mode: FireMode,
+    ) -> Option<ShotForecast> {
+        let s = self.unit(shooter);
+        let (cost, chance) = (s.fire_cost(mode)?, s.hit_chance(mode)?);
+        let t = self.unit(target);
+        // Mirror the resolver's high-ground bonus.
+        let chance = if s.tile.z > t.tile.z { (chance + 10).min(95) } else { chance };
+        Some(ShotForecast {
+            chance,
+            cost,
+            rounds: s.rounds_per_action(mode),
+            power: s.weapon.power,
+            stun: s.weapon.stun_power > 0,
+            seen: self.can_see(shooter, target),
+        })
+    }
+
     // ------------------------------------------------------------------
     // Actions
 
@@ -683,6 +743,14 @@ impl Battle {
         if self.winner.is_some() {
             return Err(ActionError::BattleOver);
         }
+        let result = self.dispatch(action);
+        if result.is_ok() {
+            self.note_sightings();
+        }
+        result
+    }
+
+    fn dispatch(&mut self, action: Action) -> Result<Vec<Event>, ActionError> {
         match action {
             Action::Move { unit, to } => self.do_move(unit, to),
             Action::Fire { unit, target, mode } => self.do_fire(unit, target, mode),
@@ -3882,5 +3950,51 @@ mod tests {
         b3.perform(Action::Move { unit: UnitId(0), to: IVec3::new(2, 5, 0) }).unwrap();
         assert!(b3.alarm.is_empty(), "crouched movement is silent");
         let _ = b;
+    }
+
+    #[test]
+    fn ghost_intel_remembers_lost_sight_and_forgets_the_dead() {
+        let mut b = open_field(duelists(), 50);
+        // Any action stamps the sighting: the imp stands in plain view.
+        b.perform(Action::Kneel { unit: UnitId(0) }).unwrap();
+        assert_eq!(
+            b.last_known.get(&UnitId(1)),
+            Some(&IVec3::new(10, 5, 0)),
+            "a demon in view is on the intel map"
+        );
+
+        // The imp slips away unseen (out of sight range in the far corner);
+        // the ghost stays where it was LAST seen.
+        b.units[1].tile = IVec3::new(11, 11, 0);
+        b.vision_tiles = 3; // and the night closes in
+        b.perform(Action::Kneel { unit: UnitId(0) }).unwrap();
+        assert_eq!(
+            b.last_known.get(&UnitId(1)),
+            Some(&IVec3::new(10, 5, 0)),
+            "the ghost marks the last sighting, not the truth"
+        );
+
+        // Death clears the slate.
+        b.units[1].alive = false;
+        b.perform(Action::Kneel { unit: UnitId(0) }).unwrap();
+        assert!(b.last_known.is_empty(), "the dead leave the intel map");
+    }
+
+    #[test]
+    fn the_forecast_matches_what_the_resolver_rolls() {
+        let mut b = open_field(duelists(), 51);
+        let flat = b.forecast_shot(UnitId(0), UnitId(1), FireMode::Snap).unwrap();
+        assert_eq!(flat.chance, b.unit(UnitId(0)).hit_chance(FireMode::Snap).unwrap());
+        assert_eq!(flat.cost, b.unit(UnitId(0)).fire_cost(FireMode::Snap).unwrap());
+        assert!(flat.seen, "an open field hides nothing");
+        assert!(!flat.stun);
+
+        // High ground steadies the forecast exactly as it steadies the shot.
+        b.units[0].tile.z = 1;
+        let high = b.forecast_shot(UnitId(0), UnitId(1), FireMode::Snap).unwrap();
+        assert_eq!(high.chance, (flat.chance + 10).min(95));
+
+        // A weapon without the mode gives no forecast at all.
+        assert!(b.forecast_shot(UnitId(1), UnitId(0), FireMode::Auto).is_none());
     }
 }
