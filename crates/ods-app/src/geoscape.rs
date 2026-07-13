@@ -29,36 +29,6 @@ impl Core {
                 card.show(ui, |ui| self.menu_card(ui));
             });
         });
-
-        if self.show_options {
-            let mut open = true;
-            egui::Window::new("Options")
-                .open(&mut open)
-                .anchor(egui::Align2::RIGHT_TOP, [-16.0, 16.0])
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.label("Volume");
-                    if ui
-                        .add(egui::Slider::new(&mut self.volume, 0.0..=1.0).show_value(false))
-                        .changed()
-                    {
-                        let volume = self.volume;
-                        if let Some(a) = self.audio_mut() {
-                            a.set_volume(volume);
-                        }
-                    }
-                    ui.label("Camera sensitivity");
-                    ui.add(egui::Slider::new(&mut self.cam_sense, 0.3..=2.5).show_value(false));
-                    ui.label(
-                        egui::RichText::new(
-                            "Applies to right-drag orbiting on both the globe and the field.",
-                        )
-                        .weak()
-                        .small(),
-                    );
-                });
-            self.show_options = open;
-        }
     }
 
     fn menu_card(&mut self, ui: &mut egui::Ui) {
@@ -139,13 +109,6 @@ impl Core {
         // ------------------------------------------------------ top bar
         egui::TopBottomPanel::top("geo-top").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.strong(format!(
-                    "Month {} — Day {} [{}]",
-                    c.month,
-                    c.day,
-                    c.difficulty.name()
-                ));
-                ui.separator();
                 ui.label(format!("Treasury {}k", c.funds));
                 ui.label(format!("Score {}", c.month_score));
                 ui.label(format!("🜏 {}", c.brimstone));
@@ -163,19 +126,73 @@ impl Core {
                     )
                     .on_hover_text("the packs come stronger; the salvage comes double");
                 }
-                ui.separator();
-                let alive = c.over.is_none();
-                let mut advanced = false;
-                if ui.add_enabled(alive, egui::Button::new("▶ Day")).clicked() {
+            });
+        });
+
+        // ---------------------------------------------- command sidebar
+        // The right rail, 1994-style: the calendar, the clock, and every
+        // desk the commander can be called to.
+        egui::SidePanel::right("geo-command").exact_width(200.0).show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new(format!("Month {}", c.month)).size(16.0));
+                ui.label(egui::RichText::new(format!("Day {}", c.day)).size(30.0).strong());
+                ui.label(egui::RichText::new(c.difficulty.name()).weak().small());
+            });
+            ui.add_space(6.0);
+            ui.separator();
+
+            let alive = c.over.is_none();
+            let sky_held = c.interception.is_some();
+            ui.label("Time");
+            ui.horizontal(|ui| {
+                for (speed, label, hint) in [
+                    (0u8, "⏸", "hold the clock"),
+                    (1, "▶", "a day each twelve seconds"),
+                    (2, "▶▶", "a day every three seconds"),
+                    (3, "▶▶▶", "days streak past"),
+                ] {
+                    if ui
+                        .add_enabled(
+                            alive && !sky_held,
+                            egui::Button::selectable(self.geo_speed == speed, label),
+                        )
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        self.geo_speed = speed;
+                    }
+                }
+            });
+            ui.add(
+                egui::ProgressBar::new(self.day_progress)
+                    .desired_height(6.0)
+                    .fill(egui::Color32::from_rgb(150, 120, 60)),
+            );
+            if sky_held {
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 120, 90),
+                    "the sky fight holds the clock",
+                );
+            }
+            let mut advanced = false;
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(alive && !sky_held, egui::Button::new("▶ Day"))
+                    .clicked()
+                {
                     let events = c.advance_day();
                     for e in &events {
                         self.log.push(narrate(c, e));
                     }
                     advanced = true;
                 }
-                if ui.add_enabled(alive, egui::Button::new("⏩ Week")).clicked() {
+                if ui
+                    .add_enabled(alive && !sky_held, egui::Button::new("⏩ Week"))
+                    .clicked()
+                {
                     for _ in 0..7 {
-                        if c.over.is_some() {
+                        if c.over.is_some() || c.interception.is_some() {
                             break;
                         }
                         let events = c.advance_day();
@@ -185,14 +202,49 @@ impl Core {
                     }
                     advanced = true;
                 }
-                if advanced {
-                    // The world remembers, whether or not you asked it to.
-                    let _ = std::fs::write(crate::AUTOSAVE_PATH, c.save_to_string());
-                }
-                ui.separator();
-                if c.ironman {
-                    ui.label("IRONMAN — the autosave is the only record");
-                } else {
+            });
+            if advanced {
+                self.day_progress = 0.0;
+                // The world remembers, whether or not you asked it to.
+                let _ = std::fs::write(crate::AUTOSAVE_PATH, c.save_to_string());
+            }
+            ui.separator();
+
+            let wide = [ui.available_width(), 24.0];
+            if ui
+                .add_sized(wide, egui::Button::selectable(self.show_bases, "🏰 Chapterhouses"))
+                .clicked()
+            {
+                self.show_bases = !self.show_bases;
+            }
+            if ui
+                .add_sized(wide, egui::Button::selectable(self.show_codex, "📖 Bestiary"))
+                .clicked()
+            {
+                self.show_codex = !self.show_codex;
+            }
+            if ui
+                .add_sized(wide, egui::Button::selectable(self.show_stats, "📜 Ledger"))
+                .clicked()
+            {
+                self.show_stats = !self.show_stats;
+            }
+            if ui
+                .add_sized(wide, egui::Button::selectable(self.show_options, "⚙ Options"))
+                .clicked()
+            {
+                self.show_options = !self.show_options;
+            }
+            ui.separator();
+
+            if c.ironman {
+                ui.label(
+                    egui::RichText::new("IRONMAN — the autosave is the only record")
+                        .weak()
+                        .small(),
+                );
+            } else {
+                ui.horizontal(|ui| {
                     if ui.button("💾 Quick").clicked() {
                         match std::fs::write(SAVE_PATH, c.save_to_string()) {
                             Ok(()) => self.log.push("Saved.".to_string()),
@@ -207,19 +259,99 @@ impl Core {
                             }
                         }
                     }
-                }
-                ui.separator();
-                if ui.button("📖 Bestiary").clicked() {
-                    self.show_codex = !self.show_codex;
-                }
-                if ui.button("📜 Ledger").clicked() {
-                    self.show_stats = !self.show_stats;
-                }
-                if ui.button("Menu").clicked() {
-                    self.screen = Screen::Menu;
-                }
-            });
+                });
+            }
+            if ui.add_sized(wide, egui::Button::new("Menu")).clicked() {
+                self.screen = Screen::Menu;
+            }
         });
+
+        // ------------------------------------------------- the dogfight
+        // Gargoyles on a led sortie's wind: the commander flies the
+        // exchange from the gondola guns, one order per round.
+        if let Some(it) = c.interception {
+            egui::Window::new("⚔ GARGOYLES ON THE WIND")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, -40.0])
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "The pack found the sortie over {} — round {}",
+                        it.region.name(),
+                        it.round + 1
+                    ));
+                    ui.add(
+                        egui::ProgressBar::new((it.envelope.max(0) as f32) / 100.0)
+                            .text(format!("envelope {}%", it.envelope.max(0)))
+                            .fill(if it.envelope > 50 {
+                                egui::Color32::from_rgb(120, 160, 120)
+                            } else {
+                                egui::Color32::from_rgb(200, 90, 70)
+                            }),
+                    );
+                    ui.label(format!(
+                        "gargoyles on the wing: {}   downed: {}",
+                        it.gargoyles, it.downed
+                    ));
+                    let reach = match it.range {
+                        0..=3 => " — point blank, claws and muzzles",
+                        4..=5 => " — in reach of guns and claws both",
+                        6 => " — the guns just bite",
+                        _ => " — out of reach, closing costs time",
+                    };
+                    ui.label(format!("range: {} span(s){reach}", it.range));
+                    ui.add_space(6.0);
+                    let mut order: Option<bool> = None;
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(egui::RichText::new("🔫 Press the attack").strong())
+                            .on_hover_text("close and work the guns — and give the claws a steady perch")
+                            .clicked()
+                        {
+                            order = Some(true);
+                        }
+                        if ui
+                            .button("🌀 Run for cloud")
+                            .on_hover_text("open the range; a running target is a poor perch, and clouds hide ships")
+                            .clicked()
+                        {
+                            order = Some(false);
+                        }
+                    });
+                    if let Some(press) = order {
+                        let rep = c.intercept_round(press);
+                        let mut line = String::from("gun deck: ");
+                        line.push_str(&if rep.downed > 0 {
+                            format!("{} gargoyle(s) knocked burning off the wind", rep.downed)
+                        } else {
+                            "the volleys go wide".to_string()
+                        });
+                        if rep.envelope_hit > 0 {
+                            line.push_str(&format!(
+                                "; claws take {}% of the envelope",
+                                rep.envelope_hit
+                            ));
+                        }
+                        self.log.push(line);
+                        if let Some(outcome) = rep.outcome {
+                            self.log.push(
+                                match outcome {
+                                    ods_geo::SkyHuntOutcome::Repelled => {
+                                        "the sky is ours. The sortie flies on."
+                                    }
+                                    ods_geo::SkyHuntOutcome::Bloodied => {
+                                        "won clear — torn and listing. The squad lands bleeding."
+                                    }
+                                    ods_geo::SkyHuntOutcome::TurnedBack => {
+                                        "the envelope gives. The zeppelin limps for home."
+                                    }
+                                }
+                                .to_string(),
+                            );
+                        }
+                    }
+                });
+        }
 
         // ------------------------------------------------- operations
         egui::SidePanel::left("geo-ops").default_width(360.0).show(ctx, |ui| {
@@ -712,8 +844,11 @@ impl Core {
         });
 
         // ------------------------------------------------- chapterhouses
-        egui::SidePanel::right("geo-base").default_width(360.0).show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::Window::new("Chapterhouses")
+            .open(&mut self.show_bases)
+            .default_width(380.0)
+            .show(ctx, |ui| {
+            egui::ScrollArea::vertical().max_height(560.0).show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     for (i, b) in c.bases.iter().enumerate() {
                         ui.selectable_value(&mut self.selected_base, i, b.region.name());

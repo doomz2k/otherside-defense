@@ -14,9 +14,11 @@ pub const GLOBE_RADIUS: f32 = 200.0;
 const STACKS: usize = 192;
 const SLICES: usize = 384;
 
-const OCEAN: [f32; 3] = [0.05, 0.11, 0.24];
-const LAND: [f32; 3] = [0.23, 0.33, 0.17];
-const ICE: [f32; 3] = [0.78, 0.82, 0.88];
+// The 1994 palette: a deep saturated ocean and honest green land — the
+// dedicated globe shader keeps them flat, so the colors carry the look.
+const OCEAN: [f32; 3] = [0.03, 0.10, 0.32];
+const LAND: [f32; 3] = [0.16, 0.44, 0.13];
+const ICE: [f32; 3] = [0.80, 0.84, 0.90];
 const HIGHLIGHT: [f32; 3] = [0.45, 0.38, 0.12];
 
 /// 64x32 equirectangular landmask, row 0 = north. '#' is land.
@@ -139,6 +141,28 @@ pub fn build_globe(selected: Option<Region>) -> (Vec<LitVertex>, Vec<u32>) {
 
             let land = is_land_detailed(lat, lon);
             let mut color = if land { LAND } else { OCEAN };
+            if land {
+                // Mottle the land like the original's hand-placed terrain
+                // pixels: forests, plains, and badlands in one green.
+                let h = {
+                    let mut x = (lat * 53.7) as i32 as u32;
+                    x = x
+                        .wrapping_mul(2654435761)
+                        .wrapping_add((lon * 39.1) as i32 as u32)
+                        .wrapping_mul(1274126177);
+                    x ^= x >> 15;
+                    ((x.wrapping_mul(2246822519) >> 9) & 255) as f32 / 255.0
+                };
+                let m = 0.80 + 0.45 * h;
+                for c in color.iter_mut() {
+                    *c = (*c * m).min(1.0);
+                }
+                if h > 0.86 {
+                    // The occasional dun badland breaks the green.
+                    color[0] = (color[0] + 0.14).min(1.0);
+                    color[2] *= 0.6;
+                }
+            }
             // Polar ice creeps over everything near the caps.
             let ice = ((lat.abs() - 62.0) / 12.0).clamp(0.0, 1.0);
             if ice > 0.0 && (land || lat.abs() > 74.0) {

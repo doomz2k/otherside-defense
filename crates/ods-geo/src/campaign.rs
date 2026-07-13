@@ -177,6 +177,37 @@ pub enum SkyHuntOutcome {
     TurnedBack,
 }
 
+/// A gargoyle pack has found a led sortie mid-flight and the commander is
+/// at the gondola guns: the Geoscape's dogfight, one exchange per order.
+/// While one of these stands, the calendar holds its breath.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Interception {
+    pub rift_id: u32,
+    pub region: Region,
+    /// Gargoyles still on the wing.
+    pub gargoyles: u32,
+    /// Envelope integrity, 0..=100. At 0 the ship turns for home; landing
+    /// under half leaves the squad bloodied either way.
+    pub envelope: i32,
+    /// Closing distance in spans: the guns bite at 6 and under, the claws
+    /// at 5 and under, and the pack loses the scent past 12.
+    pub range: i32,
+    pub round: u32,
+    /// Gargoyles downed so far — they fall like burning kites.
+    pub downed: u32,
+}
+
+/// What one exchange of the dogfight did.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InterceptReport {
+    /// Gargoyles knocked off the wing this round.
+    pub downed: u32,
+    /// Envelope integrity lost to claws this round.
+    pub envelope_hit: i32,
+    /// Set when the engagement ended on this exchange.
+    pub outcome: Option<SkyHuntOutcome>,
+}
+
 /// A funding nation's demand: banish rifts in their region this month.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CouncilRequest {
@@ -373,6 +404,10 @@ pub enum GeoEvent {
     RelicFound { name: String },
     /// Gargoyles found the zeppelin. How it went depends on the gondola.
     SkyHunt { region: Region, outcome: SkyHuntOutcome },
+    /// Gargoyles found a led sortie: the commander is called to the guns.
+    SkyHuntEngaged { region: Region, gargoyles: u32 },
+    /// The dogfight is over, one way or the other.
+    SkyHuntResolved { region: Region, outcome: SkyHuntOutcome, downed: u32 },
     /// The breach reached the stores before it was driven out.
     SalvageLooted { brimstone: u32, hellsteel: u32 },
     /// A Prince walked off the field alive. It has a name now.
@@ -719,6 +754,9 @@ pub struct Campaign {
     /// Squads in the air (or camped at distant rifts).
     #[serde(default)]
     pub sorties: Vec<Sortie>,
+    /// A dogfight in progress: gargoyles on a led sortie's wind.
+    #[serde(default)]
+    pub interception: Option<Interception>,
     /// Events minted outside advance_day (mission conclusions), flushed on
     /// the next day tick so the log still hears about them.
     #[serde(default, skip)]
@@ -791,6 +829,7 @@ impl Campaign {
             second_dawn: false,
             omen_day: 0,
             sorties: Vec::new(),
+            interception: None,
             pending_events: Vec::new(),
             month_score: 0,
             bad_months: 0,
@@ -1357,6 +1396,100 @@ impl Campaign {
             }
         }
         self.sorties.retain(|s| s.rift_id != rift_id);
+    }
+
+    /// Fly one exchange of the standing dogfight. `press` closes the range
+    /// and works the guns; easing off opens it and runs for cloud. The
+    /// engagement ends when the pack is downed, shaken off, or the envelope
+    /// gives — the report's `outcome` says which.
+    pub fn intercept_round(&mut self, press: bool) -> InterceptReport {
+        let Some(mut it) = self.interception else {
+            return InterceptReport::default();
+        };
+        let mut rep = InterceptReport::default();
+        it.round += 1;
+        let escorted = self.research.is_complete(Project::EscortGondola);
+
+        // The helm answers first.
+        it.range = (it.range + if press { -2 } else { 2 }).max(0);
+
+        // The guns bite inside six spans; the escort gondola doubles them.
+        if it.range <= 6 && it.gargoyles > 0 {
+            let shots = if escorted { 2 } else { 1 };
+            let chance = if it.range <= 3 { 65 } else { 55 };
+            for _ in 0..shots {
+                if it.gargoyles > 0 && self.rng.roll(100) < chance {
+                    it.gargoyles -= 1;
+                    it.downed += 1;
+                    rep.downed += 1;
+                }
+            }
+        }
+
+        // What's left of the pack answers with claws, inside five.
+        if it.range <= 5 && it.gargoyles > 0 {
+            let mut hit = 5 * it.gargoyles as i32 + self.rng.roll(6) as i32;
+            if escorted {
+                hit = hit * 3 / 5; // the armored gondola shrugs some off
+            }
+            if !press {
+                hit /= 2; // a running target is a poor perch
+            }
+            it.envelope -= hit;
+            rep.envelope_hit = hit;
+        }
+
+        // How does it stand?
+        let outcome = if it.gargoyles == 0 {
+            Some(SkyHuntOutcome::Repelled)
+        } else if it.envelope <= 0 {
+            Some(SkyHuntOutcome::TurnedBack)
+        } else if !press && (it.range >= 12 || self.rng.roll(100) < 25) {
+            // Lost them in the cloud — but count the cost of the chase.
+            Some(if it.envelope <= 50 {
+                SkyHuntOutcome::Bloodied
+            } else {
+                SkyHuntOutcome::Repelled
+            })
+        } else if it.round > 40 {
+            Some(SkyHuntOutcome::Repelled) // dawn: gargoyles hate honest light
+        } else {
+            None
+        };
+
+        if let Some(mut outcome) = outcome {
+            // Even a won fight leaves marks: land under half and the squad
+            // steps off shaken and stitched.
+            if outcome == SkyHuntOutcome::Repelled && it.envelope <= 50 {
+                outcome = SkyHuntOutcome::Bloodied;
+            }
+            match outcome {
+                SkyHuntOutcome::Bloodied => {
+                    if let Some(s) = self.sorties.iter_mut().find(|s| s.rift_id == it.rift_id) {
+                        s.bloodied = true;
+                    }
+                }
+                SkyHuntOutcome::TurnedBack => {
+                    for s in &mut self.soldiers {
+                        if s.aboard == Some(it.rift_id) {
+                            s.recovery_days += 2;
+                        }
+                    }
+                    self.end_sortie(it.rift_id);
+                }
+                SkyHuntOutcome::Repelled => {}
+            }
+            self.pending_events.push(GeoEvent::SkyHuntResolved {
+                region: it.region,
+                outcome,
+                downed: it.downed,
+            });
+            rep.outcome = Some(outcome);
+            self.interception = None;
+        } else {
+            self.interception = Some(it);
+        }
+        rep
     }
 
     /// What the field teams drag back from a banished incursion. Under a
@@ -2176,6 +2309,11 @@ impl Campaign {
     // The clock
 
     pub fn advance_day(&mut self) -> Vec<GeoEvent> {
+        // A dogfight left standing (headless runs, auto-advance) resolves
+        // itself at the guns' discretion before the calendar moves.
+        while self.interception.is_some() {
+            self.intercept_round(true);
+        }
         let mut events = std::mem::take(&mut self.pending_events);
         if self.over.is_some() {
             return events;
@@ -2439,6 +2577,25 @@ impl Campaign {
                 .map(|r| r.region);
             // The hunt: gargoyles ride the same winds.
             if self.rng.roll(100) < 15 {
+                // A led sortie puts the commander at the gondola guns: the
+                // dogfight becomes yours to fly, and the clock holds for it.
+                if self.sorties[i].lead
+                    && self.interception.is_none()
+                    && let Some(region) = region
+                {
+                    let gargoyles = 2 + self.rng.roll(3);
+                    self.interception = Some(Interception {
+                        rift_id,
+                        region,
+                        gargoyles,
+                        envelope: 100,
+                        range: 9,
+                        round: 0,
+                        downed: 0,
+                    });
+                    events.push(GeoEvent::SkyHuntEngaged { region, gargoyles });
+                    continue; // no headway while the pack is on the wind
+                }
                 let outcome = if escorted {
                     SkyHuntOutcome::Repelled
                 } else {
@@ -3601,6 +3758,77 @@ mod tests {
         assert!(c.soldiers.iter().all(|s| s.aboard.is_none()));
         // Nobody died on a flight to nowhere.
         assert_eq!(c.soldiers.len(), 6);
+    }
+
+    #[test]
+    fn a_led_dogfight_ends_in_an_outcome_and_frees_the_clock() {
+        let mut c = Campaign::new(77);
+        c.month_plan.clear();
+        let id = detected_rift(&mut c, RiftKind::Harvest, Region::Oceania);
+        c.rifts.iter_mut().for_each(|r| r.days_left = 30);
+        c.dispatch_squad(id, true).unwrap();
+        c.interception = Some(Interception {
+            rift_id: id,
+            region: Region::Oceania,
+            gargoyles: 3,
+            envelope: 100,
+            range: 9,
+            round: 0,
+            downed: 0,
+        });
+
+        let mut outcome = None;
+        for _ in 0..60 {
+            let rep = c.intercept_round(true);
+            if rep.outcome.is_some() {
+                outcome = rep.outcome;
+                break;
+            }
+        }
+        let outcome = outcome.expect("pressing the attack ends the fight");
+        assert!(c.interception.is_none());
+        match outcome {
+            SkyHuntOutcome::TurnedBack => {
+                assert!(c.sorties.is_empty(), "a beaten ship turns for home");
+                assert!(c.soldiers.iter().all(|s| s.aboard.is_none()));
+            }
+            SkyHuntOutcome::Bloodied => {
+                assert!(c.sorties.iter().any(|s| s.rift_id == id && s.bloodied));
+            }
+            SkyHuntOutcome::Repelled => {
+                assert!(c.sorties.iter().any(|s| s.rift_id == id));
+            }
+        }
+        // The resolution reaches the log on the next day tick.
+        let events = c.advance_day();
+        assert!(
+            events.iter().any(|e| matches!(e, GeoEvent::SkyHuntResolved { .. })),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn an_unanswered_dogfight_resolves_itself_on_the_day_tick() {
+        let mut c = Campaign::new(78);
+        c.month_plan.clear();
+        let id = detected_rift(&mut c, RiftKind::Harvest, Region::Oceania);
+        c.rifts.iter_mut().for_each(|r| r.days_left = 30);
+        c.dispatch_squad(id, true).unwrap();
+        c.interception = Some(Interception {
+            rift_id: id,
+            region: Region::Oceania,
+            gargoyles: 2,
+            envelope: 100,
+            range: 9,
+            round: 0,
+            downed: 0,
+        });
+        let events = c.advance_day();
+        assert!(c.interception.is_none(), "the guns fired themselves");
+        assert!(
+            events.iter().any(|e| matches!(e, GeoEvent::SkyHuntResolved { .. })),
+            "{events:?}"
+        );
     }
 
     #[test]

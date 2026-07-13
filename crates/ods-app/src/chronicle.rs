@@ -116,6 +116,27 @@ pub fn narrate(c: &Campaign, event: &GeoEvent) -> String {
                 region.name()
             ),
         },
+        E::SkyHuntEngaged { region, gargoyles } => format!(
+            "{stamp} !!! {gargoyles} gargoyles ride the wind over {} — \
+             the commander is called to the gondola guns",
+            region.name()
+        ),
+        E::SkyHuntResolved { region, outcome, downed } => match outcome {
+            ods_geo::SkyHuntOutcome::Repelled => format!(
+                "{stamp} the pack over {} is beaten off — {downed} downed, the sortie flies on",
+                region.name()
+            ),
+            ods_geo::SkyHuntOutcome::Bloodied => format!(
+                "{stamp} !!! the zeppelin over {} wins clear, torn and listing — \
+                 {downed} downed, the squad lands bleeding",
+                region.name()
+            ),
+            ods_geo::SkyHuntOutcome::TurnedBack => format!(
+                "{stamp} !!! the envelope gives over {} — the zeppelin falls off \
+                 the wind and limps home ({downed} downed for it)",
+                region.name()
+            ),
+        },
         E::SalvageLooted { brimstone, hellsteel } => format!(
             "{stamp} the breach reached the stores: {brimstone} brimstone and {hellsteel} hellsteel carried off"
         ),

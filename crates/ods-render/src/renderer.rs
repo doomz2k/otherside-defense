@@ -192,6 +192,124 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+const GLOBE_SHADER: &str = r#"
+struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
+@group(0) @binding(0) var<uniform> camera: Camera;
+
+struct VsIn {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) color: vec4<f32>,
+};
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VsIn) -> VsOut {
+    var out: VsOut;
+    out.clip = camera.view_proj * vec4<f32>(in.position, 1.0);
+    out.normal = in.normal;
+    out.color = in.color;
+    return out;
+}
+
+fn globe_bayer(frag: vec2<f32>) -> f32 {
+    let x = i32(frag.x) & 3;
+    let y = i32(frag.y) & 3;
+    var m = array<i32, 16>(0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5);
+    return f32(m[y * 4 + x]) / 16.0 - 0.5;
+}
+
+// The 1994 planet: flat saturated color, a mapmaker's graticule over
+// everything, and a terminator that falls like a knife — day on one side,
+// night on the other, dithered only along the blade itself.
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let n = normalize(in.normal);
+    var color = in.color.rgb;
+
+    // Hairline meridians and parallels every 30 degrees.
+    let lat = degrees(asin(clamp(n.z, -1.0, 1.0)));
+    let lon = degrees(atan2(n.y, n.x));
+    let dlat = abs(lat - round(lat / 30.0) * 30.0);
+    let dlon = abs(lon - round(lon / 30.0) * 30.0);
+    let lon_tol = 0.30 / max(cos(radians(lat)), 0.05);
+    if dlat < 0.30 || dlon < lon_tol {
+        color = mix(color, vec3<f32>(0.30, 0.44, 0.58), 0.40);
+    }
+
+    let l = dot(n, camera.sun.xyz);
+    let day = step(0.0, l + globe_bayer(in.clip.xy) * 0.08);
+    color = color * mix(0.28, 1.0, day);
+
+    let levels = 7.0;
+    let d = globe_bayer(in.clip.xy) / levels;
+    color = floor((color + d) * levels + 0.5) / levels;
+    return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+}
+"#;
+
+const STARFIELD_SHADER: &str = r#"
+struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
+@group(0) @binding(0) var<uniform> camera: Camera;
+
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
+    var out: VsOut;
+    let x = f32(i32(i & 1u) * 4 - 1);
+    let y = f32(i32(i >> 1u) * 4 - 1);
+    out.clip = vec4<f32>(x, y, 1.0, 1.0);
+    return out;
+}
+
+fn star_hash(p: vec2<i32>) -> f32 {
+    var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u;
+    h = (h ^ (h >> 13u)) * 1274126177u;
+    return f32((h >> 8u) & 65535u) / 65535.0;
+}
+
+fn noise2(p: vec2<f32>) -> f32 {
+    let i = vec2<i32>(floor(p));
+    let f = fract(p);
+    let a = star_hash(i);
+    let b = star_hash(i + vec2<i32>(1, 0));
+    let c = star_hash(i + vec2<i32>(0, 1));
+    let d = star_hash(i + vec2<i32>(1, 1));
+    let u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// The void behind the world is not black: a violet nebula breathes there,
+// and the stars mind their own business.
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let px = in.clip.xy;
+    let p = px * 0.006;
+    var neb = noise2(p) * 0.55;
+    neb += noise2(p * 2.3 + vec2<f32>(19.7, 7.3)) * 0.30;
+    neb += noise2(p * 5.1 + vec2<f32>(3.1, 41.9)) * 0.15;
+    neb = pow(max(neb - 0.35, 0.0) * 1.6, 1.6);
+    var color = vec3<f32>(0.015, 0.010, 0.030);
+    color += vec3<f32>(0.16, 0.05, 0.24) * neb;
+
+    let cell = vec2<i32>(floor(px / 3.0));
+    let h = star_hash(cell);
+    if h > 0.982 {
+        let tw = 0.7 + 0.3 * sin(camera.sun.w * (1.0 + fract(h * 57.0) * 3.0) + h * 40.0);
+        let bright = (h - 0.982) / 0.018;
+        color += vec3<f32>(0.8, 0.85, 1.0) * bright * tw;
+    }
+    return vec4<f32>(color, 1.0);
+}
+"#;
+
 /// Opaque lit vertex with a free RGBA color — the Geoscape globe and its
 /// markers use this (the voxel palette is too small for a planet).
 #[repr(C)]
@@ -294,6 +412,8 @@ pub struct Renderer {
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     lit_pipeline: wgpu::RenderPipeline,
+    globe_pipeline: wgpu::RenderPipeline,
+    starfield_pipeline: wgpu::RenderPipeline,
     chunk_meshes: HashMap<IVec3, GpuMesh>,
     unit_mesh: Option<GpuMesh>,
     overlay_mesh: Option<GpuMesh>,
@@ -533,6 +653,73 @@ impl Renderer {
             cache: None,
         });
 
+        let globe_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("globe-shader"),
+            source: wgpu::ShaderSource::Wgsl(GLOBE_SHADER.into()),
+        });
+        let globe_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("globe-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &globe_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[LitVertex::LAYOUT],
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &globe_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(config.format.into())],
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        let starfield_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("starfield-shader"),
+            source: wgpu::ShaderSource::Wgsl(STARFIELD_SHADER.into()),
+        });
+        let starfield_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("starfield-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &starfield_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &starfield_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(config.format.into())],
+            }),
+            multiview: None,
+            cache: None,
+        });
+
         let ui_renderer = egui_wgpu::Renderer::new(
             &device,
             config.format,
@@ -555,6 +742,8 @@ impl Renderer {
             camera_buffer,
             camera_bind_group,
             lit_pipeline,
+            globe_pipeline,
+            starfield_pipeline,
             chunk_meshes: HashMap::new(),
             unit_mesh: None,
             overlay_mesh: None,
@@ -767,6 +956,13 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
+            // Space first: the nebula backdrop paints behind the globe.
+            if self.globe_mesh.is_some() {
+                pass.set_pipeline(&self.starfield_pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+
             pass.set_pipeline(&self.voxel_pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             for mesh in self.chunk_meshes.values().chain(self.unit_mesh.iter()) {
@@ -775,10 +971,19 @@ impl Renderer {
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
 
+            // The planet gets its own 1994 treatment: flat color, graticule,
+            // and the knife-edge terminator.
+            if let Some(mesh) = &self.globe_mesh {
+                pass.set_pipeline(&self.globe_pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
+
             let lit_meshes: Vec<&GpuMesh> = self
-                .globe_mesh
+                .marker_mesh
                 .iter()
-                .chain(self.marker_mesh.iter())
                 .chain(self.figure_mesh.iter())
                 .collect();
             if !lit_meshes.is_empty() {
@@ -932,6 +1137,8 @@ mod shader_tests {
             ("overlay", super::OVERLAY_SHADER),
             ("lit", super::LIT_SHADER),
             ("blit", super::BLIT_SHADER),
+            ("globe", super::GLOBE_SHADER),
+            ("starfield", super::STARFIELD_SHADER),
         ] {
             let module = naga::front::wgsl::parse_str(src)
                 .unwrap_or_else(|e| panic!("{name} shader fails to parse: {e}"));

@@ -82,6 +82,11 @@ pub struct Core {
     pub show_codex: bool,
     pub show_stats: bool,
     pub show_options: bool,
+    pub show_bases: bool,
+    /// Geoscape time compression: 0 holds, 1..=3 run the calendar.
+    pub geo_speed: u8,
+    /// How far through the current day the clock stands (0..1).
+    pub day_progress: f32,
     /// Master volume (0..=1) and orbit-drag sensitivity (0.3..=2.5).
     pub volume: f32,
     pub cam_sense: f32,
@@ -97,7 +102,6 @@ pub struct Core {
     cursor: (f32, f32),
     last_cursor: (f32, f32),
     last_frame: Instant,
-    sun_drift: f32,
     /// Seconds since launch; feeds the emissive-material pulse.
     clock: f32,
 }
@@ -164,6 +168,9 @@ impl Core {
             show_codex: false,
             show_stats: false,
             show_options: false,
+            show_bases: false,
+            geo_speed: 0,
+            day_progress: 0.0,
             volume: 1.0,
             cam_sense: 1.0,
             audio: audio::Audio::new(),
@@ -176,7 +183,6 @@ impl Core {
             cursor: (0.0, 0.0),
             last_cursor: (0.0, 0.0),
             last_frame: Instant::now(),
-            sun_drift: 0.0,
             clock: 0.0,
         })
     }
@@ -368,21 +374,54 @@ impl Core {
                     self.renderer.set_globe(&vertices, &indices);
                     self.globe_built_for = Some(self.selected_region);
                 }
-                // The terminator: the sun tracks the campaign calendar and
-                // drifts in real time, sweeping day across the globe.
-                self.sun_drift += dt * 1.5;
+                // Real time flows through the calendar at the chosen
+                // compression — and stops dead the moment the world needs
+                // an answer (an event fires, or gargoyles find a sortie).
+                if let Some(c) = &mut self.campaign {
+                    if c.over.is_some() || c.interception.is_some() {
+                        self.geo_speed = 0;
+                    }
+                    let rate = match self.geo_speed {
+                        0 => 0.0,
+                        1 => 1.0 / 12.0, // a day each twelve seconds
+                        2 => 1.0 / 3.0,  // a day every three
+                        _ => 2.0,        // days streak past
+                    };
+                    if rate > 0.0 {
+                        self.day_progress += dt * rate;
+                        let mut crossed = 0;
+                        while self.day_progress >= 1.0 && crossed < 8 {
+                            self.day_progress -= 1.0;
+                            crossed += 1;
+                            let events = c.advance_day();
+                            if !events.is_empty() {
+                                // Something happened: the clock waits.
+                                self.geo_speed = 0;
+                                self.day_progress = 0.0;
+                                for e in &events {
+                                    self.log.push(chronicle::narrate(c, e));
+                                }
+                                break;
+                            }
+                        }
+                        if crossed > 0 {
+                            let _ = std::fs::write(AUTOSAVE_PATH, c.save_to_string());
+                        }
+                    }
+                }
+                // The terminator: the sun tracks the campaign calendar,
+                // gliding smoothly through the day in flight.
                 let sun_lon = self
                     .campaign
                     .as_ref()
-                    .map_or(0.0, |c| c.sun_lon())
-                    + self.sun_drift;
+                    .map_or(self.clock * 4.0, |c| c.sun_lon() + self.day_progress * 137.0);
                 let sun = globe::latlon_to_pos(12.0, sun_lon, 1.0);
                 if let Some(c) = &self.campaign {
-                    let (vertices, indices) = globe::build_markers(c, self.sun_drift);
+                    let (vertices, indices) = globe::build_markers(c, self.clock);
                     self.renderer.set_markers(&vertices, &indices);
                 }
                 // Civilization glitters on the night side of the line.
-                let (lights, light_idx) = globe::build_city_lights(sun_lon, self.sun_drift);
+                let (lights, light_idx) = globe::build_city_lights(sun_lon, self.clock);
                 self.renderer.set_fx(&lights, &light_idx);
                 let vp = self.geo_camera.view_proj(self.renderer.aspect());
                 self.renderer.set_camera(vp, sun, self.clock);
@@ -422,6 +461,40 @@ impl Core {
             }
             Screen::Battle => self.battle_ui(ctx),
         }
+        // The options window follows the commander onto any screen.
+        if self.show_options && self.screen != Screen::Battle {
+            self.options_window(ctx);
+        }
+    }
+
+    fn options_window(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        egui::Window::new("Options")
+            .open(&mut open)
+            .anchor(egui::Align2::RIGHT_TOP, [-16.0, 16.0])
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Volume");
+                if ui
+                    .add(egui::Slider::new(&mut self.volume, 0.0..=1.0).show_value(false))
+                    .changed()
+                {
+                    let volume = self.volume;
+                    if let Some(a) = self.audio_mut() {
+                        a.set_volume(volume);
+                    }
+                }
+                ui.label("Camera sensitivity");
+                ui.add(egui::Slider::new(&mut self.cam_sense, 0.3..=2.5).show_value(false));
+                ui.label(
+                    egui::RichText::new(
+                        "Applies to right-drag orbiting on both the globe and the field.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            });
+        self.show_options = open;
     }
 
     fn launch_mission(&mut self, kind: ods_geo::MissionKind) {

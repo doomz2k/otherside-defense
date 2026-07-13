@@ -3865,7 +3865,7 @@ mod tests {
 
     #[test]
     fn quiet_boots_raise_no_alarm() {
-        let mut b = open_field(duelists(), 43);
+        let b = open_field(duelists(), 43);
         // Standing tall: the step is heard (no demon can see tile 1,5 area? the
         // imp CAN see across the open field, so first check the unseen case
         // behind a wall).
