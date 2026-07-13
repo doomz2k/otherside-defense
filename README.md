@@ -148,6 +148,34 @@ once a battle. When it ends, the game writes the whole war to a markdown
 **chronicle** — and if you won, the **Second Dawn** reopens the veil for
 an endless, harder war with the Ledger as your scoreboard.
 
+## The 1994 ethos, brought forward
+
+The presentation is the original's, rebuilt honest: a fixed dimetric
+battlefield in chunky virtual pixels (1×–4× scale, optional **CRT**
+scanlines), a flat saturated **globe** with a knife-edge dithered
+terminator, a 30° graticule, city lights after dark, and a purple nebula
+behind the world. Time on the Geoscape is **real**: pause and three
+compressions, auto-pausing dead the moment anything happens. The right
+rail is the command sidebar; the **Basescape** renders your chapterhouse
+as an orbitable voxel diorama, one building per facility. Gargoyle sky
+hunts on led sorties are fought from the gondola guns, round by round.
+
+In battle: the squad deploys down the ramp of the **grounded zeppelin**
+(evacuations end at its lantern-lit mouth), a bottom **squad console**
+carries every soldier's vitals, the hover line quotes the resolver's true
+**shot forecast**, lost demons leave **ghost intel** at their last seen
+tile, and [T] tints every tile a known demon watches. The demon turn hides
+behind the **HIDDEN MOVEMENT** curtain. Overhead markers, a click-to-jump
+tactical map [M], muzzle flashes, material debris, positional panned audio
+(boots tell the ground: earth, planking, snow), and per-biome furniture —
+fences, carts, gravestones, a scarecrow with the wrong head — finish the
+field. Fire now eats what feeds it (hedges char to nothing, fueled ground
+burns hot and long), witchfire **flares** [L] buy light in the deep night,
+gargoyles start perched on rooftops, and terror sites stage three distinct
+atrocity vignettes. After action: a debrief with commendations. Preferences,
+**rebindable keys**, rolling autosaves, and a `mods/` overlay folder for
+the RON balance tables round out the shell.
+
 ## The campaign arc
 
 Bind demons in battle (`B`), drag them home, and the interrogation chain —

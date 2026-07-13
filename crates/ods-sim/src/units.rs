@@ -246,6 +246,8 @@ pub struct Unit {
     pub grenades: u32,
     /// Field-dressing uses left (staunches wounds, restores some health).
     pub heal_charges: u32,
+    /// Witchfire flares: thrown light for the long nights.
+    pub flares: u32,
     pub alive: bool,
 }
 
@@ -297,6 +299,7 @@ impl Unit {
             wounds: 0,
             grenades: 0,
             heal_charges: 0,
+            flares: 0,
             alive: true,
         }
     }
@@ -331,6 +334,7 @@ impl Unit {
             heal_charges: 3,
             smoke_grenades: 1,
             ward_kits: 1,
+            flares: 2,
             facing: IVec3::new(1, 0, 0),
             ..Self::base(id, Side::Order, Species::Soldier, name, tile)
         }

@@ -300,6 +300,19 @@ impl BattleScreen {
                 self.refresh_scene(renderer);
             }
             KeyCode::KeyM => self.show_map = !self.show_map,
+            KeyCode::KeyL => {
+                // Hurl a witchfire flare: at the hovered tile if it's in
+                // reach, else out ahead of the soldier's facing.
+                if let Some(id) = self.selected {
+                    let me = self.battle.unit(id).tile;
+                    let at = match self.hover {
+                        Some(h) if (h - me).abs().max_element() <= 10 => h,
+                        _ => me + self.battle.unit(id).facing * 5,
+                    };
+                    let result = self.battle.perform(Action::ThrowFlare { unit: id, at });
+                    self.apply(renderer, audio, result);
+                }
+            }
             KeyCode::KeyQ => self.camera.snap_turn(1),
             KeyCode::KeyE => self.camera.snap_turn(-1),
             KeyCode::KeyW => self.camera.pan(0.0, PAN_STEP),
@@ -520,7 +533,7 @@ impl BattleScreen {
                     }
                 }
                 ui.separator();
-                ui.weak("[Q]/[E] turn the field  [F] floor cutaway  [T] threat  [M] map  [O] door  [V] smoke  [B] bind  [K] kneel  [X] amputate  [R] ward  [Y] rally");
+                ui.weak("[Q]/[E] turn the field  [F] floor cutaway  [T] threat  [M] map  [O] door  [V] smoke  [L] flare  [B] bind  [K] kneel  [X] amputate  [R] ward  [Y] rally");
             });
         });
 
@@ -967,6 +980,18 @@ impl BattleScreen {
         self.battle.vision_tiles < 14
     }
 
+    /// Position a sound in the player's ears: louder near the camera's
+    /// focus, panned by which side of the view the source sits on.
+    fn emit(&self, audio: Option<&Audio>, sound: Sound, at: Vec3) {
+        let Some(a) = audio else { return };
+        let rel = at - self.camera.target;
+        let right = Vec3::new(self.camera.yaw.sin(), -self.camera.yaw.cos(), 0.0);
+        let pan = (rel.dot(right) / (40.0 * TILE_VOXELS as f32)).clamp(-1.0, 1.0);
+        let dist_tiles = rel.length() / TILE_VOXELS as f32;
+        let gain = (1.1 - dist_tiles / 26.0).clamp(0.2, 1.0);
+        a.play_at(sound, gain, pan);
+    }
+
     /// Knock a handful of material chips loose: they fly, arc, and die.
     fn spawn_debris(&mut self, at: Vec3, color: [f32; 4], count: usize) {
         for i in 0..count {
@@ -1144,7 +1169,7 @@ impl BattleScreen {
                     age: 0.0,
                     life: if self.is_night() { 0.16 } else { 0.10 },
                 });
-                play(Sound::Shot);
+                self.emit(audio, Sound::Shot, p);
             }
             Event::Exploded { at, .. } => {
                 let p = Self::tile_pos(*at, 5.0);
@@ -1158,7 +1183,7 @@ impl BattleScreen {
                 });
                 self.spawn_debris(p + Vec3::Z * 4.0 * VS_F, [0.55, 0.42, 0.28, 0.9], 8);
                 self.shake += 5.0;
-                play(Sound::Blast);
+                self.emit(audio, Sound::Blast, p);
             }
             Event::TerrainDestroyed { center, .. } => {
                 self.fx.push(Fx {
@@ -1186,7 +1211,22 @@ impl BattleScreen {
                     age: 0.0,
                     life: 0.5,
                 });
-                play(Sound::Death);
+                self.emit(audio, Sound::Death, p);
+            }
+            // Boots tell the ground they walk on: earth, planking, snow.
+            Event::Moved { to, .. } => {
+                let probe = *to * TILE_VOXELS
+                    + IVec3::new(TILE_VOXELS / 2, TILE_VOXELS / 2, scenario::GROUND_TOP - 1);
+                let sound = match self.battle.world.voxel(probe) {
+                    v if v == scenario::MAT_SNOW || v == scenario::MAT_GLINT => Sound::Crunch,
+                    v if v == scenario::MAT_TIMBER => Sound::Knock,
+                    _ => Sound::Footstep,
+                };
+                self.emit(audio, sound, Self::tile_pos(*to, 4.0));
+            }
+            // The dark answers itself, panned to where it really is.
+            Event::NoiseInDark { near } => {
+                self.emit(audio, Sound::DemonCall, Self::tile_pos(*near, 10.0));
             }
             Event::Gibbed { unit } => {
                 let p = self.unit_pos(*unit, 6.0);
@@ -1673,17 +1713,21 @@ impl BattleScreen {
         // At night, open flame throws a pool of warm light; everything else
         // sinks into cold blue. Distance to the nearest fire decides which.
         let night = self.is_night();
-        let fires: Vec<IVec3> = self
+        let mut lights: Vec<(IVec3, i32)> = self
             .battle
             .clouds
             .iter()
             .filter(|(_, kind, _)| *kind == ods_sim::battle::CloudKind::Fire)
-            .map(|(t, _, _)| *t)
+            .map(|(t, _, _)| (*t, 0))
             .collect();
+        // Flares throw a wider pool than open flame.
+        lights.extend(self.battle.flares.iter().map(|f| (*f, -1)));
         let fire_dist = |tile: IVec3| -> i32 {
-            fires
+            lights
                 .iter()
-                .map(|f| (f.x - tile.x).abs().max((f.y - tile.y).abs()) + (f.z - tile.z).abs())
+                .map(|(f, bias)| {
+                    (f.x - tile.x).abs().max((f.y - tile.y).abs()) + (f.z - tile.z).abs() + bias
+                })
                 .min()
                 .unwrap_or(i32::MAX)
         };
@@ -1766,6 +1810,10 @@ impl BattleScreen {
                 ods_sim::battle::CloudKind::Fire => [1.0, 0.45, 0.1, 0.5],
             };
             push_tile_quad(&mut verts, &mut indices, *tile, color);
+        }
+        // Witchfire flares: a hard teal-white core and a warm pool.
+        for tile in &self.battle.flares {
+            push_tile_quad(&mut verts, &mut indices, *tile, [0.75, 1.0, 0.9, 0.5]);
         }
         // Occult ground: summoning circles bleed red light, wards burn teal,
         // corruption veins glow violet (the voxel runes carry the detail).
@@ -2077,6 +2125,7 @@ fn describe(event: &Event, battle: &Battle) -> String {
         }
         Event::SmokePopped { at } => format!("smoke blooms at {at}"),
         Event::FireStarted { at } => format!("fire takes hold at {at}"),
+        Event::FlareThrown { at } => format!("a witchfire flare burns at {at} — light holds there"),
         Event::Burned { unit, amount } => format!("{} burns ({amount})", name(unit)),
         Event::DoorOpened { at } => format!("a door swings open at {at}"),
         Event::Possessed { unit, by } => {

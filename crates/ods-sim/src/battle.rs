@@ -135,6 +135,8 @@ pub enum Event {
     ChargeDropped { at: IVec3, timer: u32 },
     SmokePopped { at: IVec3 },
     FireStarted { at: IVec3 },
+    /// A witchfire flare lands and burns: light where there was none.
+    FlareThrown { at: IVec3 },
     Burned { unit: UnitId, amount: i32 },
     DoorOpened { at: IVec3 },
     /// A glowing circle scribes itself onto the ground: something is coming.
@@ -204,6 +206,8 @@ pub enum Action {
     DropCharge { unit: UnitId, timer: u32 },
     /// Pop a smoke grenade at a tile: sight-blocking cover for a few turns.
     ThrowSmoke { unit: UnitId, at: IVec3 },
+    /// Hurl a witchfire flare: a pool of light the dark can't argue with.
+    ThrowFlare { unit: UnitId, at: IVec3 },
     /// Open an adjacent closed door (6 TU).
     OpenDoor { unit: UnitId, at: IVec3 },
     /// Seize an enemy mind outright (Princes): it acts for you next turn.
@@ -347,6 +351,8 @@ pub struct Battle {
     pub summons: Vec<(IVec3, u32, u32)>,
     /// The Order's burning wards: demons crossing one pay for it.
     pub wards: Vec<IVec3>,
+    /// Thrown witchfire flares: standing pools of light in the dark.
+    pub flares: Vec<IVec3>,
     /// Ground the obelisk has veined with glowing corruption.
     pub corruption: Vec<IVec3>,
     /// Atrocity sites on terror maps: (tile, discovered).
@@ -411,6 +417,7 @@ impl Battle {
             last_noise: None,
             summons: Vec::new(),
             wards: Vec::new(),
+            flares: Vec::new(),
             corruption: Vec::new(),
             atrocities: Vec::new(),
             rule: MissionRule::Standard,
@@ -655,8 +662,9 @@ impl Battle {
         let (a, b) = (self.unit(a), self.unit(b));
         let d = (b.tile - a.tile).abs();
         let dist = d.x.max(d.y).max(d.z);
-        // Burning ground lights its surroundings beyond the vision limit.
-        let in_range = dist <= self.vision_tiles || (dist <= 20 && self.near_fire(b.tile));
+        // Lit ground — burning tiles, thrown flares — shows its occupants
+        // far beyond the eye's dark limit.
+        let in_range = dist <= self.vision_tiles || (dist <= 20 && self.lit(b.tile));
         in_range
             && self.los_clear(Self::eye(a.tile), Self::chest(b.tile))
             && !self.smoke_blocks(Self::eye(a.tile), Self::chest(b.tile))
@@ -768,6 +776,7 @@ impl Battle {
             Action::Turn { unit, toward } => self.do_turn(unit, toward),
             Action::DropCharge { unit, timer } => self.do_drop_charge(unit, timer),
             Action::ThrowSmoke { unit, at } => self.do_throw_smoke(unit, at),
+            Action::ThrowFlare { unit, at } => self.do_throw_flare(unit, at),
             Action::OpenDoor { unit, at } => self.do_open_door(unit, at),
             Action::Possess { unit, target } => self.do_possess(unit, target),
             Action::PickUp { unit, target } => self.do_pick_up(unit, target),
@@ -855,6 +864,27 @@ impl Battle {
             }
         }
         Ok(vec![Event::SmokePopped { at }])
+    }
+
+    /// Hurl a witchfire flare: a standing pool of light, three tiles wide,
+    /// that the night cannot argue with. It burns until the field is done.
+    fn do_throw_flare(&mut self, id: UnitId, at: IVec3) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        let u = self.unit(id);
+        if u.flares == 0 {
+            return Err(ActionError::NoCharges);
+        }
+        if cheb(u.tile, at) > 10 {
+            return Err(ActionError::OutOfRange);
+        }
+        let cost = u.tu_max * 12 / 100;
+        if u.tu < cost {
+            return Err(ActionError::NotEnoughTu);
+        }
+        self.unit_mut(id).tu -= cost;
+        self.unit_mut(id).flares -= 1;
+        self.flares.push(at);
+        Ok(vec![Event::FlareThrown { at }])
     }
 
     fn do_open_door(&mut self, id: UnitId, at: IVec3) -> Result<Vec<Event>, ActionError> {
@@ -1216,6 +1246,71 @@ impl Battle {
         self.clouds
             .iter()
             .any(|(t, k, _)| *k == CloudKind::Fire && cheb(*t, tile) <= 1)
+    }
+
+    /// Is this ground lit — by burning tiles or a thrown flare?
+    pub fn lit(&self, tile: IVec3) -> bool {
+        self.near_fire(tile) || self.flares.iter().any(|f| cheb(*f, tile) <= 3)
+    }
+
+    /// Does the tile hold something that burns — timber, foliage, flesh?
+    /// A sparse voxel probe, cheap enough to ask every fire, every round.
+    fn tile_fuel(&self, tile: IVec3) -> bool {
+        let o = tile * TILE_VOXELS;
+        let flammable = [
+            crate::scenario::MAT_TIMBER,
+            crate::scenario::MAT_FOLIAGE,
+            crate::scenario::MAT_FLESH,
+        ];
+        for px in [3 * VS, 8 * VS, 13 * VS] {
+            for py in [3 * VS, 8 * VS, 13 * VS] {
+                for pz in [
+                    crate::scenario::GROUND_TOP,
+                    crate::scenario::GROUND_TOP + 4 * VS,
+                    crate::scenario::GROUND_TOP + 8 * VS,
+                ] {
+                    if flammable.contains(&self.world.voxel(o + IVec3::new(px, py, pz))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Fire eats what feeds it: char a burning tile's flammable voxels to
+    /// rubble. Cover burns away, one round at a time.
+    fn char_tile(&mut self, tile: IVec3) {
+        let o = tile * TILE_VOXELS;
+        let flammable = [
+            crate::scenario::MAT_TIMBER,
+            crate::scenario::MAT_FOLIAGE,
+            crate::scenario::MAT_FLESH,
+        ];
+        let mut burned = 0;
+        'outer: for pz in [
+            crate::scenario::GROUND_TOP,
+            crate::scenario::GROUND_TOP + 4 * VS,
+            crate::scenario::GROUND_TOP + 8 * VS,
+            crate::scenario::GROUND_TOP + 12 * VS,
+        ] {
+            for px in 0..TILE_VOXELS / (2 * VS) {
+                for py in 0..TILE_VOXELS / (2 * VS) {
+                    let p = o + IVec3::new(px * 2 * VS, py * 2 * VS, pz);
+                    if flammable.contains(&self.world.voxel(p)) {
+                        self.world.set_voxel(p, crate::scenario::MAT_RUBBLE);
+                        burned += 1;
+                        if burned >= 24 {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+        if burned > 0 {
+            self.tiles
+                .rederive_region(&self.world, o, o + IVec3::splat(TILE_VOXELS));
+        }
     }
 
     fn do_turn(&mut self, id: UnitId, toward: IVec3) -> Result<Vec<Event>, ActionError> {
@@ -2391,7 +2486,8 @@ impl Battle {
         let _ = expired;
         self.clouds.retain(|(_, _, ttl)| *ttl > 0);
         if self.side_to_move == Side::Order && !rain {
-            // Once per full round: fire reaches for fresh fuel.
+            // Once per full round: fire eats what it stands on, then
+            // reaches for fresh fuel — hungrily where the fuel is real.
             let fires: Vec<IVec3> = self
                 .clouds
                 .iter()
@@ -2399,19 +2495,23 @@ impl Battle {
                 .map(|(t, _, _)| *t)
                 .collect();
             for at in fires {
-                if self.rng.roll(100) < 30 {
-                    const RING: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-                    let (dx, dy) = RING[self.rng.roll(4) as usize];
-                    let next = at + IVec3::new(dx, dy, 0);
-                    if self.tiles.is_walkable(next)
-                        && !self
-                            .clouds
-                            .iter()
-                            .any(|(t, k, _)| *t == next && *k == CloudKind::Fire)
-                    {
-                        self.add_cloud(next, CloudKind::Fire, 3);
-                        events.push(Event::FireStarted { at: next });
-                    }
+                self.char_tile(at);
+                const RING: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+                let (dx, dy) = RING[self.rng.roll(4) as usize];
+                let next = at + IVec3::new(dx, dy, 0);
+                let fueled = self.tile_fuel(next);
+                let chance = if fueled { 70 } else { 25 };
+                // Bare ground only carries fire where boots could walk;
+                // fuel carries it anywhere — hedges and walls of flesh burn.
+                if (self.tiles.is_walkable(next) || fueled)
+                    && self.rng.roll(100) < chance
+                    && !self
+                        .clouds
+                        .iter()
+                        .any(|(t, k, _)| *t == next && *k == CloudKind::Fire)
+                {
+                    self.add_cloud(next, CloudKind::Fire, if fueled { 6 } else { 3 });
+                    events.push(Event::FireStarted { at: next });
                 }
             }
         }
@@ -3978,6 +4078,69 @@ mod tests {
         b.units[1].alive = false;
         b.perform(Action::Kneel { unit: UnitId(0) }).unwrap();
         assert!(b.last_known.is_empty(), "the dead leave the intel map");
+    }
+
+    #[test]
+    fn flares_light_the_dark() {
+        let mut b = open_field(duelists(), 60);
+        b.vision_tiles = 3; // deep night: the imp at (10,5) is invisible
+        assert!(!b.can_see(UnitId(0), UnitId(1)), "the dark hides it");
+
+        let events = b
+            .perform(Action::ThrowFlare { unit: UnitId(0), at: IVec3::new(9, 5, 0) })
+            .unwrap();
+        assert!(events.iter().any(|e| matches!(e, Event::FlareThrown { .. })));
+        assert!(b.can_see(UnitId(0), UnitId(1)), "lit ground hides nothing");
+        assert_eq!(b.unit(UnitId(0)).flares, 1, "the flare is spent");
+
+        // And the range is honest (Vasquez stands at x=1: 11 tiles east).
+        assert_eq!(
+            b.perform(Action::ThrowFlare { unit: UnitId(0), at: IVec3::new(12, 5, 0) }),
+            Err(ActionError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn fire_eats_the_fuel_it_stands_on() {
+        let mut b = open_field(duelists(), 61);
+        // A hedge: a block of foliage on tile (5, 8).
+        let o = IVec3::new(5, 8, 0) * TILE_VOXELS;
+        b.world.fill_box(
+            o + IVec3::new(0, 0, crate::scenario::GROUND_TOP),
+            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, crate::scenario::GROUND_TOP + 10 * VS),
+            crate::scenario::MAT_FOLIAGE,
+        );
+        let count_foliage = |b: &Battle| -> usize {
+            let mut n = 0;
+            for z in 0..TILE_VOXELS {
+                for y in 0..TILE_VOXELS {
+                    for x in 0..TILE_VOXELS {
+                        if b.world.voxel(o + IVec3::new(x, y, z))
+                            == crate::scenario::MAT_FOLIAGE
+                        {
+                            n += 1;
+                        }
+                    }
+                }
+            }
+            n
+        };
+        let before = count_foliage(&b);
+        assert!(before > 0);
+        b.add_cloud_for_test(IVec3::new(5, 8, 0), CloudKind::Fire, 8);
+        // Two full rounds of burning.
+        for _ in 0..4 {
+            if b.winner.is_some() {
+                break;
+            }
+            let _ = b.perform(Action::EndTurn);
+        }
+        assert!(
+            count_foliage(&b) < before,
+            "the hedge chars: {} -> {}",
+            before,
+            count_foliage(&b)
+        );
     }
 
     #[test]

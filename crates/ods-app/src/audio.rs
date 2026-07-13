@@ -22,6 +22,14 @@ pub enum Sound {
     Whisper,
     /// Your own pulse, too loud: the squad is bleeding out.
     Heartbeat,
+    /// A boot on earth.
+    Footstep,
+    /// A boot on snow or scree.
+    Crunch,
+    /// A boot on timber.
+    Knock,
+    /// Something far off answers the dark. It is not answering you.
+    DemonCall,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -87,6 +95,10 @@ impl Audio {
             (Sound::Defeat, synth_sting(false)),
             (Sound::Whisper, synth_whisper()),
             (Sound::Heartbeat, synth_heartbeat()),
+            (Sound::Footstep, synth_footstep()),
+            (Sound::Crunch, synth_crunch()),
+            (Sound::Knock, synth_knock()),
+            (Sound::DemonCall, synth_demon_call()),
         ];
         Some(Self {
             _stream: stream,
@@ -142,6 +154,27 @@ impl Audio {
             let buffer = SamplesBuffer::new(1, RATE, samples.clone());
             let _ = self.handle.play_raw(buffer.amplify(self.volume));
         }
+    }
+
+    /// Play a sound from somewhere: `gain` (0..=1) carries distance,
+    /// `pan` (-1 left ..= 1 right) carries direction — equal-power panned
+    /// into a stereo buffer so the field tells you where to look.
+    pub fn play_at(&self, sound: Sound, gain: f32, pan: f32) {
+        if self.volume <= 0.0 {
+            return;
+        }
+        let Some((_, samples)) = self.banks.iter().find(|(s, _)| *s == sound) else {
+            return;
+        };
+        let theta = (pan.clamp(-1.0, 1.0) + 1.0) * std::f32::consts::FRAC_PI_4;
+        let (l, r) = (theta.cos(), theta.sin());
+        let g = gain.clamp(0.0, 1.0) * self.volume;
+        let mut stereo = Vec::with_capacity(samples.len() * 2);
+        for s in samples {
+            stereo.push(s * l * g);
+            stereo.push(s * r * g);
+        }
+        let _ = self.handle.play_raw(SamplesBuffer::new(2, RATE, stereo));
     }
 }
 
@@ -282,6 +315,51 @@ fn synth_heartbeat() -> Vec<f32> {
                 }
             };
             (beat(0.0, 0.5) + beat(0.22, 0.35)).clamp(-1.0, 1.0)
+        })
+        .collect()
+}
+
+/// A soft thud: lowpassed noise, gone in a breath.
+fn synth_footstep() -> Vec<f32> {
+    let len = (RATE as f32 * 0.05) as usize;
+    let env = envelope(len, 0.05, 14.0);
+    let mut low = 0.0f32;
+    (0..len)
+        .map(|i| {
+            low += (noise(i) - low) * 0.18;
+            low * env(i) * 0.5
+        })
+        .collect()
+}
+
+/// A brighter, grittier step: snow, scree, frost.
+fn synth_crunch() -> Vec<f32> {
+    let len = (RATE as f32 * 0.06) as usize;
+    let env = envelope(len, 0.03, 10.0);
+    (0..len).map(|i| noise(i) * env(i) * 0.28).collect()
+}
+
+/// A hollow knock: boot on planking.
+fn synth_knock() -> Vec<f32> {
+    let len = (RATE as f32 * 0.08) as usize;
+    let env = envelope(len, 0.02, 16.0);
+    (0..len)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            (t * 170.0 * std::f32::consts::TAU).sin() * env(i) * 0.4
+        })
+        .collect()
+}
+
+/// A far shriek that falls and frays: the dark, answering itself.
+fn synth_demon_call() -> Vec<f32> {
+    let len = (RATE as f32 * 0.8) as usize;
+    let env = envelope(len, 0.15, 3.0);
+    (0..len)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            let f = 640.0 - t * 420.0 + (t * 13.0 * std::f32::consts::TAU).sin() * 40.0;
+            ((t * f * std::f32::consts::TAU).sin() + noise(i) * 0.15) * env(i) * 0.2
         })
         .collect()
 }

@@ -321,6 +321,27 @@ pub fn incursion_mission(
                     }
                 }
             }
+            // The first farmhouse keeps its loft: an open fighting deck
+            // over the interior, reached by a rubble stair inside.
+            for tx in 8..=9 {
+                for ty in 5..=7 {
+                    if (tx, ty) == (8, 5) {
+                        continue; // the stairwell
+                    }
+                    let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
+                    world.fill_box(
+                        o + IVec3::new(0, 0, TILE_VOXELS),
+                        o + IVec3::new(TILE_VOXELS, TILE_VOXELS, TILE_VOXELS + GROUND_TOP),
+                        MAT_TIMBER,
+                    );
+                }
+            }
+            let stair = IVec3::new(8, 5, 0) * TILE_VOXELS;
+            world.fill_box(
+                stair + IVec3::new(0, 0, GROUND_TOP),
+                stair + IVec3::new(TILE_VOXELS, TILE_VOXELS, 10 * VS),
+                MAT_RUBBLE,
+            );
             for ty in [8, 9, 10, 11] {
                 fill_tile_walls(&mut world, IVec3::new(15, ty, 0), MAT_WALL);
             }
@@ -671,6 +692,18 @@ pub fn incursion_mission(
     }
     units.extend(demon_pack(demon_count, strength, units.len() as u32, &DEMON_SPAWNS));
 
+    // Gargoyles greet the squad the way stone does: from above. They start
+    // perched on the watchtower roof.
+    let mut perches = [IVec3::new(17, 4, 1), IVec3::new(18, 4, 1)].into_iter();
+    for u in units
+        .iter_mut()
+        .filter(|u| u.species == crate::units::Species::Gargoyle)
+    {
+        if let Some(p) = perches.next() {
+            u.tile = p;
+        }
+    }
+
     // Townsfolk sheltering inside the chapel walls.
     const CIV_SPAWNS: [(i32, i32); 4] = [(11, 10), (12, 13), (10, 12), (13, 10)];
     let civ_names = ["Aldwin", "Berta", "Cosmin", "Delia"];
@@ -695,13 +728,13 @@ pub fn incursion_mission(
         door_tiles.push(IVec3::new(tx, ty, 0));
     }
 
-    // Terror sites are dressed with what the demons did before you came:
-    // gibbet posts ringed in gore and scrawled sigils. Finding one is a
-    // horror; cleansing the site is why you're here.
+    // Terror sites are dressed with what the demons did before you came —
+    // three set-piece vignettes, each a different composed horror. Finding
+    // one hits the mind; cleansing the site is why you're here.
     let mut atrocity_tiles = Vec::new();
     if civilians > 0 {
         let mut arng = crate::SimRng::from_seed(seed ^ 0x0A7770C1);
-        for _ in 0..3 {
+        for vignette in 0..3 {
             for _try in 0..10 {
                 let t = IVec3::new(6 + arng.roll(12) as i32, 2 + arng.roll(20) as i32, 0);
                 // Never inside the shelter yard where the living still hide.
@@ -713,24 +746,75 @@ pub fn incursion_mission(
                     continue;
                 }
                 let o = t * TILE_VOXELS;
-                // The post.
-                world.fill_box(
-                    o + IVec3::new(7 * VS, 7 * VS, GROUND_TOP),
-                    o + IVec3::new(9 * VS, 9 * VS, GROUND_TOP + 12 * VS),
-                    MAT_TIMBER,
-                );
-                // What hangs from it.
-                world.fill_box(
-                    o + IVec3::new(6 * VS, 6 * VS, GROUND_TOP + 6 * VS),
-                    o + IVec3::new(10 * VS, 10 * VS, GROUND_TOP + 9 * VS),
-                    MAT_GORE,
-                );
-                // The ground around it, painted and scrawled.
-                for (dx, dy) in [(3, 4), (11, 5), (5, 11), (12, 12), (8, 3), (4, 8)] {
-                    world.set_voxel(o + IVec3::new(dx * VS, dy * VS, GROUND_TOP - 1), MAT_BLOOD);
-                }
-                for (dx, dy) in [(2, 2), (13, 2), (2, 13), (13, 13)] {
-                    world.set_voxel(o + IVec3::new(dx * VS, dy * VS, GROUND_TOP - 1), MAT_SIGIL);
+                match vignette {
+                    // The gibbet: a post, and what hangs from it.
+                    0 => {
+                        world.fill_box(
+                            o + IVec3::new(7 * VS, 7 * VS, GROUND_TOP),
+                            o + IVec3::new(9 * VS, 9 * VS, GROUND_TOP + 12 * VS),
+                            MAT_TIMBER,
+                        );
+                        world.fill_box(
+                            o + IVec3::new(6 * VS, 6 * VS, GROUND_TOP + 6 * VS),
+                            o + IVec3::new(10 * VS, 10 * VS, GROUND_TOP + 9 * VS),
+                            MAT_GORE,
+                        );
+                        for (dx, dy) in [(3, 4), (11, 5), (5, 11), (12, 12), (8, 3), (4, 8)] {
+                            world.set_voxel(
+                                o + IVec3::new(dx * VS, dy * VS, GROUND_TOP - 1),
+                                MAT_BLOOD,
+                            );
+                        }
+                        for (dx, dy) in [(2, 2), (13, 2), (2, 13), (13, 13)] {
+                            world.set_voxel(
+                                o + IVec3::new(dx * VS, dy * VS, GROUND_TOP - 1),
+                                MAT_SIGIL,
+                            );
+                        }
+                    }
+                    // The ravaged wagon: tipped, torn open, and a blood
+                    // trail leading away to somewhere worse.
+                    1 => {
+                        world.fill_box(
+                            o + IVec3::new(3 * VS, 5 * VS, GROUND_TOP),
+                            o + IVec3::new(12 * VS, 11 * VS, GROUND_TOP + 4 * VS),
+                            MAT_TIMBER,
+                        );
+                        world.fill_box(
+                            o + IVec3::new(5 * VS, 6 * VS, GROUND_TOP + 4 * VS),
+                            o + IVec3::new(10 * VS, 10 * VS, GROUND_TOP + 6 * VS),
+                            MAT_GORE,
+                        );
+                        // The trail: surface blood walking east, two tiles.
+                        for step in 0..(2 * TILE_VOXELS) / (3 * VS) {
+                            let p = o
+                                + IVec3::new(
+                                    12 * VS + step * 3 * VS,
+                                    8 * VS + ((step * 5) % 7 - 3) * VS / 2,
+                                    GROUND_TOP - 1,
+                                );
+                            if world.voxel(p).is_solid() {
+                                world.set_voxel(p, MAT_BLOOD);
+                            }
+                        }
+                    }
+                    // The kneeling ring: what's left of the congregation,
+                    // arranged around a sigil that finished with them.
+                    _ => {
+                        for (dx, dy) in [(3, 8), (13, 8), (8, 3), (8, 13), (4, 4), (12, 12)] {
+                            world.fill_box(
+                                o + IVec3::new(dx * VS - VS, dy * VS - VS, GROUND_TOP),
+                                o + IVec3::new(dx * VS + VS, dy * VS + VS, GROUND_TOP + 3 * VS),
+                                MAT_GORE,
+                            );
+                        }
+                        for (dx, dy) in [(7, 7), (8, 7), (7, 8), (8, 8), (6, 8), (9, 7)] {
+                            world.set_voxel(
+                                o + IVec3::new(dx * VS, dy * VS, GROUND_TOP - 1),
+                                MAT_SIGIL,
+                            );
+                        }
+                    }
                 }
                 atrocity_tiles.push(t);
                 break;
@@ -1288,6 +1372,33 @@ mod tests {
         // The mouth is open: the squad walks out onto the ramp and the field.
         assert!(b.tiles.is_walkable(IVec3::new(3, 11, 0)));
         assert!(b.tiles.is_walkable(IVec3::new(4, 11, 0)));
+    }
+
+    #[test]
+    fn gargoyles_start_perched_on_the_watchtower_roof() {
+        let squad: Vec<Unit> =
+            (0..4).map(|i| Unit::soldier(i, &format!("S{i}"), IVec3::ZERO)).collect();
+        // Strength 4 with six demons puts a gargoyle at pack index 4.
+        let b = incursion_mission(
+            11,
+            squad,
+            6,
+            4,
+            0,
+            Biome::Temperate,
+            MissionSpec::Standard,
+        );
+        let gargoyle = b
+            .units
+            .iter()
+            .find(|u| u.species == crate::units::Species::Gargoyle)
+            .expect("the pack brings a gargoyle at this strength");
+        assert_eq!(gargoyle.tile.z, 1, "it starts on the roof");
+        assert!(
+            b.tiles.is_walkable(gargoyle.tile),
+            "the perch {} is real footing",
+            gargoyle.tile
+        );
     }
 
     #[test]
