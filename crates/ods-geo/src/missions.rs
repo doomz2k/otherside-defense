@@ -322,9 +322,21 @@ fn make_unit(id: u32, s: &Soldier, kit: (u32, u32, u32), research: &ResearchStat
     if research.is_complete(Project::HellsteelPlate) {
         u.health_max += 8;
     }
+    if research.is_complete(Project::StoneHide) {
+        u.armor_front += 1;
+        u.armor_side += 1;
+        u.armor_rear += 1;
+    }
+    if research.is_complete(Project::HoundsBlood) {
+        u.tu_max += 2;
+    }
     // The new sheet rides into battle whole.
     u.stamina_max = s.stats.stamina;
     u.stamina = s.stats.stamina;
+    if research.is_complete(Project::HoundsBlood) {
+        u.stamina_max += 5;
+        u.stamina += 5;
+    }
     u.strength = s.stats.strength;
     u.throwing = s.stats.throwing;
     u.melee = s.stats.melee;

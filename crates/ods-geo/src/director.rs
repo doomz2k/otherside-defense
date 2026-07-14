@@ -194,6 +194,20 @@ pub fn plan_month(
             }
         })
         .collect();
+    // From the third month, hell learns to strike chords instead of notes:
+    // sometimes two rifts land on the SAME day in different regions, and
+    // one squad cannot be in both places.
+    if month >= 3 && plan.len() >= 2 && rng.roll(100) < 45 {
+        let day = plan[rng.roll(plan.len() as u32) as usize].day;
+        let i = rng.roll(plan.len() as u32) as usize;
+        plan[i].day = day;
+        if plan.iter().filter(|p| p.day == day).count() < 2 {
+            // The reroll landed on itself; force a partner.
+            let region = tickets[rng.roll(tickets.len() as u32) as usize];
+            plan.push(PlannedRift { day, kind: RiftKind::Harvest, region });
+        }
+    }
+
     // The bound are come for: a full enough cell block draws a raid at
     // the founding house's own region.
     if mood.captures_held >= 3

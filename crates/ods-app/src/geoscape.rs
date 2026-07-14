@@ -1779,6 +1779,45 @@ fn chapterhouse_panel(
                     });
                 }
 
+                // The fleet: hulls, sorties aloft, and how they fly.
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!(
+                        "Fleet: {} zeppelin(s), {} aloft",
+                        c.zeppelins,
+                        c.sorties.len()
+                    ));
+                    if c.zeppelins < ods_geo::MAX_ZEPPELINS
+                        && ui
+                            .button(format!("Commission ({}k)", ods_geo::ZEPPELIN_COST))
+                            .on_hover_text("another hull: another sortie in the air at once")
+                            .clicked()
+                    {
+                        match c.commission_zeppelin() {
+                            Ok(()) => log.push(
+                                "A new envelope rises from the yards, blessed and named.".into(),
+                            ),
+                            Err(e) => log.push(format!("cannot commission: {e:?}")),
+                        }
+                    }
+                    ui.separator();
+                    ui.label("Sorties fly:");
+                    if ui
+                        .selectable_label(c.posture == ods_geo::Posture::Bold, "Bold")
+                        .on_hover_text("the fast winds: full speed, full risk")
+                        .clicked()
+                    {
+                        c.posture = ods_geo::Posture::Bold;
+                    }
+                    if ui
+                        .selectable_label(c.posture == ods_geo::Posture::Cautious, "Cautious")
+                        .on_hover_text("hug the cloud: +1 day of travel, half the sky-hunts")
+                        .clicked()
+                    {
+                        c.posture = ods_geo::Posture::Cautious;
+                    }
+                });
+
                 // Founding new chapterhouses.
                 ui.add_space(4.0);
                 ui.menu_button(
@@ -1895,6 +1934,9 @@ fn chapterhouse_panel(
                     let (brim, steel) = project.materials();
                     let (grunts, overseers) = project.prisoners();
                     let mut needs = String::new();
+                    if let Some(breed) = project.requires_capture() {
+                        needs.push_str(&format!(" +a living {:?}", breed));
+                    }
                     if brim + steel > 0 {
                         needs.push_str(&format!(" +{brim}🜏 {steel}⛓"));
                     }

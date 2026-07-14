@@ -149,6 +149,25 @@ pub fn narrate(c: &Campaign, event: &GeoEvent) -> String {
         E::InquisitionCalled { fine } => format!(
             "{stamp} the council stops whispering: the INQUISITION arrives — {fine}k in fines and a colder ledger"
         ),
+        E::CrisisConverges { count } => format!(
+            "{stamp} !!! {count} rifts stand open and found AT ONCE — pick, and pay for the one you leave"
+        ),
+        E::SleeperQuiet { region } => format!(
+            "{stamp} the augurs hear nothing from {} — no rifts, no panic, nothing at all. That is not peace",
+            region.name()
+        ),
+        E::SleeperStirs { region } => format!(
+            "{stamp} ### the ground under {} opens TWICE in a night: whatever slept there is stirring — close both wounds before the month turns ###",
+            region.name()
+        ),
+        E::SleeperWakes { region } => format!(
+            "{stamp} ### NOBODY CAME. It is awake under {}, and the region is ceded to it ###",
+            region.name()
+        ),
+        E::SleeperSlain { region } => format!(
+            "{stamp} ### both wounds closed in time: the thing under {} dies in its sleep. The quiet there is honest now ###",
+            region.name()
+        ),
         E::TheyComeForTheBound => format!(
             "{stamp} !!! the cells are full, and something on the other side knows it: they will come for the bound"
         ),

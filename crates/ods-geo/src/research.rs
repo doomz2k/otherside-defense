@@ -27,13 +27,22 @@ pub enum Project {
     /// What the Overseer whispered under the salt: how a mortal mind can
     /// push back. Opens the Confessor anointing (Sanctum required).
     RitesOfConfession,
+    /// The living gargoyle's hide, read like scripture: +1 armor on every
+    /// facing, for everyone (needs a Gargoyle taken alive).
+    StoneHide,
+    /// The hound's tireless blood, decanted: +5 stamina and +2 TU for the
+    /// whole muster (needs a Hellhound taken alive).
+    HoundsBlood,
+    /// A wager in the marginalia of Saint Aldric: two hundred candles say
+    /// the veil can be sung shut. (It cannot. The candles are lovely.)
+    AldricsWager,
     /// Armored gondolas and blessing-etched envelopes: sorties fight
     /// through gargoyle sky-hunts instead of bleeding for them.
     EscortGondola,
 }
 
 impl Project {
-    pub const ALL: [Project; 10] = [
+    pub const ALL: [Project; 13] = [
         Project::BlessedArms,
         Project::HellsteelPlate,
         Project::RiftAugury,
@@ -43,6 +52,9 @@ impl Project {
         Project::NameOfTheEnemy,
         Project::FleshGrafting,
         Project::RitesOfConfession,
+        Project::StoneHide,
+        Project::HoundsBlood,
+        Project::AldricsWager,
         Project::EscortGondola,
     ];
 
@@ -58,6 +70,9 @@ impl Project {
             Project::NameOfTheEnemy => 250,
             Project::FleshGrafting => 140,
             Project::RitesOfConfession => 160,
+            Project::StoneHide => 130,
+            Project::HoundsBlood => 120,
+            Project::AldricsWager => 60,
             Project::EscortGondola => 120,
         }
     }
@@ -66,6 +81,8 @@ impl Project {
     pub fn materials(self) -> (u32, u32) {
         match self {
             Project::HellfireLance => (10, 15),
+            Project::StoneHide => (0, 6),
+            Project::HoundsBlood => (4, 0),
             Project::FleshGrafting => (0, 8),
             Project::EscortGondola => (0, 10),
             _ => (0, 0),
@@ -85,6 +102,15 @@ impl Project {
         }
     }
 
+    /// A breed that must be in the cells, alive, before this can start.
+    pub fn requires_capture(self) -> Option<ods_sim::units::Species> {
+        match self {
+            Project::StoneHide => Some(ods_sim::units::Species::Gargoyle),
+            Project::HoundsBlood => Some(ods_sim::units::Species::Hellhound),
+            _ => None,
+        }
+    }
+
     /// Must be complete before this project can start.
     pub fn prerequisite(self) -> Option<Project> {
         match self {
@@ -93,6 +119,8 @@ impl Project {
             Project::NameOfTheEnemy => Some(Project::HeraldsConfession),
             Project::FleshGrafting => Some(Project::Interrogation),
             Project::RitesOfConfession => Some(Project::Interrogation),
+            Project::StoneHide => Some(Project::Interrogation),
+            Project::HoundsBlood => Some(Project::Interrogation),
             _ => None,
         }
     }
@@ -108,6 +136,9 @@ impl Project {
             Project::NameOfTheEnemy => "The Name of the Enemy",
             Project::FleshGrafting => "Flesh Grafting",
             Project::RitesOfConfession => "Rites of Confession",
+            Project::StoneHide => "Stone Hide",
+            Project::HoundsBlood => "The Hound's Blood",
+            Project::AldricsWager => "Saint Aldric's Wager",
             Project::EscortGondola => "Escort Gondola",
         }
     }

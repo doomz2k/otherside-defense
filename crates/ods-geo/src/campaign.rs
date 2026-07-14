@@ -26,6 +26,9 @@ pub const BAD_MONTH_SCORE: i64 = -100;
 pub const DEBT_LIMIT: i64 = -500;
 /// Founding a new chapterhouse in another region.
 pub const CHAPTERHOUSE_COST: i64 = 800;
+/// Commissioning a second (or third) consecrated zeppelin.
+pub const ZEPPELIN_COST: i64 = 700;
+pub const MAX_ZEPPELINS: u32 = 3;
 /// Brimstone burned to force open the way to the Otherside.
 pub const FINAL_ASSAULT_BRIMSTONE: u32 = 50;
 
@@ -555,6 +558,16 @@ pub enum GeoEvent {
     InquisitionCalled { fine: i64 },
     /// The cells are full — and something on the other side knows it.
     TheyComeForTheBound,
+    /// Two or more found rifts stand open at once: pick, and pay for it.
+    CrisisConverges { count: u32 },
+    /// A region's rifts, panic, patrons — all of it, gone silent at once.
+    SleeperQuiet { region: Region },
+    /// The ground opens twice in the quiet region: the last warning.
+    SleeperStirs { region: Region },
+    /// Nobody came. It is awake, and the region is ceded.
+    SleeperWakes { region: Region },
+    /// Banished in its sleep: the quiet region merely sleeps ever after.
+    SleeperSlain { region: Region },
     /// A Prince walked off the field alive. It has a name now.
     NemesisRises { name: String },
     /// It slipped the squads again, and grew by it.
@@ -606,6 +619,8 @@ pub enum GeoError {
     SquadInTransit,
     /// A sortie is already flying for that rift.
     SortieAlready,
+    /// Every zeppelin is already in the air.
+    NoZeppelin,
 }
 
 /// A ground mission the campaign can stage.
@@ -816,6 +831,33 @@ fn d_mags() -> u32 {
     2
 }
 
+fn d_zeppelins() -> u32 {
+    1
+}
+
+/// How a sortie flies: bold rides the fast winds; cautious hugs the cloud
+/// (+1 day of travel, half the chance the gargoyles find you).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Posture {
+    #[default]
+    Bold,
+    Cautious,
+}
+
+/// Something old under a quiet region, on a long fuse. Investigated in
+/// time, it dies in its sleep; ignored, it wakes.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Sleeper {
+    pub region: Region,
+    pub wake_month: u32,
+    /// It has stirred: the preemption window is open.
+    #[serde(default)]
+    pub stirred: bool,
+    /// Preemption rifts spawned when it stirs; banish them all before the
+    /// wake and the thing dies under the ground.
+    pub rift_ids: Vec<u32>,
+}
+
 const RECRUIT_NAMES: [&str; 16] = [
     "Adeyemi", "Brandt", "Castillo", "Dubois", "Eriksen", "Farah", "Grigorescu", "Hale",
     "Iwata", "Jansen", "Karimi", "Lindqvist", "Mbeki", "Novak", "Oyelaran", "Petrov",
@@ -977,6 +1019,24 @@ pub struct Campaign {
     /// Rifts banished since the month began — hell counts them too.
     #[serde(default)]
     banished_this_month: u32,
+    /// The consecrated fleet: one sortie in the air per zeppelin.
+    #[serde(default = "d_zeppelins")]
+    pub zeppelins: u32,
+    /// Extra gondola gun batteries fitted (0..=2): more teeth per pass.
+    #[serde(default)]
+    pub gondola_guns: u32,
+    /// A blessing-etched envelope: claws find less to tear.
+    #[serde(default)]
+    pub warded_envelope: bool,
+    /// How the fleet flies its sorties.
+    #[serde(default)]
+    pub posture: Posture,
+    /// The thing under the quiet region, if the augurs are right.
+    #[serde(default)]
+    pub sleeper: Option<Sleeper>,
+    /// Two or more rifts stand open and found: the omen has landed.
+    #[serde(default, skip)]
+    converged: bool,
     /// The council's ledger of what the Order does with hell's leavings:
     /// grafts, dark bargains, prisoners fed to the codex. It buys power
     /// now; it is answered for later.
@@ -1057,6 +1117,12 @@ impl Campaign {
             over: None,
             reckoning_heat: 0,
             banished_this_month: 0,
+            zeppelins: 1,
+            gondola_guns: 0,
+            warded_envelope: false,
+            posture: Posture::Bold,
+            sleeper: None,
+            converged: false,
             heresy: 0,
             reckoning_day: None,
             month_plan: director::plan_month(
@@ -1072,6 +1138,15 @@ impl Campaign {
         };
         c.bases[0].occultists = 4;
         c.bases[0].artificers = 2;
+        // Something old sleeps under a far region, on a long fuse.
+        let far: Vec<Region> =
+            Region::ALL.iter().copied().filter(|&r| r != Region::Europe).collect();
+        c.sleeper = Some(Sleeper {
+            region: far[c.rng.roll(far.len() as u32) as usize],
+            wake_month: 7 + c.rng.roll(4),
+            stirred: false,
+            rift_ids: Vec::new(),
+        });
         for _ in 0..6 {
             let s = c.roll_recruit();
             c.soldiers.push(s);
@@ -1415,6 +1490,20 @@ impl Campaign {
         Ok(())
     }
 
+    /// Commission another consecrated zeppelin: another sortie in the air.
+    pub fn commission_zeppelin(&mut self) -> Result<(), GeoError> {
+        self.guard_over()?;
+        if self.zeppelins >= MAX_ZEPPELINS {
+            return Err(GeoError::BadAssignment);
+        }
+        if self.funds < ZEPPELIN_COST {
+            return Err(GeoError::NoFunds);
+        }
+        self.funds -= ZEPPELIN_COST;
+        self.zeppelins += 1;
+        Ok(())
+    }
+
     /// Found a second (third...) chapterhouse in a region without one.
     pub fn found_chapterhouse(&mut self, region: Region) -> Result<(), GeoError> {
         self.guard_over()?;
@@ -1549,6 +1638,11 @@ impl Campaign {
         }
         if let Some(prereq) = project.prerequisite()
             && !self.research.is_complete(prereq)
+        {
+            return Err(GeoError::PrerequisiteMissing);
+        }
+        if let Some(breed) = project.requires_capture()
+            && !self.codex_captured.contains(&breed)
         {
             return Err(GeoError::PrerequisiteMissing);
         }
@@ -1834,9 +1928,13 @@ impl Campaign {
     /// need this — assault directly.
     pub fn dispatch_squad(&mut self, rift_id: u32, lead: bool) -> Result<u32, GeoError> {
         self.guard_over()?;
-        let days = self.travel_days(rift_id)?;
+        let days = self.travel_days(rift_id)?
+            + if self.posture == Posture::Cautious { 1 } else { 0 };
         if self.sorties.iter().any(|s| s.rift_id == rift_id) {
             return Err(GeoError::SortieAlready);
+        }
+        if self.sorties.len() >= self.zeppelins as usize {
+            return Err(GeoError::NoZeppelin);
         }
         let want = self.active_squad;
         let mut squad: Vec<usize> = self
@@ -1915,9 +2013,10 @@ impl Campaign {
         // The helm answers first.
         it.range = (it.range + if press { -2 } else { 2 }).max(0);
 
-        // The guns bite inside six spans; the escort gondola doubles them.
+        // The guns bite inside six spans; the escort gondola doubles them,
+        // and every fitted battery adds a barrel.
         if it.range <= 6 && it.gargoyles > 0 {
-            let shots = if escorted { 2 } else { 1 };
+            let shots = if escorted { 2 } else { 1 } + self.gondola_guns;
             let chance = if it.range <= 3 { 65 } else { 55 };
             for _ in 0..shots {
                 if it.gargoyles > 0 && self.rng.roll(100) < chance {
@@ -1934,6 +2033,9 @@ impl Campaign {
             if escorted {
                 hit = hit * 3 / 5; // the armored gondola shrugs some off
             }
+            if self.warded_envelope {
+                hit = hit * 3 / 4; // claws find less to tear on blessed skin
+            }
             if !press {
                 hit /= 2; // a running target is a poor perch
             }
@@ -1946,7 +2048,10 @@ impl Campaign {
             Some(SkyHuntOutcome::Repelled)
         } else if it.envelope <= 0 {
             Some(SkyHuntOutcome::TurnedBack)
-        } else if !press && (it.range >= 12 || self.rng.roll(100) < 25) {
+        } else if !press
+            && (it.range >= 12
+                || self.rng.roll(100) < if self.warded_envelope { 35 } else { 25 })
+        {
             // Lost them in the cloud — but count the cost of the chase.
             Some(if it.envelope <= 50 {
                 SkyHuntOutcome::Bloodied
@@ -2542,6 +2647,21 @@ impl Campaign {
                         self.reckoning_heat += 1;
                         self.stats.rifts_banished += 1;
                         self.banished_this_month += 1;
+                        // A banished stirring is a wound in the Sleeper —
+                        // close them all before the wake and it dies below.
+                        if let Some(sl) = &mut self.sleeper
+                            && sl.stirred
+                        {
+                            sl.rift_ids.retain(|&r| r != id);
+                            if sl.rift_ids.is_empty() {
+                                let slain = sl.region;
+                                self.sleeper = None;
+                                self.month_score += 60;
+                                self.trophies += 1;
+                                self.pending_events
+                                    .push(GeoEvent::SleeperSlain { region: slain });
+                            }
+                        }
                         if let Some(req) = &mut self.request
                             && req.region == region {
                                 req.done += 1;
@@ -3095,6 +3215,16 @@ impl Campaign {
             self.next_id += 1;
         }
 
+        // Two or more rifts standing open and found at once: the war is
+        // everywhere, and the log says so (once per convergence).
+        let open_found = self.rifts.iter().filter(|r| r.detected).count();
+        if open_found >= 2 && !self.converged {
+            self.converged = true;
+            events.push(GeoEvent::CrisisConverges { count: open_found as u32 });
+        } else if open_found < 2 {
+            self.converged = false;
+        }
+
         // Detection sweeps. Interrogated demons give the augurs a scent.
         let mut augury_bonus = if self.research.is_complete(Project::RiftAugury) { 15 } else { 0 };
         if self.research.is_complete(Project::Interrogation) {
@@ -3146,8 +3276,10 @@ impl Campaign {
                 .iter()
                 .find(|r| r.id == rift_id)
                 .map(|r| r.region);
-            // The hunt: gargoyles ride the same winds.
-            if self.rng.roll(100) < 15 {
+            // The hunt: gargoyles ride the same winds — but a sortie that
+            // hugs the cloud is half as often found.
+            let hunt_chance = if self.posture == Posture::Cautious { 7 } else { 15 };
+            if self.rng.roll(100) < hunt_chance {
                 // A led sortie puts the commander at the gondola guns: the
                 // dogfight becomes yours to fly, and the clock holds for it.
                 if self.sorties[i].lead
@@ -3377,6 +3509,56 @@ impl Campaign {
         self.day = 1;
         self.month_score = 0;
         self.region_score.clear();
+        // The thing under the quiet region keeps its own calendar.
+        if let Some(sleeper) = self.sleeper.clone() {
+            let next = self.month;
+            if next + 3 == sleeper.wake_month {
+                events.push(GeoEvent::SleeperQuiet { region: sleeper.region });
+            } else if next + 1 == sleeper.wake_month && !sleeper.stirred {
+                // It stirs: the ground opens twice. Banish both before the
+                // month turns and it dies in its sleep.
+                let mut ids = Vec::new();
+                for _ in 0..2 {
+                    let (lat, lon) = sleeper.region.centroid();
+                    let id = self.next_id;
+                    self.next_id += 1;
+                    self.rifts.push(Rift {
+                        id,
+                        kind: RiftKind::Terror,
+                        region: sleeper.region,
+                        lat: lat + self.rng.roll(9) as f32 - 4.0,
+                        lon: lon + self.rng.roll(9) as f32 - 4.0,
+                        days_left: 26,
+                        days_open: 2, // already dug in
+                        detected: true,
+                    });
+                    ids.push(id);
+                }
+                if let Some(sl) = &mut self.sleeper {
+                    sl.rift_ids = ids;
+                    sl.stirred = true;
+                }
+                events.push(GeoEvent::SleeperStirs { region: sleeper.region });
+            } else if next >= sleeper.wake_month {
+                // It wakes. The region is ceded to it.
+                for _ in 0..2 {
+                    let (lat, lon) = sleeper.region.centroid();
+                    self.nests.push(director::Nest {
+                        id: self.next_id,
+                        region: sleeper.region,
+                        lat: lat + self.rng.roll(9) as f32 - 4.0,
+                        lon: lon + self.rng.roll(9) as f32 - 4.0,
+                    });
+                    self.next_id += 1;
+                }
+                self.shift_panic(sleeper.region, 40);
+                self.month_score -= 50;
+                self.rifts.retain(|r| !sleeper.rift_ids.contains(&r.id));
+                self.sleeper = None;
+                events.push(GeoEvent::SleeperWakes { region: sleeper.region });
+            }
+        }
+
         let cruelty = self.difficulty.plan_bonus() + if self.second_dawn { 5 } else { 0 };
         // Hell reads the board before it deals: soft ground, full cells,
         // a winning tempo, a thinning faith — all of it bends the plan.
@@ -4710,6 +4892,106 @@ mod tests {
         assert!(c.soldiers[0].confessor);
         // Not twice.
         assert_eq!(c.anoint_confessor(0), Err(GeoError::BadAssignment));
+    }
+
+    #[test]
+    fn one_hull_one_sortie_until_the_yards_deliver() {
+        let mut c = Campaign::new(61);
+        c.month_plan.clear();
+        c.rifts.clear();
+        // Two extra hands: the first sortie takes the six, these two fly second.
+        c.funds += 2_000;
+        for _ in 0..2 {
+            c.hire_soldier(0).unwrap();
+        }
+        let a = detected_rift(&mut c, RiftKind::Harvest, Region::Asia);
+        let b = detected_rift(&mut c, RiftKind::Harvest, Region::Africa);
+        c.dispatch_squad(a, false).unwrap();
+        assert_eq!(
+            c.dispatch_squad(b, false),
+            Err(GeoError::NoZeppelin),
+            "one hull, one sortie"
+        );
+        c.funds += ZEPPELIN_COST;
+        c.commission_zeppelin().unwrap();
+        assert_eq!(c.zeppelins, 2);
+        c.dispatch_squad(b, false).unwrap();
+        assert_eq!(c.sorties.len(), 2, "two hulls fly two sorties at once");
+    }
+
+    #[test]
+    fn the_sleeper_stirs_and_wakes_if_nobody_comes() {
+        let mut c = Campaign::new(62);
+        c.month_plan.clear();
+        c.rifts.clear();
+        c.sleeper = Some(Sleeper {
+            region: Region::Asia,
+            wake_month: 3,
+            stirred: false,
+            rift_ids: Vec::new(),
+        });
+        let mut stirred = false;
+        let mut woke = false;
+        let nests_before = c.nests.len();
+        for _ in 0..70 {
+            c.month_score = 200; // keep the council from ending the test
+            for e in c.advance_day() {
+                match e {
+                    GeoEvent::SleeperStirs { region } => {
+                        assert_eq!(region, Region::Asia);
+                        stirred = true;
+                        let sl = c.sleeper.as_ref().expect("still below");
+                        assert_eq!(sl.rift_ids.len(), 2, "the ground opens twice");
+                    }
+                    GeoEvent::SleeperWakes { region } => {
+                        assert_eq!(region, Region::Asia);
+                        woke = true;
+                    }
+                    _ => {}
+                }
+            }
+            if woke {
+                break;
+            }
+        }
+        assert!(stirred, "the stirring comes a month before the wake");
+        assert!(woke, "nobody came, so it woke");
+        assert!(c.sleeper.is_none());
+        // (director-planned nests may also have landed during the months)
+        assert!(c.nests.len() >= nests_before + 2, "the region is ceded");
+    }
+
+    #[test]
+    fn the_deep_codex_wants_living_proof() {
+        let mut c = Campaign::new(63);
+        c.research.completed.insert(Project::Interrogation);
+        c.hellsteel = 50;
+        c.brimstone = 50;
+        assert_eq!(
+            c.start_research(Project::StoneHide),
+            Err(GeoError::PrerequisiteMissing),
+            "no living gargoyle, no stone hide"
+        );
+        c.codex_captured.insert(ods_sim::units::Species::Gargoyle);
+        c.start_research(Project::StoneHide).unwrap();
+    }
+
+    #[test]
+    fn hell_strikes_chords_after_month_two() {
+        // Somewhere in a dozen seeds, the director lands two rifts on the
+        // same day — the collision is scheduled, not accidental.
+        let mut found = false;
+        for seed in 0..12u64 {
+            let mut rng = ods_sim::SimRng::from_seed(seed);
+            let plan =
+                director::plan_month(&mut rng, 4, 0, &director::Mood::default());
+            for p in &plan {
+                if plan.iter().filter(|q| q.day == p.day).count() >= 2 {
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "convergences appear in hell's plans");
     }
 
     #[test]

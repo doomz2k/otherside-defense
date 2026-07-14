@@ -20,7 +20,7 @@ pub use campaign::{
     Fallen, FINAL_ASSAULT_BRIMSTONE, GeoError, GeoEvent, MissionKind, MissionToken,
     OCCULTIST_HIRE_COST, PANIC_BREAKPOINT, Phobia, Prisoners, Quirk, SOLDIER_HIRE_COST, Soldier,
     Relic, Focus, Nemesis, SQUAD_NAMES, SkyHuntOutcome, SoldierStats, Sortie,
-    Calling, calling_from, Deeds,
+    Calling, calling_from, Deeds, Posture, Sleeper, ZEPPELIN_COST, MAX_ZEPPELINS,
 };
 pub use director::{Nest, Rift, RiftKind};
 pub use geography::Region;
