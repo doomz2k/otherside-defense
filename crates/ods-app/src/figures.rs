@@ -93,6 +93,13 @@ pub fn blueprint(species: Species) -> &'static [PartBox] {
                 pb(RightArm, (3.0, -1.0, 4.8), (4.2, 1.0, 7.6), ARMOR_DARK),
                 pb(LeftArm, (-4.2, -1.0, 4.0), (-3.0, 1.2, 4.8), GUNMETAL),
                 pb(RightArm, (3.0, -1.0, 4.0), (4.2, 1.2, 4.8), GUNMETAL),
+                // Field kit: backpack, belt pouches, knee guards, sigil.
+                pb(Torso, (-2.3, -2.2, 6.0), (2.3, -1.5, 8.6), ARMOR_DARK),
+                pb(Torso, (-1.8, 1.4, 4.9), (-0.6, 1.9, 5.8), GUNMETAL),
+                pb(Torso, (0.6, 1.4, 4.9), (1.8, 1.9, 5.8), GUNMETAL),
+                pb(Torso, (-0.6, 1.9, 6.6), (0.6, 2.1, 7.5), GOLD),
+                pb(LeftLeg, (-2.5, 1.1, 3.2), (-0.6, 1.5, 4.2), ARMOR_DARK),
+                pb(RightLeg, (0.6, 1.1, 3.2), (2.5, 1.5, 4.2), ARMOR_DARK),
                 // Helmet: skull, brim, visor slit, crest.
                 pb(Head, (-1.6, -1.6, 9.0), (1.6, 1.6, 11.4), ARMOR),
                 pb(Head, (-1.9, -1.9, 9.0), (1.9, 1.9, 9.6), ARMOR_DARK),
@@ -530,6 +537,11 @@ fn push_unit(
     let vitality = (unit.health.max(0) as f32 / unit.health_max.max(1) as f32).clamp(0.0, 1.0);
     let drain = 1.0 - 0.70 * fall;
 
+    // The fine carve: every tagged box is rasterized into one cell grid,
+    // then only the exposed shell is meshed. Ten times the grain of the
+    // old slabs, still animated per frame.
+    let mut grid: std::collections::HashMap<(i16, i16, i16), [f32; 4]> =
+        std::collections::HashMap::new();
     for part in blueprint(unit.species) {
         // Weapons fall from unconscious hands.
         if !unit.conscious && part.part == BodyPart::Weapon {
@@ -587,9 +599,127 @@ fn push_unit(
                 _ => {}
             }
         }
-        let min = part.min + offset;
-        let max = part.max + offset;
-        push_box_placed(vertices, indices, min, max, color, &place, &turn_normal);
+        rasterize_box(&mut grid, part.min + offset, part.max + offset, color);
+    }
+    emit_shell(vertices, indices, &grid, unit.id.0, &place, &turn_normal);
+}
+
+/// Figure-space voxel cell size: the fine grain figures are carved at.
+/// A tile is 16 units across; at 0.6 a soldier is ~2000 exposed cells.
+const CELL: f32 = 0.6;
+
+/// Carve one tagged box into the figure's cell grid. Corners are
+/// beveled away on chunky boxes so slabs read as carved volumes, and
+/// every cell keeps the color of the LAST box that claimed it —
+/// blueprint order is paint order.
+fn rasterize_box(
+    grid: &mut std::collections::HashMap<(i16, i16, i16), [f32; 4]>,
+    min: Vec3,
+    max: Vec3,
+    color: [f32; 4],
+) {
+    let dims = max - min;
+    // Bevel only what has meat: thin plates keep their edges.
+    let bevel = if dims.min_element() >= 1.8 { 0.45f32 } else { 0.0 };
+    let lo = (min / CELL).floor().as_ivec3();
+    let hi = (max / CELL).ceil().as_ivec3();
+    for z in lo.z..hi.z {
+        for y in lo.y..hi.y {
+            for x in lo.x..hi.x {
+                let center = Vec3::new(
+                    (x as f32 + 0.5) * CELL,
+                    (y as f32 + 0.5) * CELL,
+                    (z as f32 + 0.5) * CELL,
+                );
+                // The cell must genuinely overlap the box...
+                let c0 = center - Vec3::splat(CELL * 0.5);
+                let c1 = center + Vec3::splat(CELL * 0.5);
+                if c1.x <= min.x || c0.x >= max.x || c1.y <= min.y || c0.y >= max.y
+                    || c1.z <= min.z || c0.z >= max.z
+                {
+                    continue;
+                }
+                // ...and sit inside the rounded volume (the bevel).
+                if bevel > 0.0 {
+                    let q = center.clamp(min + Vec3::splat(bevel), max - Vec3::splat(bevel));
+                    if (center - q).length() > bevel {
+                        continue;
+                    }
+                }
+                grid.insert((x as i16, y as i16, z as i16), color);
+            }
+        }
+    }
+}
+
+/// Emit every exposed cell face, grained and shaded so the shell reads
+/// as carved voxel work instead of flat plastic.
+fn emit_shell(
+    vertices: &mut Vec<LitVertex>,
+    indices: &mut Vec<u32>,
+    grid: &std::collections::HashMap<(i16, i16, i16), [f32; 4]>,
+    seed: u32,
+    place: &impl Fn(Vec3) -> Vec3,
+    turn_normal: &impl Fn([f32; 3]) -> [f32; 3],
+) {
+    let grain = |c: (i16, i16, i16)| -> f32 {
+        let mut h = seed
+            .wrapping_mul(747796405)
+            .wrapping_add(c.0 as u32)
+            .wrapping_mul(374761393)
+            .wrapping_add(c.1 as u32)
+            .wrapping_mul(668265263)
+            .wrapping_add(c.2 as u32)
+            .wrapping_mul(2654435761);
+        h ^= h >> 15;
+        // ±6% brightness: cloth weave, worn steel, scarred hide.
+        0.94 + 0.12 * (((h >> 8) & 255) as f32 / 255.0)
+    };
+    for (&cell, &base) in grid {
+        let g = grain(cell);
+        // Light falls from above: feet in shadow, crown lit.
+        let height = (cell.2 as f32 * CELL / 14.0).clamp(0.0, 1.0);
+        let shade = g * (0.86 + 0.18 * height);
+        let color = [base[0] * shade, base[1] * shade, base[2] * shade, base[3]];
+        let lo = Vec3::new(cell.0 as f32, cell.1 as f32, cell.2 as f32) * CELL;
+        let hi = lo + Vec3::splat(CELL);
+        for d in 0..3usize {
+            for front in [true, false] {
+                let neighbor = {
+                    let mut n = [cell.0, cell.1, cell.2];
+                    n[d] += if front { 1 } else { -1 };
+                    (n[0], n[1], n[2])
+                };
+                if grid.contains_key(&neighbor) {
+                    continue; // buried face
+                }
+                let u = (d + 1) % 3;
+                let v = (d + 2) % 3;
+                let mut normal = [0.0f32; 3];
+                normal[d] = if front { 1.0 } else { -1.0 };
+                let normal = turn_normal(normal);
+                let plane = if front { hi[d] } else { lo[d] };
+                let corner = |cu: f32, cv: f32| -> Vec3 {
+                    let mut p = Vec3::ZERO;
+                    p[d] = plane;
+                    p[u] = cu;
+                    p[v] = cv;
+                    place(p)
+                };
+                let (p00, p10, p11, p01) = (
+                    corner(lo[u], lo[v]),
+                    corner(hi[u], lo[v]),
+                    corner(hi[u], hi[v]),
+                    corner(lo[u], hi[v]),
+                );
+                let first = vertices.len() as u32;
+                let quad = if front { [p00, p10, p11, p01] } else { [p00, p01, p11, p10] };
+                for p in quad {
+                    vertices.push(LitVertex { position: p.to_array(), normal, color });
+                }
+                indices.extend([0, 1, 2, 0, 2, 3].map(|k| first + k));
+            }
+        }
     }
 }
 
@@ -635,48 +765,6 @@ pub fn build_skirt(min_tile: IVec3, max_tile: IVec3, seed: u64) -> (Vec<LitVerte
         slab(x1 - 1.0, a, x1 + hang, b, hash(-2, ty));
     }
     (vertices, indices)
-}
-
-/// A box run through an arbitrary placement transform — the rotated,
-/// toppled, squashed boxes figures are made of.
-fn push_box_placed(
-    vertices: &mut Vec<LitVertex>,
-    indices: &mut Vec<u32>,
-    min: Vec3,
-    max: Vec3,
-    color: [f32; 4],
-    place: &impl Fn(Vec3) -> Vec3,
-    turn_normal: &impl Fn([f32; 3]) -> [f32; 3],
-) {
-    for d in 0..3usize {
-        let u = (d + 1) % 3;
-        let v = (d + 2) % 3;
-        for front in [true, false] {
-            let mut normal = [0.0f32; 3];
-            normal[d] = if front { 1.0 } else { -1.0 };
-            let normal = turn_normal(normal);
-            let plane = if front { max[d] } else { min[d] };
-            let corner = |cu: f32, cv: f32| -> Vec3 {
-                let mut p = Vec3::ZERO;
-                p[d] = plane;
-                p[u] = cu;
-                p[v] = cv;
-                place(p)
-            };
-            let (p00, p10, p11, p01) = (
-                corner(min[u], min[v]),
-                corner(max[u], min[v]),
-                corner(max[u], max[v]),
-                corner(min[u], max[v]),
-            );
-            let first = vertices.len() as u32;
-            let quad = if front { [p00, p10, p11, p01] } else { [p00, p01, p11, p10] };
-            for p in quad {
-                vertices.push(LitVertex { position: p.to_array(), normal, color });
-            }
-            indices.extend([0, 1, 2, 0, 2, 3].map(|k| first + k));
-        }
-    }
 }
 
 fn push_box(
