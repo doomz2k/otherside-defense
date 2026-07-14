@@ -180,6 +180,8 @@ pub struct Core {
     pub music_volume: f32,
     pub sfx_volume: f32,
     pub ambient_volume: f32,
+    /// UI zoom factor, applied to the egui context.
+    pub ui_scale: f32,
     pub cam_sense: f32,
     /// Battle pacing multiplier: how fast figures glide (0.5..=3).
     pub anim_speed: f32,
@@ -206,6 +208,8 @@ pub struct Core {
     pub event_cam: bool,
     /// The controls overlay ([F1]).
     pub show_help: bool,
+    /// Gold flash on the sidebar clock when the world auto-pauses.
+    pub pause_flash: f32,
     pub selected_region: Option<Region>,
     globe_built_for: Option<Option<Region>>,
     /// The title screen's frozen skirmish, slowly orbited.
@@ -300,6 +304,7 @@ impl Core {
             music_volume: cfg.music_volume,
             sfx_volume: cfg.sfx_volume,
             ambient_volume: cfg.ambient_volume,
+            ui_scale: cfg.ui_scale,
             cam_sense: cfg.cam_sense,
             anim_speed: cfg.anim_speed,
             binds,
@@ -315,6 +320,7 @@ impl Core {
             geo_swing: None,
             event_cam: cfg.event_cam,
             show_help: false,
+            pause_flash: 0.0,
             selected_region: None,
             globe_built_for: None,
             menu_built: false,
@@ -337,6 +343,7 @@ impl Core {
             music_volume: self.music_volume,
             sfx_volume: self.sfx_volume,
             ambient_volume: self.ambient_volume,
+            ui_scale: self.ui_scale,
             cam_sense: self.cam_sense,
             anim_speed: self.anim_speed,
             pixel_scale: self.renderer.pixel_scale(),
@@ -557,6 +564,13 @@ impl Core {
         self.last_frame = Instant::now();
         self.clock = (self.clock + dt) % 3600.0;
         self.fade = (self.fade - dt * 2.2).max(0.0);
+        self.pause_flash = (self.pause_flash - dt).max(0.0);
+        if (self.egui_ctx.zoom_factor() - self.ui_scale).abs() > 0.01 {
+            self.egui_ctx.set_zoom_factor(self.ui_scale.clamp(0.8, 1.4));
+        }
+        if let Some(a) = self.audio.as_mut() {
+            a.tick(dt);
+        }
 
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let ctx = self.egui_ctx.clone();
@@ -643,6 +657,7 @@ impl Core {
                                 // Something happened: the clock waits.
                                 self.geo_speed = 0;
                                 self.day_progress = 0.0;
+                                self.pause_flash = 1.2;
                                 if let Some(a) = &self.audio {
                                     a.play(audio::Sound::PauseDrum);
                                 }
@@ -885,6 +900,13 @@ impl Core {
                         .weak()
                         .small(),
                 );
+                ui.label("UI scale");
+                if ui
+                    .add(egui::Slider::new(&mut self.ui_scale, 0.8..=1.4).show_value(false))
+                    .changed()
+                {
+                    self.save_config();
+                }
 
                 ui.separator();
                 ui.label("Pixel scale");

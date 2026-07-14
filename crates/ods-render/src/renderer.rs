@@ -356,6 +356,66 @@ fn fs_main(in: VsOut) -> FsOut {
 }
 "#;
 
+/// The battlefield's sky: a vertical gradient keyed to the sun's height —
+/// dusty amber daylight, near-black indigo night with stars — so the field
+/// sits under weather instead of floating in front of nothing.
+const SKY_SHADER: &str = r#"
+struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
+@group(0) @binding(0) var<uniform> camera: Camera;
+
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
+    var out: VsOut;
+    let x = f32(i32(i & 1u) * 4 - 1);
+    let y = f32(i32(i >> 1u) * 4 - 1);
+    out.clip = vec4<f32>(x, y, 1.0, 1.0);
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (y + 1.0) * 0.5);
+    return out;
+}
+
+fn sky_hash(p: vec2<i32>) -> f32 {
+    var h: u32 = u32(p.x) * 374761393u + u32(p.y) * 668265263u;
+    h = (h ^ (h >> 13u)) * 1274126177u;
+    return f32((h >> 8u) & 65535u) / 65535.0;
+}
+
+struct FsOut {
+    @location(0) color: vec4<f32>,
+    @location(1) glow: vec4<f32>,
+};
+
+@fragment
+fn fs_main(in: VsOut) -> FsOut {
+    let day = clamp(camera.sun.z * 1.7, 0.0, 1.0);
+    // Day: dusty amber over hazy grey. Night: indigo over pit-black.
+    let day_top = vec3<f32>(0.32, 0.30, 0.26);
+    let day_bot = vec3<f32>(0.16, 0.15, 0.14);
+    let night_top = vec3<f32>(0.045, 0.045, 0.10);
+    let night_bot = vec3<f32>(0.012, 0.012, 0.03);
+    let top = mix(night_top, day_top, day);
+    let bot = mix(night_bot, day_bot, day);
+    var color = mix(bot, top, in.uv.y);
+    // Stars, only when the day has truly gone.
+    if day < 0.3 {
+        let cell = vec2<i32>(floor(in.clip.xy / 3.0));
+        let h = sky_hash(cell);
+        if h > 0.987 {
+            let tw = 0.6 + 0.4 * sin(camera.sun.w * (1.0 + fract(h * 43.0) * 2.0) + h * 30.0);
+            color += vec3<f32>(0.7, 0.75, 0.9) * (h - 0.987) / 0.013 * tw * (1.0 - day / 0.3);
+        }
+    }
+    var out: FsOut;
+    out.color = vec4<f32>(color, 1.0);
+    out.glow = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    return out;
+}
+"#;
+
 /// One-pass diamond blur over the glow buffer: cheap, soft, and enough —
 /// the bloom is a candle's halo, not an HDR pipeline.
 const BLUR_SHADER: &str = r#"
@@ -527,6 +587,7 @@ pub struct Renderer {
     lit_pipeline: wgpu::RenderPipeline,
     globe_pipeline: wgpu::RenderPipeline,
     starfield_pipeline: wgpu::RenderPipeline,
+    sky_pipeline: wgpu::RenderPipeline,
     chunk_meshes: HashMap<IVec3, GpuMesh>,
     unit_mesh: Option<GpuMesh>,
     overlay_mesh: Option<GpuMesh>,
@@ -938,6 +999,38 @@ impl Renderer {
             cache: None,
         });
 
+        let sky_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sky-shader"),
+            source: wgpu::ShaderSource::Wgsl(SKY_SHADER.into()),
+        });
+        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sky-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &sky_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &sky_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(config.format.into()), Some(config.format.into())],
+            }),
+            multiview: None,
+            cache: None,
+        });
+
         let ui_renderer = egui_wgpu::Renderer::new(
             &device,
             config.format,
@@ -970,6 +1063,7 @@ impl Renderer {
             lit_pipeline,
             globe_pipeline,
             starfield_pipeline,
+            sky_pipeline,
             chunk_meshes: HashMap::new(),
             unit_mesh: None,
             overlay_mesh: None,
@@ -1254,9 +1348,14 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            // Space first: the nebula backdrop paints behind the globe.
+            // Space first: the nebula backdrop paints behind the globe —
+            // and the battlefield gets a sky of its own.
             if self.globe_mesh.is_some() {
                 pass.set_pipeline(&self.starfield_pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            } else if !self.chunk_meshes.is_empty() {
+                pass.set_pipeline(&self.sky_pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 pass.draw(0..3, 0..1);
             }
@@ -1500,6 +1599,7 @@ mod shader_tests {
             ("globe", super::GLOBE_SHADER),
             ("starfield", super::STARFIELD_SHADER),
             ("blur", super::BLUR_SHADER),
+            ("sky", super::SKY_SHADER),
         ] {
             let module = naga::front::wgsl::parse_str(src)
                 .unwrap_or_else(|e| panic!("{name} shader fails to parse: {e}"));

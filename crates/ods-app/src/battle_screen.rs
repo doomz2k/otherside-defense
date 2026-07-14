@@ -94,6 +94,10 @@ pub struct BattleScreen {
     look_target: Option<Vec3>,
     /// (fx_clock stamp, unit) of the last click, for double-click centering.
     last_click: (f32, Option<UnitId>),
+    /// White impact flash, seconds remaining.
+    flash: f32,
+    /// The end-turn guard is asking about unspent TU.
+    confirm_end: bool,
     /// The field's standing soundscape, chosen once from the ground.
     pub ambient: crate::audio::Ambient,
     /// How hot the field is right now (0 quiet .. 1 open contact).
@@ -132,6 +136,8 @@ impl BattleScreen {
             yaw_target: ods_render::ISO_YAW,
             look_target: None,
             last_click: (0.0, None),
+            flash: 0.0,
+            confirm_end: false,
             ambient: crate::audio::Ambient::Temperate,
             contact: 0.0,
             log: vec!["The squad deploys.".to_string()],
@@ -799,6 +805,20 @@ impl BattleScreen {
             );
         }
 
+        // The impact flash: one white blink on the big detonations.
+        if self.flash > 0.0 {
+            let a = (self.flash / 0.16 * 70.0).min(70.0) as u8;
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Background,
+                egui::Id::new("impact-flash"),
+            ));
+            painter.rect_filled(
+                ctx.viewport_rect(),
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(255, 245, 225, a),
+            );
+        }
+
         if let Some((text, ttl, total)) = &self.banner {
             // Slide in hard, settle, fade out — in the pixel banner face.
             let alpha = (ttl.min(0.6) / 0.6 * 255.0) as u8;
@@ -986,6 +1006,42 @@ impl BattleScreen {
             }
         }
 
+        // The end-turn guard's question.
+        if self.confirm_end {
+            let idle = self
+                .battle
+                .units
+                .iter()
+                .filter(|u| {
+                    u.is_active() && u.side == Side::Order && !u.civilian && u.tu * 2 > u.tu_max
+                })
+                .count();
+            let mut end = false;
+            let mut stay = false;
+            egui::Window::new("End the turn?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 40.0])
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "{idle} soldier(s) still hold more than half their time units."
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui.button("End the turn").clicked() {
+                            end = true;
+                        }
+                        if ui.button("Stand fast").clicked() {
+                            stay = true;
+                        }
+                    });
+                });
+            if end {
+                self.end_turn(renderer, audio);
+            } else if stay {
+                self.confirm_end = false;
+            }
+        }
+
         if let Some(winner) = self.battle.winner {
             egui::Window::new("Battle over")
                 .collapsible(false)
@@ -1043,6 +1099,25 @@ impl BattleScreen {
         if self.battle.winner.is_some() || self.demon_turn_pending {
             return;
         }
+        // The guard: half the squad's legs still under them? Ask once.
+        if !self.confirm_end {
+            let idle = self
+                .battle
+                .units
+                .iter()
+                .filter(|u| {
+                    u.is_active()
+                        && u.side == Side::Order
+                        && !u.civilian
+                        && u.tu * 2 > u.tu_max
+                })
+                .count();
+            if idle >= 2 {
+                self.confirm_end = true;
+                return;
+            }
+        }
+        self.confirm_end = false;
         let fled = ai::run_civilian_moves(&mut self.battle);
         self.consume(renderer, audio, &fled);
         match self.battle.perform(Action::EndTurn) {
@@ -1273,9 +1348,20 @@ impl BattleScreen {
                     Side::Order => "THE ORDER MOVES",
                     Side::Demons => "THE OTHERSIDE STIRS",
                 };
+                // The turn has a voice: a ready click for ours, a low
+                // drum for theirs.
+                play(match side {
+                    Side::Order => Sound::Click,
+                    Side::Demons => Sound::PauseDrum,
+                });
                 self.banner = Some((text.to_string(), 1.1, 1.1));
             }
             Event::BattleOver { winner } => {
+                // The camera steps back to take in the whole field.
+                let (bmin, bmax) = self.battle.tiles.bounds();
+                let center = ((bmin + bmax).as_vec3() / 2.0) * TILE_VOXELS as f32;
+                self.look_target = Some(Vec3::new(center.x, center.y, 0.0));
+                self.zoom_target = (self.zoom_target * 1.35).min(3200.0);
                 let (text, sound) = match winner {
                     Side::Order => ("THE FIELD IS OURS", Sound::Victory),
                     Side::Demons => ("THE LINE BREAKS", Sound::Defeat),
@@ -1324,6 +1410,7 @@ impl BattleScreen {
                 });
                 self.spawn_debris(p + Vec3::Z * 4.0 * VS_F, [0.55, 0.42, 0.28, 0.9], 8);
                 self.shake += 5.0;
+                self.flash = 0.16;
                 self.emit(audio, Sound::Blast, p);
             }
             Event::TerrainDestroyed { center, .. } => {
@@ -1529,13 +1616,14 @@ impl BattleScreen {
 
         // The glide: visual positions chase the sim tiles, and the walk
         // cycle beats while they do.
-        let mut moved = false;
+        let mut moved = true; // figures breathe: rebuilt every frame
         for u in &self.battle.units {
             let target = (u.tile * TILE_VOXELS).as_vec3()
                 + Vec3::new(HALF_TILE, HALF_TILE, ods_sim::scenario::GROUND_TOP as f32);
             let entry = self.visual.entry(u.id.0).or_insert(target);
             let delta = target - *entry;
             let state = self.anim.entry(u.id.0).or_default();
+            state.breath = self.fx_clock;
             if state.recoil > 0.0 {
                 state.recoil = (state.recoil - dt).max(0.0);
                 moved = true;
@@ -1574,8 +1662,14 @@ impl BattleScreen {
         }
         self.floaters.retain(|f| f.age < f.life);
 
-        // When the squad runs low on blood you hear your own.
+        // When the squad runs low on blood you hear your own — and the
+        // first crossing gets a warning all its own.
         if self.battle.winner.is_none() && self.squad_vitality() < 0.4 {
+            if self.heart_timer == 0.0
+                && let Some(a) = audio
+            {
+                a.play(Sound::Dread);
+            }
             self.heart_timer -= dt;
             if self.heart_timer <= 0.0 {
                 self.heart_timer = 1.15;
@@ -1634,6 +1728,7 @@ impl BattleScreen {
     /// Advance effect ages and camera shake; rebuild the fx mesh.
     fn update_fx(&mut self, dt: f32, renderer: &mut Renderer) {
         self.fx_clock += dt;
+        self.flash = (self.flash - dt).max(0.0);
         self.shake *= (-6.0 * dt).exp();
         if self.shake < 0.05 {
             self.shake = 0.0;
@@ -1715,6 +1810,52 @@ impl BattleScreen {
                     ],
                     color,
                 );
+            }
+        }
+
+        // The selection ring: a slow-turning dashed circle at the chosen
+        // soldier's feet, breathing on the clock.
+        if let Some(id) = self.selected {
+            let u = self.battle.unit(id);
+            if u.is_active() {
+                let c = (u.tile * TILE_VOXELS).as_vec3()
+                    + Vec3::new(HALF_TILE, HALF_TILE, scenario::GROUND_TOP as f32 + 0.6);
+                let r = (7.0 + 0.5 * (self.fx_clock * 3.0).sin()) * VS_F;
+                for k in 0..8 {
+                    let a0 = self.fx_clock * 0.9 + k as f32 * std::f32::consts::TAU / 8.0;
+                    let a1 = a0 + 0.42;
+                    let (p0, p1) = (
+                        c + Vec3::new(a0.cos(), a0.sin(), 0.0) * r,
+                        c + Vec3::new(a1.cos(), a1.sin(), 0.0) * r,
+                    );
+                    let perp = (p1 - p0).cross(Vec3::Z).normalize_or(Vec3::X) * (0.6 * VS_F);
+                    push_quad(
+                        &mut verts,
+                        &mut indices,
+                        [p0 - perp, p0 + perp, p1 + perp, p1 - perp],
+                        [1.0, 0.85, 0.3, 0.8],
+                    );
+                }
+            }
+        }
+        // The hover path breathes: a pulse runs shooter-to-destination.
+        if let Some((path, _)) = &self.hover_path {
+            let head = (self.fx_clock * 2.2) % 1.0;
+            for (i, tile) in path.iter().enumerate() {
+                let along = i as f32 / path.len().max(1) as f32;
+                let d = (along - head).abs();
+                let bright = (1.0 - d * 4.0).clamp(0.0, 1.0);
+                if bright > 0.05 {
+                    let c = (*tile * TILE_VOXELS).as_vec3()
+                        + Vec3::new(HALF_TILE, HALF_TILE, scenario::GROUND_TOP as f32 + 0.7);
+                    push_flat_square(
+                        &mut verts,
+                        &mut indices,
+                        c,
+                        2.2 * VS_F,
+                        [0.4, 0.95, 1.0, 0.5 * bright],
+                    );
+                }
             }
         }
 
@@ -1836,6 +1977,21 @@ impl BattleScreen {
                 rect.max.y - (u.tile.y - min.y) as f32 * px - px / 2.0,
             );
             paint.circle_filled(p, px * 0.45, color);
+        }
+        // Where the camera stands: a gold brace on the table map.
+        {
+            let t = self.camera.target / TILE_VOXELS as f32;
+            let p = egui::pos2(
+                rect.min.x + (t.x - min.x as f32) * px,
+                rect.max.y - (t.y - min.y as f32) * px,
+            );
+            let half = (self.camera.distance * 0.42 / TILE_VOXELS as f32) * px * 0.9;
+            paint.rect_stroke(
+                egui::Rect::from_center_size(p, egui::vec2(half * 2.0, half * 1.4)),
+                0.0,
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(220, 180, 90)),
+                egui::StrokeKind::Middle,
+            );
         }
         // Ghost intel: hollow rings where lost demons were last seen.
         for (&id, &tile) in &self.battle.last_known {
@@ -2035,6 +2191,20 @@ impl BattleScreen {
                 push_tile_quad(&mut verts, &mut indices, u.tile, [0.2, 1.0, 0.35, 0.35]);
                 // The soldier's own cursor box, in the Order's gold.
                 push_wire_box(&mut verts, &mut indices, u.tile, [0.95, 0.85, 0.3, 0.9]);
+                // The facing wedge: where their reaction arc looks.
+                let c = (u.tile * TILE_VOXELS).as_vec3()
+                    + Vec3::new(HALF_TILE, HALF_TILE, scenario::GROUND_TOP as f32 + 0.5);
+                let f = Vec3::new(u.facing.x as f32, u.facing.y as f32, 0.0)
+                    .normalize_or(Vec3::X);
+                let perp = f.cross(Vec3::Z) * (4.5 * VS_F);
+                let tip = c + f * (11.0 * VS_F);
+                let base = c + f * (6.0 * VS_F);
+                push_quad(
+                    &mut verts,
+                    &mut indices,
+                    [base - perp, base + perp, tip, tip],
+                    [1.0, 0.9, 0.4, 0.35],
+                );
             }
         }
         // Overhead markers, the original's colored language: a gold arrow

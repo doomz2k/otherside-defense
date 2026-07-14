@@ -118,6 +118,46 @@ impl Core {
                 });
                 ui.add_space(12.0);
 
+                // Continue: straight back into the newest record on disk.
+                let newest = {
+                    let mut paths = vec![
+                        SAVE_PATH.to_string(),
+                        crate::AUTOSAVE_PATH.to_string(),
+                    ];
+                    for slot in 1..=3usize {
+                        paths.push(crate::slot_path(slot));
+                        paths.push(crate::autosave_history_path(slot));
+                    }
+                    paths
+                        .into_iter()
+                        .filter_map(|p| {
+                            let m = std::fs::metadata(&p).ok()?.modified().ok()?;
+                            Some((p, m))
+                        })
+                        .max_by_key(|(_, m)| *m)
+                        .map(|(p, _)| p)
+                };
+                if let Some(path) = newest
+                    && ui
+                        .button(egui::RichText::new("Continue the war").size(18.0).strong())
+                        .clicked()
+                {
+                    match std::fs::read_to_string(&path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|s| Campaign::load_from_str(&s).map_err(|e| e.to_string()))
+                    {
+                        Ok(c) => {
+                            self.log = vec![format!(
+                                "The war resumes: month {}, day {}, {}k banked.",
+                                c.month, c.day, c.funds
+                            )];
+                            self.campaign = Some(c);
+                            self.enter_geoscape();
+                        }
+                        Err(e) => self.status = Some(format!("load failed: {e}")),
+                    }
+                }
+                ui.add_space(6.0);
                 if ui.button(egui::RichText::new("New campaign").size(18.0)).clicked() {
                     let mut c = Campaign::new_with(seed_from_clock(), self.difficulty_choice);
                     c.ironman = self.ironman_choice;
@@ -218,7 +258,19 @@ impl Core {
             ui.add_space(8.0);
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new(format!("Month {}", c.month)).size(16.0));
-                ui.label(egui::RichText::new(format!("Day {}", c.day)).size(30.0).strong());
+                let day_color = if self.pause_flash > 0.0 {
+                    // The clock just stopped for something: it says so.
+                    let t = (self.pause_flash * 6.0).sin().abs();
+                    egui::Color32::from_rgb(200 + (t * 55.0) as u8, 170, 80)
+                } else {
+                    egui::Color32::from_rgb(214, 202, 178)
+                };
+                ui.label(
+                    egui::RichText::new(format!("Day {}", c.day))
+                        .size(30.0)
+                        .strong()
+                        .color(day_color),
+                );
                 ui.label(egui::RichText::new(c.difficulty.name()).weak().small());
             });
             ui.add_space(6.0);
@@ -1651,7 +1703,8 @@ fn chapterhouse_panel(
                         {
                             log.push(format!("cannot research: {e:?}"));
                         }
-                        ui.label(format!("{} ({}pts{needs})", project.name(), project.cost()));
+                        ui.label(format!("{} ({}pts{needs})", project.name(), project.cost()))
+                            .on_hover_text(project_lore(project.name()));
                     });
                 }
 
@@ -1681,7 +1734,8 @@ fn chapterhouse_panel(
                         {
                             log.push(format!("cannot make: {e:?}"));
                         }
-                        ui.label(format!("{} ({}pts, {brim}🜏 {steel}⛓)", item.name(), item.cost()));
+                        ui.label(format!("{} ({}pts, {brim}🜏 {steel}⛓)", item.name(), item.cost()))
+                            .on_hover_text(item_lore(item.name()));
                     });
                 }
     // Anything that changed the halls redraws the diorama.
@@ -1850,5 +1904,39 @@ pub(crate) fn log_color(line: &str) -> egui::Color32 {
         egui::Color32::from_rgb(200, 200, 160)
     } else {
         egui::Color32::from_rgb(200, 190, 170)
+    }
+}
+
+
+/// What the scriptorium would tell you about a project, by its name.
+fn project_lore(name: &str) -> &'static str {
+    match name {
+        "Rift Augury" => "Teach the augur arrays to smell reality thinning: rifts are detected sooner and more often.",
+        "Interrogation" => "Bound demons can be made to talk. What they say sharpens detection and opens darker questions.",
+        "Blessed Arms" => "Consecrate the armoury's powder and shot: every issued weapon bites harder.",
+        "Hellsteel Plate" => "Armor beaten from the enemy's own hide. Every soldier deploys tougher.",
+        "Hellfire Lance" => "A forged siege weapon that fires what hell fires back. The workshop can build them once this is known.",
+        "Escort Gondola" => "Guns and armor for the zeppelin's gondola: sky-hunts are met with volleys instead of luck.",
+        "The Herald's Confession" => "The captured overseer breaks. What it confesses points at the throne behind the rifts.",
+        "The Name of the Enemy" => "The last question. Knowing the Name opens the way to the final assault.",
+        _ => "The occultists will not say more until the work is done.",
+    }
+}
+
+/// What the workshop foreman would tell you about an order, by its name.
+fn item_lore(name: &str) -> &'static str {
+    match name {
+        "Hellfire Charges" => "Four thrown charges for the squad stores. The answer to walls, packs, and doubt.",
+        "Field Dressings" => "Four dressings for the stores: staunched wounds, soldiers who come home.",
+        "Trade Arms" => "Rifles for the open market. Turns bench time into treasury.",
+        "Forge Lance" => "One hellfire lance, if the research is known. A soldier carrying one IS the plan.",
+        "Hellsteel Limb" => "A replacement for what the war took. Fitted in the infirmary.",
+        "Flesh Graft" => "A living replacement, better than the original — and it whispers to its wearer.",
+        "Mount Trophy" => "A slain breed mounted in the halls: the garrison remembers who wins.",
+        "Forge Arbalest" => "The silent option: a consecrated arbalest that raises no alarm.",
+        "Forge Censer" => "A fire-throwing censer. Burns cover, burns fog, burns them.",
+        "Forge Ram Hammer" => "A breaching hammer that cracks masonry through the demon it hits.",
+        "Forge Salt Mortar" => "Salt-shot that stuns instead of kills: for the ones wanted alive.",
+        _ => "The benches know their business.",
     }
 }

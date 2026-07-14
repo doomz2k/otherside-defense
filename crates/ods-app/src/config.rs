@@ -18,6 +18,9 @@ pub struct Config {
     pub sfx_volume: f32,
     #[serde(default = "one")]
     pub ambient_volume: f32,
+    /// UI zoom factor, 0.8..=1.4.
+    #[serde(default = "one")]
+    pub ui_scale: f32,
     pub cam_sense: f32,
     pub anim_speed: f32,
     pub pixel_scale: u32,
@@ -37,6 +40,7 @@ impl Default for Config {
             music_volume: 1.0,
             sfx_volume: 1.0,
             ambient_volume: 1.0,
+            ui_scale: 1.0,
             cam_sense: 1.0,
             anim_speed: 1.0,
             pixel_scale: 3,

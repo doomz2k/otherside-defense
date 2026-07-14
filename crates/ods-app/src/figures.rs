@@ -343,6 +343,8 @@ pub struct AnimState {
     pub walk: f32,
     /// Seconds of fire recoil remaining.
     pub recoil: f32,
+    /// The shared clock, for idle breathing.
+    pub breath: f32,
 }
 
 /// Build the mesh for every visible unit on the field. `visual` overrides
@@ -446,6 +448,9 @@ fn push_unit(
     let moving = unit.is_active() && anim.walk != 0.0;
     if moving {
         feet.z += (anim.walk * 2.0).sin().abs() * 0.35 * vs;
+    } else if unit.is_active() {
+        // Idle breathing: barely there, phase-shifted per figure.
+        feet.z += (anim.breath * 1.4 + unit.id.0 as f32 * 1.7).sin() * 0.10 * vs;
     }
     let swing = if moving { anim.walk.sin() } else { 0.0 };
     let face = Vec3::new(unit.facing.x as f32, unit.facing.y as f32, 0.0).normalize_or(Vec3::X);

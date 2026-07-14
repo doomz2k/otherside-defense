@@ -131,6 +131,9 @@ pub struct Audio {
     /// Round-robin variant pick and the soft limiter's recent-play clock.
     variant: std::cell::Cell<u32>,
     recent: std::cell::RefCell<Vec<std::time::Instant>>,
+    /// Sinks on their way out, and the ramp of the ones coming in.
+    fading: Vec<(Sink, f32)>,
+    ramp: f32,
 }
 
 /// Resample by a pitch factor (linear interpolation — honest enough).
@@ -216,6 +219,8 @@ impl Audio {
             ambient_volume: 1.0,
             variant: std::cell::Cell::new(0),
             recent: std::cell::RefCell::new(Vec::new()),
+            fading: Vec::new(),
+            ramp: 1.0,
         })
     }
 
@@ -245,11 +250,14 @@ impl Audio {
             return;
         }
         if let Some(sink) = self.music_sink.take() {
-            sink.stop();
+            let v = sink.volume();
+            self.fading.push((sink, v));
         }
         if let Some(sink) = self.intense_sink.take() {
-            sink.stop();
+            let v = sink.volume();
+            self.fading.push((sink, v));
         }
+        self.ramp = 0.0; // the incoming track rises from silence
         self.playing = track;
         if let Some(track) = track {
             let data = match track {
@@ -257,7 +265,7 @@ impl Audio {
                 MusicTrack::Warfront => self.warfront.clone(),
             };
             if let Ok(sink) = Sink::try_new(&self.handle) {
-                sink.set_volume(0.5 * self.volume * self.music_volume);
+                sink.set_volume(0.0);
                 sink.append(LoopSource { data, pos: 0 });
                 self.music_sink = Some(sink);
             }
@@ -286,13 +294,14 @@ impl Audio {
             return;
         }
         if let Some(sink) = self.ambient_sink.take() {
-            sink.stop();
+            let v = sink.volume();
+            self.fading.push((sink, v));
         }
         self.ambient_playing = bed;
         if let Some(bed) = bed
             && let Ok(sink) = Sink::try_new(&self.handle)
         {
-            sink.set_volume(0.6 * self.volume * self.ambient_volume * self.ambient_level);
+            sink.set_volume(0.0);
             sink.append(LoopSource { data: Arc::new(synth_ambient(bed)), pos: 0 });
             self.ambient_sink = Some(sink);
         }
@@ -304,6 +313,33 @@ impl Audio {
         if (level - self.ambient_level).abs() > 0.01 {
             self.ambient_level = level;
             self.apply_bus_volumes();
+        }
+    }
+
+    /// Per-frame housekeeping: old tracks fade out, new ones ramp in.
+    pub fn tick(&mut self, dt: f32) {
+        for (sink, v) in &mut self.fading {
+            *v -= dt * 0.8;
+            sink.set_volume(v.max(0.0));
+        }
+        self.fading.retain(|(sink, v)| {
+            if *v <= 0.0 {
+                sink.stop();
+                false
+            } else {
+                true
+            }
+        });
+        if self.ramp < 1.0 {
+            self.ramp = (self.ramp + dt * 0.7).min(1.0);
+        }
+        if let Some(sink) = &self.music_sink {
+            sink.set_volume(0.5 * self.volume * self.music_volume * self.ramp);
+        }
+        if let Some(sink) = &self.ambient_sink {
+            sink.set_volume(
+                0.6 * self.volume * self.ambient_volume * self.ambient_level * self.ramp,
+            );
         }
     }
 
