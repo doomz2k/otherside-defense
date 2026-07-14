@@ -9,13 +9,15 @@ use ods_sim::{TILE_VOXELS, ai, scenario, voxel_to_tile};
 use ods_voxel::{mesh_chunk_capped};
 use winit::keyboard::KeyCode;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::audio::{Audio, Sound};
 
 const VS_F: f32 = ods_sim::VS as f32;
 const HALF_TILE: f32 = TILE_VOXELS as f32 / 2.0;
 const PAN_STEP: f32 = 12.0 * VS_F;
+/// Seconds a figure takes to cross one tile at anim speed 1.
+const STEP_SECS: f32 = 0.22;
 use crate::figures;
 
 /// A transient battlefield effect.
@@ -63,6 +65,13 @@ pub struct BattleScreen {
     visual: HashMap<u32, Vec3>,
     /// Walk phases and recoil per unit — the figures' pulse.
     anim: HashMap<u32, figures::AnimState>,
+    /// The story queue: the sim resolves instantly, but events play out
+    /// here one at a time, at a speed the eye can follow.
+    playback: VecDeque<Event>,
+    /// Seconds until the next queued event fires.
+    playback_wait: f32,
+    /// Tile-by-tile walking routes the figures still owe the eye.
+    waypoints: HashMap<u32, VecDeque<IVec3>>,
     /// Tile under the cursor, plus a cached move preview to it.
     hover: Option<IVec3>,
     hover_path: Option<(Vec<IVec3>, i32)>,
@@ -162,6 +171,9 @@ impl BattleScreen {
             fx_clock: 0.0,
             visual: HashMap::new(),
             anim: HashMap::new(),
+            playback: VecDeque::new(),
+            playback_wait: 0.0,
+            waypoints: HashMap::new(),
             hover: None,
             hover_path: None,
             reachable: Vec::new(),
@@ -203,7 +215,7 @@ impl BattleScreen {
             self.camera.target = self.intro_to;
             return;
         }
-        if self.battle.winner.is_some() || self.demon_turn_pending {
+        if self.battle.winner.is_some() || self.demon_turn_pending || !self.playback.is_empty() {
             return;
         }
         let (origin, dir) = self.camera.screen_ray(self.cursor.0, self.cursor.1, width, height);
@@ -258,6 +270,9 @@ impl BattleScreen {
         if self.intro > 0.0 {
             self.intro = 0.0;
             self.camera.target = self.intro_to;
+        }
+        if !self.playback.is_empty() {
+            return; // the field is telling you what happened; watch
         }
         match code {
             KeyCode::Escape => {
@@ -1395,7 +1410,7 @@ impl BattleScreen {
     }
 
     fn end_turn(&mut self, renderer: &mut Renderer, audio: Option<&Audio>) {
-        if self.battle.winner.is_some() || self.demon_turn_pending {
+        if self.battle.winner.is_some() || self.demon_turn_pending || !self.playback.is_empty() {
             return;
         }
         // The guard: half the squad's legs still under them? Ask once.
@@ -1451,29 +1466,100 @@ impl BattleScreen {
         }
     }
 
-    fn consume(&mut self, renderer: &mut Renderer, audio: Option<&Audio>, events: &[Event]) {
-        for e in events {
-            self.log.push(describe(e, &self.battle));
-            self.spawn_fx(e, audio);
-            // The event camera glances at demon action the squad can see.
-            if self.event_cam
-                && let Event::Fired { unit, target, .. } = e
-                && self.battle.unit(*unit).side == Side::Demons
-            {
-                self.look_target =
-                    Some(self.unit_pos(*target, 0.0) * Vec3::new(1.0, 1.0, 0.0));
-            }
-        }
+    fn consume(&mut self, renderer: &mut Renderer, _audio: Option<&Audio>, events: &[Event]) {
+        // Nothing plays here: events join the story queue and fire one at
+        // a time from `pump_playback`, at a pace the eye can follow.
+        self.playback.extend(events.iter().cloned());
         self.refresh_chunks(renderer);
         self.refresh_scene(renderer);
+    }
+
+    /// One event reaches the screen: log line, effects, camera glance.
+    fn play_one(&mut self, audio: Option<&Audio>, e: &Event) {
+        self.log.push(describe(e, &self.battle));
+        self.spawn_fx(e, audio);
+        // Deaths and knockouts topple the figure only once they're SEEN.
+        match e {
+            Event::Died { unit } | Event::Gibbed { unit } => {
+                self.anim.entry(unit.0).or_default().fall_goal = 1.0;
+            }
+            Event::Subdued { unit } => {
+                self.anim.entry(unit.0).or_default().fall_goal = 0.92;
+            }
+            Event::Awakened { unit }
+            | Event::Taken { unit }
+            | Event::Hatched { unit }
+            | Event::InfectionTurned { unit } => {
+                self.anim.entry(unit.0).or_default().fall_goal = 0.0;
+            }
+            _ => {}
+        }
+        // The event camera glances at demon action the squad can see.
+        if self.event_cam
+            && let Event::Fired { unit, target, .. } = e
+            && self.battle.unit(*unit).side == Side::Demons
+        {
+            self.look_target = Some(self.unit_pos(*target, 0.0) * Vec3::new(1.0, 1.0, 0.0));
+        }
+    }
+
+    /// How long the screen should dwell on an event before the next.
+    /// Action nobody can see passes in a blink.
+    fn dwell(&mut self, e: &Event, visible: &std::collections::HashSet<IVec3>) -> f32 {
+        let seen = |id: &UnitId| {
+            let u = self.battle.unit(*id);
+            u.side == Side::Order || visible.contains(&u.tile)
+        };
+        match e {
+            Event::Moved { unit, from, to, .. } => {
+                let u = self.battle.unit(*unit);
+                if u.side == Side::Order || visible.contains(to) || visible.contains(from) {
+                    self.waypoints.entry(unit.0).or_default().push_back(*to);
+                    STEP_SECS / self.anim_speed.max(0.1)
+                } else {
+                    // Unseen strides happen between blinks.
+                    self.visual.insert(unit.0, Self::tile_feet(*to));
+                    self.waypoints.remove(&unit.0);
+                    0.0
+                }
+            }
+            Event::Fired { unit, .. } => {
+                if seen(unit) { 0.45 / self.anim_speed.max(0.1) } else { 0.05 }
+            }
+            Event::Threw { .. }
+            | Event::Exploded { .. }
+            | Event::WallSmashed { .. }
+            | Event::Terrified { .. } => 0.5 / self.anim_speed.max(0.1),
+            Event::Died { unit } | Event::Gibbed { unit } | Event::Subdued { unit } => {
+                if seen(unit) { 0.55 / self.anim_speed.max(0.1) } else { 0.05 }
+            }
+            Event::Executed { .. }
+            | Event::Riposte { .. }
+            | Event::Panicked { .. }
+            | Event::Berserked { .. } => 0.4 / self.anim_speed.max(0.1),
+            Event::TurnStarted { .. } => 0.25,
+            _ => 0.03,
+        }
     }
 
     // ------------------------------------------------------------------
     // Effects
 
+    /// Where a unit's feet stand on a tile.
+    fn tile_feet(tile: IVec3) -> Vec3 {
+        (tile * TILE_VOXELS).as_vec3()
+            + Vec3::new(HALF_TILE, HALF_TILE, scenario::GROUND_TOP as f32)
+    }
+
+    /// Where the unit IS on screen right now — mid-stride included — so
+    /// effects rise from the figure, not from where the sim already put it.
     fn unit_pos(&self, id: UnitId, z: f32) -> Vec3 {
-        (self.battle.unit(id).tile * TILE_VOXELS).as_vec3()
-            + Vec3::new(HALF_TILE, HALF_TILE, z * VS_F)
+        let feet = self
+            .visual
+            .get(&id.0)
+            .copied()
+            .unwrap_or_else(|| Self::tile_feet(self.battle.unit(id).tile));
+        Vec3::new(feet.x, feet.y, z * VS_F)
     }
 
     fn tile_pos(at: IVec3, z: f32) -> Vec3 {
@@ -1932,18 +2018,42 @@ impl BattleScreen {
             self.refresh_scene(renderer);
         }
 
-        // The glide: visual positions chase the sim tiles, and the walk
-        // cycle beats while they do.
-        let mut moved = true; // figures breathe: rebuilt every frame
+        // The story queue: events fire one at a time, each waiting out
+        // its dwell, so the turn reads as a sequence instead of a blink.
+        let visible = self.battle.visible_tiles(Side::Order);
+        if !self.playback.is_empty() {
+            self.playback_wait -= dt;
+            while self.playback_wait <= 0.0 {
+                let Some(e) = self.playback.pop_front() else { break };
+                self.playback_wait += self.dwell(&e, &visible);
+                self.play_one(audio, &e);
+            }
+            if self.playback.is_empty() {
+                self.playback_wait = 0.0;
+            }
+        }
+
+        // The glide: figures walk their owed waypoints at boots-on-ground
+        // speed, turn to face the way they're going, and topple when a
+        // seen death says so.
         for u in &self.battle.units {
-            let target = (u.tile * TILE_VOXELS).as_vec3()
-                + Vec3::new(HALF_TILE, HALF_TILE, ods_sim::scenario::GROUND_TOP as f32);
-            let entry = self.visual.entry(u.id.0).or_insert(target);
-            let delta = target - *entry;
-            let state = self.anim.entry(u.id.0).or_default();
+            let resting = Self::tile_feet(u.tile);
+            let target = self
+                .waypoints
+                .get(&u.id.0)
+                .and_then(|q| q.front().copied())
+                .map(Self::tile_feet)
+                .unwrap_or(resting);
+            let entry = self.visual.entry(u.id.0).or_insert(resting);
+            let state = self.anim.entry(u.id.0).or_insert_with(|| figures::AnimState {
+                yaw: figures::facing_angle(u),
+                fall: figures::fall_target(u),
+                fall_goal: figures::fall_target(u),
+                ..Default::default()
+            });
             state.breath = self.fx_clock;
-            // Pose eases toward what the state calls for: kneels sink,
-            // deaths crumple instead of popping.
+            // Pose eases toward what the state calls for: kneels sink
+            // rather than pop.
             let want = figures::pose_target(u);
             if state.pose <= 0.0 {
                 state.pose = want;
@@ -1951,27 +2061,50 @@ impl BattleScreen {
                 let rate = if want < state.pose { 6.0 } else { 9.0 };
                 state.pose += (want - state.pose) * (dt * rate).min(1.0);
             }
+            // The topple runs on its own clock: fast enough to hit, slow
+            // enough to watch.
+            state.fall += (state.fall_goal - state.fall) * (dt * 5.0).min(1.0);
             if state.recoil > 0.0 {
                 state.recoil = (state.recoil - dt).max(0.0);
-                moved = true;
             }
-            if delta.length_squared() > 0.05 {
-                *entry += delta * (dt * 9.0 * self.anim_speed).min(1.0);
-                state.walk += dt * 11.0 * self.anim_speed;
-                moved = true;
-            } else {
-                if *entry != target {
+            let delta = target - *entry;
+            let dist = delta.length();
+            let mut heading = None;
+            if dist > 0.01 {
+                // Constant stride, not an exponential snap.
+                let speed = TILE_VOXELS as f32 / STEP_SECS * self.anim_speed.max(0.1);
+                let step = speed * dt;
+                if step >= dist {
                     *entry = target;
-                    moved = true;
+                    if let Some(q) = self.waypoints.get_mut(&u.id.0) {
+                        q.pop_front();
+                        if q.is_empty() {
+                            self.waypoints.remove(&u.id.0);
+                        }
+                    }
+                } else {
+                    *entry += delta / dist * step;
                 }
-                if state.walk != 0.0 {
-                    state.walk = 0.0;
-                    moved = true;
-                }
+                state.walk += dt * 11.0 * self.anim_speed;
+                heading = Some(delta.truncate());
+            } else if state.walk != 0.0 {
+                state.walk = 0.0;
             }
+            // Face the way you walk; at rest, the way the sim says.
+            let desired = heading
+                .filter(|h| h.length_squared() > 0.001)
+                .map(|h| h.y.atan2(h.x))
+                .unwrap_or_else(|| figures::facing_angle(u));
+            let mut diff = desired - state.yaw;
+            while diff > std::f32::consts::PI {
+                diff -= std::f32::consts::TAU;
+            }
+            while diff < -std::f32::consts::PI {
+                diff += std::f32::consts::TAU;
+            }
+            state.yaw += diff * (dt * 10.0).min(1.0);
         }
-        if moved {
-            let visible = self.battle.visible_tiles(Side::Order);
+        {
             let (fig_verts, fig_indices) =
                 figures::build_figures(&self.battle, &visible, &self.visual, &self.anim);
             renderer.set_figures(&fig_verts, &fig_indices);

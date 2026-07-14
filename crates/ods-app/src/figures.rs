@@ -345,22 +345,48 @@ pub struct AnimState {
     pub recoil: f32,
     /// The shared clock, for idle breathing.
     pub breath: f32,
-    /// Eased vertical pose (kneels sink, deaths crumple); 0 = unset.
+    /// Eased vertical pose (kneels sink, cowers hunch); 0 = unset.
     pub pose: f32,
+    /// World heading in radians: (cos, sin) is where the chest points.
+    pub yaw: f32,
+    /// The topple: 0 upright, 1 flat on the ground. Eased toward
+    /// `fall_goal`, which event playback sets when a death is *seen* —
+    /// the sim already knows, but the eye must not.
+    pub fall: f32,
+    pub fall_goal: f32,
 }
 
 /// The z-scale a unit's state calls for — the tween's destination.
+/// The downed keep their body shape; lying down is `fall`'s job.
 pub fn pose_target(unit: &Unit) -> f32 {
-    if !unit.alive {
-        0.12
-    } else if !unit.conscious {
-        0.22
+    if !unit.alive || !unit.conscious {
+        0.94
     } else if unit.kneeling {
         0.72
     } else if unit.morale < 35 {
         0.9
     } else {
         1.0
+    }
+}
+
+/// How far over a unit's state says it should lie (1 = flat).
+pub fn fall_target(unit: &Unit) -> f32 {
+    if !unit.alive {
+        1.0
+    } else if !unit.conscious {
+        0.92
+    } else {
+        0.0
+    }
+}
+
+/// The world heading a unit's sim facing calls for.
+pub fn facing_angle(unit: &Unit) -> f32 {
+    if unit.facing.x == 0 && unit.facing.y == 0 {
+        std::f32::consts::FRAC_PI_2
+    } else {
+        (unit.facing.y as f32).atan2(unit.facing.x as f32)
     }
 }
 
@@ -461,23 +487,48 @@ fn push_unit(
             )
     });
     let vs = ods_sim::VS as f32;
+    let fall = anim.fall.clamp(0.0, 1.0);
     // The walk: the whole body bobs on the beat of the stride.
     let moving = unit.is_active() && anim.walk != 0.0;
     if moving {
         feet.z += (anim.walk * 2.0).sin().abs() * 0.35 * vs;
-    } else if unit.is_active() {
+    } else if unit.is_active() && fall < 0.2 {
         // Idle breathing: barely there, phase-shifted per figure.
         feet.z += (anim.breath * 1.4 + unit.id.0 as f32 * 1.7).sin() * 0.10 * vs;
     }
     let swing = if moving { anim.walk.sin() } else { 0.0 };
-    let face = Vec3::new(unit.facing.x as f32, unit.facing.y as f32, 0.0).normalize_or(Vec3::X);
     // Recoil: the shot kicks the shooter back off the line for a blink.
     let kick = if unit.is_active() { anim.recoil.max(0.0) } else { 0.0 };
-    let body_offset = face * (-kick * 9.0 * vs);
 
-    // Pose: kneeling compresses, the subdued heap, the dead crumple —
-    // eased by the anim state where the battle screen provides one.
+    // Pose: kneeling compresses, the cowed hunch — eased by the anim
+    // state where the battle screen provides one.
     let z_scale = if anim.pose > 0.0 { anim.pose } else { pose_target(unit) };
+
+    // The transform, applied to every corner in figure space (+Y is the
+    // chest): kneel squash, then the topple about the hips, then the turn
+    // to the world heading, then out to the feet on the field.
+    let pitch = fall * 1.5; // just short of flat: a heap, not a plank
+    let (ps, pc) = pitch.sin_cos();
+    let turn = anim.yaw - std::f32::consts::FRAC_PI_2;
+    let (ys, yc) = turn.sin_cos();
+    let settle = fall * 2.6; // toppled bodies rest on the ground, not in it
+    let place = |p: Vec3| -> Vec3 {
+        let p = Vec3::new(p.x, p.y, p.z * z_scale);
+        let p = Vec3::new(p.x, p.y * pc - p.z * ps, p.y * ps + p.z * pc + settle);
+        let p = Vec3::new(p.x * yc - p.y * ys, p.x * ys + p.y * yc, p.z);
+        feet + p * vs
+    };
+    let turn_normal = |n: [f32; 3]| -> [f32; 3] {
+        let (x, y, z) = (n[0], n[1], n[2]);
+        let (y, z) = (y * pc - z * ps, y * ps + z * pc);
+        [x * yc - y * ys, x * ys + y * yc, z]
+    };
+
+    // How dead the figure LOOKS is the playback's business, not the sim's:
+    // color drains with the topple, so no one greys out before their
+    // death has played on screen.
+    let vitality = (unit.health.max(0) as f32 / unit.health_max.max(1) as f32).clamp(0.0, 1.0);
+    let drain = 1.0 - 0.70 * fall;
 
     for part in blueprint(unit.species) {
         // Weapons fall from unconscious hands.
@@ -489,16 +540,12 @@ fn push_unit(
             continue;
         }
         let mut color = part.color;
-        // Corpses drain toward grave-grey.
-        if !unit.alive {
-            color = [color[0] * 0.3, color[1] * 0.3, color[2] * 0.3, 1.0];
-        } else {
+        if unit.alive {
             // The hurt wear it: blood-darkened toward the end.
-            let vitality =
-                (unit.health.max(0) as f32 / unit.health_max.max(1) as f32).clamp(0.0, 1.0);
             let dim = 0.55 + 0.45 * vitality;
             color = [color[0] * dim, color[1] * dim, color[2] * dim, color[3]];
         }
+        color = [color[0] * drain, color[1] * drain, color[2] * drain, color[3]];
         // Rot glows from inside the part it holds.
         if unit.infected.map(|(p, _)| p) == Some(part.part) {
             color = [0.35, 0.9, 0.25, 1.0];
@@ -516,42 +563,33 @@ fn push_unit(
                 1.0,
             ];
         }
-        if !unit.conscious {
-            // Drained of struggle.
-            color = [color[0] * 0.6, color[1] * 0.6, color[2] * 0.6, 1.0];
-        }
-        // The stride: legs scissor along the facing, arms answer opposite,
-        // and the swinging leg lifts. The weapon rides the recoil.
-        let mut offset = body_offset;
-        if z_scale >= 0.7 {
+        // The stride: legs scissor forward and back, arms answer
+        // opposite, the swinging leg lifts, the weapon rides the recoil,
+        // and the whole body rocks back off the line of a shot.
+        let mut offset = Vec3::new(0.0, -kick * 9.0, 0.0);
+        if z_scale >= 0.7 && fall < 0.2 {
             match part.part {
                 BodyPart::LeftLeg => {
-                    offset += face * (swing * 1.4 * vs);
-                    offset.z += swing.max(0.0) * 0.8 * vs;
+                    offset.y += swing * 1.4;
+                    offset.z += swing.max(0.0) * 0.8;
                 }
                 BodyPart::RightLeg => {
-                    offset += face * (-swing * 1.4 * vs);
-                    offset.z += (-swing).max(0.0) * 0.8 * vs;
+                    offset.y -= swing * 1.4;
+                    offset.z += (-swing).max(0.0) * 0.8;
                 }
-                BodyPart::LeftArm => offset += face * (-swing * 0.9 * vs),
+                BodyPart::LeftArm => offset.y -= swing * 0.9,
                 BodyPart::RightArm | BodyPart::Weapon => {
-                    offset += face * (swing * 0.9 * vs);
+                    offset.y += swing * 0.9;
                     if part.part == BodyPart::Weapon {
-                        offset.z += kick * 12.0 * vs;
+                        offset.z += kick * 12.0;
                     }
                 }
                 _ => {}
             }
         }
-        let min = feet + offset + Vec3::new(part.min.x, part.min.y, part.min.z * z_scale) * vs;
-        let max = feet
-            + offset
-            + Vec3::new(
-                part.max.x,
-                part.max.y,
-                (part.max.z * z_scale).max(part.min.z * z_scale + 0.4),
-            ) * vs;
-        push_box(vertices, indices, min, max, color);
+        let min = part.min + offset;
+        let max = part.max + offset;
+        push_box_placed(vertices, indices, min, max, color, &place, &turn_normal);
     }
 }
 
@@ -597,6 +635,48 @@ pub fn build_skirt(min_tile: IVec3, max_tile: IVec3, seed: u64) -> (Vec<LitVerte
         slab(x1 - 1.0, a, x1 + hang, b, hash(-2, ty));
     }
     (vertices, indices)
+}
+
+/// A box run through an arbitrary placement transform — the rotated,
+/// toppled, squashed boxes figures are made of.
+fn push_box_placed(
+    vertices: &mut Vec<LitVertex>,
+    indices: &mut Vec<u32>,
+    min: Vec3,
+    max: Vec3,
+    color: [f32; 4],
+    place: &impl Fn(Vec3) -> Vec3,
+    turn_normal: &impl Fn([f32; 3]) -> [f32; 3],
+) {
+    for d in 0..3usize {
+        let u = (d + 1) % 3;
+        let v = (d + 2) % 3;
+        for front in [true, false] {
+            let mut normal = [0.0f32; 3];
+            normal[d] = if front { 1.0 } else { -1.0 };
+            let normal = turn_normal(normal);
+            let plane = if front { max[d] } else { min[d] };
+            let corner = |cu: f32, cv: f32| -> Vec3 {
+                let mut p = Vec3::ZERO;
+                p[d] = plane;
+                p[u] = cu;
+                p[v] = cv;
+                place(p)
+            };
+            let (p00, p10, p11, p01) = (
+                corner(min[u], min[v]),
+                corner(max[u], min[v]),
+                corner(max[u], max[v]),
+                corner(min[u], max[v]),
+            );
+            let first = vertices.len() as u32;
+            let quad = if front { [p00, p10, p11, p01] } else { [p00, p01, p11, p10] };
+            for p in quad {
+                vertices.push(LitVertex { position: p.to_array(), normal, color });
+            }
+            indices.extend([0, 1, 2, 0, 2, 3].map(|k| first + k));
+        }
+    }
 }
 
 fn push_box(
