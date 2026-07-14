@@ -101,20 +101,45 @@ pub(crate) fn build_defense(
     kits: &[(u32, u32)],
     demon_count: u32,
     research: &ResearchState,
-    cells: &[(usize, usize)],
-    gate: (usize, usize),
-    wards: u32,
-    hounds: u32,
+    house: &crate::base::Chapterhouse,
+    breach: Option<(usize, usize)>,
 ) -> Battle {
-    scenario::base_defense_fortified(
-        seed,
-        make_units(squad, kits, research),
-        demon_count,
-        cells,
-        gate,
-        wards,
-        hounds,
-    )
+    use crate::base::Facility;
+    use ods_sim::scenario::RoomKind;
+    let room_kind = |f: Facility| match f {
+        Facility::Gatehouse => RoomKind::Gatehouse,
+        Facility::Quarters => RoomKind::Quarters,
+        Facility::AugurArray => RoomKind::Augury,
+        Facility::Library => RoomKind::Library,
+        Facility::Infirmary => RoomKind::Infirmary,
+        Facility::Workshop => RoomKind::Workshop,
+        Facility::Chapel => RoomKind::Chapel,
+        Facility::Sanctum => RoomKind::Sanctum,
+        Facility::TrainingGround => RoomKind::DrillYard,
+        Facility::WardTower => RoomKind::WardTower,
+        Facility::Kennel => RoomKind::Kennel,
+        Facility::Vault => RoomKind::Vault,
+    };
+    // Only rooms the gate can reach are part of the fight: a hall cut off
+    // from the way in is a hall the breach never finds.
+    let rooms: Vec<(i32, i32, RoomKind)> = house
+        .linked_cells()
+        .into_iter()
+        .map(|(x, y)| {
+            let (f, _) = house.facility_at(x, y).expect("linked cells are occupied");
+            (x as i32, y as i32, room_kind(f))
+        })
+        .collect();
+    let gate = house.gate();
+    let spec = scenario::DefenseSpec {
+        rooms: &rooms,
+        gate: (gate.0 as i32, gate.1 as i32),
+        wards: 2,
+        hounds: (house.count_active(Facility::Kennel) as u32).min(2),
+        breach: breach.map(|(x, y)| (x as i32, y as i32)),
+        behemoth: breach.is_some(),
+    };
+    scenario::base_defense_fortified(seed, make_units(squad, kits, research), demon_count, &spec)
 }
 
 /// Build a purge: storming a corrupted patron's manor.

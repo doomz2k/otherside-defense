@@ -1014,6 +1014,13 @@ impl Core {
                 if let Some(g) = ground {
                     lines.push(format!("Ground: {g}"));
                 }
+                if token.breached() {
+                    lines.push(
+                        "! The outer wall is DOWN — something enormous came through it, \
+                         far from the gate"
+                            .into(),
+                    );
+                }
                 match battle.weather {
                     Weather::Clear => {}
                     Weather::Sandstorm => lines.push("! Sky: sandstorm — sight and aim suffer".into()),

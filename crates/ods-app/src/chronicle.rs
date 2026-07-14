@@ -140,6 +140,9 @@ pub fn narrate(c: &Campaign, event: &GeoEvent) -> String {
         E::SalvageLooted { brimstone, hellsteel } => format!(
             "{stamp} the breach reached the stores: {brimstone} brimstone and {hellsteel} hellsteel carried off"
         ),
+        E::StoresOverflow { brimstone, hellsteel, funds } => format!(
+            "{stamp} the undercrofts ran over: {brimstone} brimstone and {hellsteel} hellsteel sold to the reliquaries at a cut ({funds}k)"
+        ),
         E::RelicFound { name } => {
             format!("{stamp} in the rubble, something old and holy: {name}")
         }
@@ -216,7 +219,7 @@ pub fn campaign_chronicle(months: u32) -> anyhow::Result<()> {
         }
         if c.soldiers.len() < 8 && c.funds > 500 {
             let (m, d) = (c.month, c.day);
-            if let Ok(s) = c.hire_soldier() {
+            if let Ok(s) = c.hire_soldier(0) {
                 println!("[m{m} d{d}] recruited {}", s.name);
             }
         }

@@ -1395,11 +1395,13 @@ impl Core {
                 ui.separator();
                 let bi = self.selected_base.min(c.bases.len() - 1);
                 ui.strong(format!(
-                    "Chapterhouse — {}   ·   Treasury {}k   ·   🜏 {}   ⛓ {}",
+                    "Chapterhouse — {}   ·   Treasury {}k   ·   🜏 {}/{}   ⛓ {}/{}",
                     c.bases[bi].region.name(),
                     c.funds,
                     c.brimstone,
-                    c.hellsteel
+                    c.store_capacity(),
+                    c.hellsteel,
+                    c.store_capacity()
                 ));
             });
         });
@@ -1581,25 +1583,65 @@ fn chapterhouse_panel(
                 });
                 ui.add_space(4.0);
 
+                let linked: std::collections::HashSet<(usize, usize)> =
+                    c.bases[bi].linked_cells().into_iter().collect();
                 egui::Grid::new("base-grid").spacing([2.0, 2.0]).show(ui, |ui| {
                     for y in 0..GRID {
                         for x in 0..GRID {
                             let cell = c.bases[bi].facility_at(x, y);
-                            let label = match cell {
-                                Some((f, true)) => {
-                                    f.name().chars().next().unwrap_or('?').to_string()
+                            let days = c.bases[bi].build_days_left(x, y);
+                            let legal = cell.is_none() && c.bases[bi].touches(x, y);
+                            let cut_off = cell.is_some() && !linked.contains(&(x, y));
+                            let label = match (cell, days) {
+                                (Some(_), Some(d)) => egui::RichText::new(format!("{d}"))
+                                    .color(egui::Color32::from_rgb(230, 190, 90)),
+                                (Some((f, _)), None) => {
+                                    let ch =
+                                        f.name().chars().next().unwrap_or('?').to_string();
+                                    if cut_off {
+                                        egui::RichText::new(ch)
+                                            .color(egui::Color32::from_rgb(220, 90, 70))
+                                    } else {
+                                        egui::RichText::new(ch)
+                                    }
                                 }
-                                Some((_, false)) => "⏳".to_string(),
-                                None => "·".to_string(),
+                                (None, _) => {
+                                    if legal {
+                                        egui::RichText::new("+").weak()
+                                    } else {
+                                        egui::RichText::new(" ").weak()
+                                    }
+                                }
                             };
                             let button = egui::Button::new(label).min_size(egui::vec2(30.0, 30.0));
                             let resp = ui.add(button);
                             let resp = match cell {
-                                Some((f, true)) => resp.on_hover_text(f.name()),
-                                Some((f, false)) => {
-                                    resp.on_hover_text(format!("{} (building)", f.name()))
-                                }
-                                None => resp.on_hover_text("empty"),
+                                Some((f, true)) => resp.on_hover_text(format!(
+                                    "{}{}\nright-click: demolish (refund {}k)",
+                                    f.name(),
+                                    if cut_off {
+                                        " — CUT OFF from the gate: it will not \
+                                         answer a Reckoning"
+                                    } else {
+                                        ""
+                                    },
+                                    f.cost() / 4
+                                )),
+                                Some((f, false)) => resp.on_hover_text(format!(
+                                    "{} — {} day(s) of works left\nright-click: cancel \
+                                     (refund {}k)",
+                                    f.name(),
+                                    days.unwrap_or(0),
+                                    f.cost() / 2
+                                )),
+                                None if legal => resp.on_hover_text(format!(
+                                    "build {} here ({}k)",
+                                    build_choice.name(),
+                                    build_choice.cost()
+                                )),
+                                None => resp.on_hover_text(
+                                    "too far from the halls: new walls grow from old walls",
+                                ),
                             };
                             if resp.clicked()
                                 && cell.is_none()
@@ -1607,10 +1649,56 @@ fn chapterhouse_panel(
                             {
                                 log.push(format!("cannot build: {e:?}"));
                             }
+                            if resp.secondary_clicked() && cell.is_some() {
+                                match c.demolish_facility(bi, x, y) {
+                                    Ok((f, refund)) => log.push(format!(
+                                        "{} torn down; {refund}k reclaimed in stone.",
+                                        f.name()
+                                    )),
+                                    Err(e) => log.push(format!("cannot demolish: {e:?}")),
+                                }
+                            }
                         }
                         ui.end_row();
                     }
                 });
+                let total_upkeep: i64 = c.bases.iter().map(|b| b.maintenance()).sum();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Upkeep: {}k/mo this house · {}k/mo across the Order",
+                        c.bases[bi].maintenance(),
+                        total_upkeep
+                    ))
+                    .weak()
+                    .small(),
+                );
+                let stationed = c.soldiers.iter().filter(|s| s.home == bi).count();
+                ui.label(format!(
+                    "Stationed here: {stationed} soldier(s) · {} scholar(s) · {} smith(s)",
+                    c.bases[bi].occultists, c.bases[bi].artificers
+                ));
+                if c.bases.len() > 1 {
+                    let next = (bi + 1) % c.bases.len();
+                    let next_name = c.bases[next].region.name();
+                    ui.horizontal(|ui| {
+                        if ui
+                            .small_button("scholar →")
+                            .on_hover_text(format!("repost one scholar to {next_name}"))
+                            .clicked()
+                            && let Err(e) = c.move_staff(bi, next, false)
+                        {
+                            log.push(format!("cannot repost: {e:?}"));
+                        }
+                        if ui
+                            .small_button("smith →")
+                            .on_hover_text(format!("repost one smith to {next_name}"))
+                            .clicked()
+                            && let Err(e) = c.move_staff(bi, next, true)
+                        {
+                            log.push(format!("cannot repost: {e:?}"));
+                        }
+                    });
+                }
 
                 // Founding new chapterhouses.
                 ui.add_space(4.0);
@@ -1641,7 +1729,7 @@ fn chapterhouse_panel(
                         .button(format!("Soldier ({}k)", ods_geo::SOLDIER_HIRE_COST))
                         .clicked()
                     {
-                        match c.hire_soldier() {
+                        match c.hire_soldier(bi) {
                             Ok(s) => {
                                 let line = format!("Recruited {}.", s.name);
                                 log.push(line);
@@ -1653,8 +1741,11 @@ fn chapterhouse_panel(
                         .button(format!("Occultist ({}k)", ods_geo::OCCULTIST_HIRE_COST))
                         .clicked()
                     {
-                        match c.hire_occultist() {
-                            Ok(()) => log.push("An occultist joins.".to_string()),
+                        match c.hire_occultist(bi) {
+                            Ok(()) => log.push(format!(
+                                "An occultist takes rooms at {}.",
+                                c.bases[bi].region.name()
+                            )),
                             Err(e) => log.push(format!("cannot hire: {e:?}")),
                         }
                     }
@@ -1662,8 +1753,11 @@ fn chapterhouse_panel(
                         .button(format!("Artificer ({}k)", ods_geo::ARTIFICER_HIRE_COST))
                         .clicked()
                     {
-                        match c.hire_artificer() {
-                            Ok(()) => log.push("An artificer joins.".to_string()),
+                        match c.hire_artificer(bi) {
+                            Ok(()) => log.push(format!(
+                                "An artificer takes rooms at {}.",
+                                c.bases[bi].region.name()
+                            )),
                             Err(e) => log.push(format!("cannot hire: {e:?}")),
                         }
                     }
@@ -1671,8 +1765,8 @@ fn chapterhouse_panel(
                 ui.label(format!(
                     "{} soldiers, {} occultists, {} artificers / {} beds",
                     c.soldiers.len(),
-                    c.occultists,
-                    c.artificers,
+                    c.occultist_count(),
+                    c.artificer_count(),
                     c.quarters_capacity()
                 ));
 
@@ -1688,6 +1782,20 @@ fn chapterhouse_panel(
 
                 ui.add_space(6.0);
                 ui.heading("Forbidden Codex");
+                {
+                    let seated: u32 = c
+                        .bases
+                        .iter()
+                        .map(|b| b.occultists.min(b.library_capacity() as u32))
+                        .sum();
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{seated} scholar(s) seated at lecterns across the Order"
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                }
                 match &c.research.active {
                     Some((project, left)) => {
                         let done = project.cost().saturating_sub(*left) as f32;
@@ -1726,28 +1834,44 @@ fn chapterhouse_panel(
                 }
 
                 ui.add_space(6.0);
-                ui.heading("Workshop");
-                match &c.manufacture {
-                    Some((item, left)) => {
-                        let done = item.cost().saturating_sub(*left) as f32;
+                ui.heading(format!("Workshop — {}", c.bases[bi].region.name()));
+                match c.jobs.iter().find(|j| j.base == bi) {
+                    Some(j) => {
+                        let done = j.item.cost().saturating_sub(j.left) as f32;
                         ui.add(
-                            egui::ProgressBar::new(done / item.cost() as f32)
-                                .text(format!("{} — {left} left", item.name())),
+                            egui::ProgressBar::new(done / j.item.cost() as f32)
+                                .text(format!("{} — {} left", j.item.name(), j.left)),
                         );
                     }
                     None => {
-                        ui.label(if c.workshop_capacity() == 0 {
-                            "No workshop built."
+                        ui.label(if c.bases[bi].workshop_capacity() == 0 {
+                            "No workshop in this house."
+                        } else if c.bases[bi].artificers == 0 {
+                            "Benches stand ready; no smiths posted here."
                         } else {
                             "The benches are idle."
                         });
+                    }
+                }
+                for j in &c.jobs {
+                    if j.base != bi && j.base < c.bases.len() {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} forges {} ({} left)",
+                                c.bases[j.base].region.name(),
+                                j.item.name(),
+                                j.left
+                            ))
+                            .weak()
+                            .small(),
+                        );
                     }
                 }
                 for item in ManufactureItem::ALL {
                     let (brim, steel) = item.materials();
                     ui.horizontal(|ui| {
                         if ui.button("Make").clicked()
-                            && let Err(e) = c.start_manufacture(item)
+                            && let Err(e) = c.start_manufacture(bi, item)
                         {
                             log.push(format!("cannot make: {e:?}"));
                         }

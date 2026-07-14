@@ -128,6 +128,12 @@ struct Slot {
 pub struct Chapterhouse {
     pub region: Region,
     grid: [[Option<Slot>; GRID]; GRID],
+    /// Scholars posted to THIS house: they research only at its lecterns.
+    #[serde(default)]
+    pub occultists: u32,
+    /// Smiths posted to THIS house: they forge only at its benches.
+    #[serde(default)]
+    pub artificers: u32,
 }
 
 impl Chapterhouse {
@@ -136,6 +142,8 @@ impl Chapterhouse {
         let mut ch = Self {
             region,
             grid: Default::default(),
+            occultists: 0,
+            artificers: 0,
         };
         for (x, y, f) in [
             (2, 2, Facility::Gatehouse),
@@ -158,9 +166,25 @@ impl Chapterhouse {
         x < GRID && y < GRID && self.grid[y][x].is_none()
     }
 
+    /// True when the cell shares an edge with something already standing
+    /// (built or building). New walls must grow from old walls.
+    pub fn touches(&self, x: usize, y: usize) -> bool {
+        let (x, y) = (x as i32, y as i32);
+        [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dy)| {
+            let (nx, ny) = (x + dx, y + dy);
+            nx >= 0
+                && ny >= 0
+                && (nx as usize) < GRID
+                && (ny as usize) < GRID
+                && self.grid[ny as usize][nx as usize].is_some()
+        })
+    }
+
     /// Begin construction. The campaign layer checks and deducts funds.
+    /// New facilities must abut the existing halls — no free-standing
+    /// islands out on the grounds.
     pub fn start_build(&mut self, facility: Facility, x: usize, y: usize) -> bool {
-        if !self.is_free(x, y) {
+        if !self.is_free(x, y) || !self.touches(x, y) {
             return false;
         }
         self.grid[y][x] = Some(Slot {
@@ -168,6 +192,14 @@ impl Chapterhouse {
             days_left: facility.build_days(),
         });
         true
+    }
+
+    /// Days of construction left at a cell (None when empty or finished).
+    pub fn build_days_left(&self, x: usize, y: usize) -> Option<u32> {
+        self.grid[y][x]
+            .as_ref()
+            .filter(|s| s.days_left > 0)
+            .map(|s| s.days_left)
     }
 
     /// Advance construction one day; returns facilities that completed today.
@@ -220,6 +252,31 @@ impl Chapterhouse {
             }
         }
         cells
+    }
+
+    /// The cells a Reckoning is actually fought through: everything the
+    /// gatehouse can reach walking cell to cell. A room cut off from the
+    /// gate (by demolition or wreckage) stands outside the battle.
+    pub fn linked_cells(&self) -> Vec<(usize, usize)> {
+        let gate = self.gate();
+        let mut order = vec![gate];
+        let mut seen = std::collections::HashSet::from([gate]);
+        let mut head = 0;
+        while head < order.len() {
+            let (x, y) = order[head];
+            head += 1;
+            for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                if nx < 0 || ny < 0 || nx as usize >= GRID || ny as usize >= GRID {
+                    continue;
+                }
+                let cell = (nx as usize, ny as usize);
+                if self.grid[cell.1][cell.0].is_some() && seen.insert(cell) {
+                    order.push(cell);
+                }
+            }
+        }
+        order
     }
 
     /// Where demons breach: the gatehouse cell.

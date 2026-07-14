@@ -1159,20 +1159,159 @@ pub fn base_defense(
     cells: &[(usize, usize)],
     gate: (usize, usize),
 ) -> Battle {
-    base_defense_fortified(seed, soldiers, demon_count, cells, gate, 2, 0)
+    // Untagged floor plans (the manor, old callers) dress their rooms as
+    // a lived-in household: hall, library, chapel, cellar, and so on.
+    const HOUSEHOLD: [RoomKind; 5] = [
+        RoomKind::Quarters,
+        RoomKind::Library,
+        RoomKind::Chapel,
+        RoomKind::Vault,
+        RoomKind::Infirmary,
+    ];
+    let rooms: Vec<(i32, i32, RoomKind)> = cells
+        .iter()
+        .enumerate()
+        .map(|(i, &(x, y))| {
+            let kind = if (x, y) == gate {
+                RoomKind::Gatehouse
+            } else {
+                HOUSEHOLD[i % HOUSEHOLD.len()]
+            };
+            (x as i32, y as i32, kind)
+        })
+        .collect();
+    let spec = DefenseSpec {
+        rooms: &rooms,
+        gate: (gate.0 as i32, gate.1 as i32),
+        wards: 2,
+        hounds: 0,
+        breach: None,
+        behemoth: false,
+    };
+    base_defense_fortified(seed, soldiers, demon_count, &spec)
 }
 
-/// Base defense with the fortifications the chapterhouse actually built:
-/// `wards` chalked lines along the breach corridor, `hounds` blessed beasts
-/// mustering with the defenders.
+/// What a chapterhouse cell was in peacetime — the fight dresses each
+/// room to match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomKind {
+    Gatehouse,
+    Quarters,
+    Augury,
+    Library,
+    Infirmary,
+    Workshop,
+    Chapel,
+    Sanctum,
+    DrillYard,
+    WardTower,
+    Kennel,
+    Vault,
+}
+
+/// Everything the campaign knows about the house under attack.
+pub struct DefenseSpec<'a> {
+    /// Cells reachable from the gate, each tagged with what stands there.
+    pub rooms: &'a [(i32, i32, RoomKind)],
+    pub gate: (i32, i32),
+    /// Baseline standing wards chalked along the entry approach.
+    pub wards: u32,
+    pub hounds: u32,
+    /// A cell whose outer wall has been smashed open: the assault pours
+    /// in here instead of the gate.
+    pub breach: Option<(i32, i32)>,
+    /// The wall-breaker itself leads the assault.
+    pub behemoth: bool,
+}
+
+/// Dress a room as the facility it was the day before the alarm. Props
+/// stay inside the room's far corner tile so the junction tile and both
+/// doorway lanes remain clear.
+fn furnish_room(world: &mut VoxelWorld, cx: i32, cy: i32, kind: RoomKind) {
+    let o = IVec3::new(cx * CELL_TILES + 2, cy * CELL_TILES + 2, 0) * TILE_VOXELS;
+    let g = GROUND_TOP;
+    let t = TILE_VOXELS;
+    let mut prop = |min: IVec3, max: IVec3, mat: Voxel| {
+        world.fill_box(
+            o + IVec3::new(min.x, min.y, g + min.z),
+            o + IVec3::new(max.x, max.y, g + max.z),
+            mat,
+        );
+    };
+    match kind {
+        RoomKind::Gatehouse => {
+            // The way in stays clear; one salt-scoured brazier watches it.
+            prop(IVec3::new(4, 4, 0), IVec3::new(8, 8, 5 * VS), MAT_WALL);
+            prop(IVec3::new(4, 4, 5 * VS), IVec3::new(8, 8, 6 * VS), MAT_SIGIL);
+        }
+        RoomKind::Quarters => {
+            // Two bunks, blankets still thrown back.
+            prop(IVec3::new(4, t - 12, 0), IVec3::new(18, t - 4, 3 * VS), MAT_TIMBER);
+            prop(IVec3::new(t - 14, 4, 0), IVec3::new(t - 4, 12, 3 * VS), MAT_TIMBER);
+            prop(IVec3::new(5, t - 11, 3 * VS), IVec3::new(9, t - 5, 4 * VS), MAT_SNOW);
+        }
+        RoomKind::Augury => {
+            // The listening stone, banded with script.
+            prop(IVec3::new(12, 12, 0), IVec3::new(20, 20, 10 * VS), MAT_OBELISK);
+            prop(IVec3::new(12, 12, 10 * VS), IVec3::new(20, 20, 11 * VS), MAT_SIGIL);
+        }
+        RoomKind::Library => {
+            // Shelf walls of dry old timber. It burns like confession.
+            prop(IVec3::new(4, t - 8, 0), IVec3::new(t - 4, t - 3, 8 * VS), MAT_TIMBER);
+            prop(IVec3::new(t - 8, 4, 0), IVec3::new(t - 3, t - 10, 8 * VS), MAT_TIMBER);
+        }
+        RoomKind::Infirmary => {
+            // Two cots in clean linen, one not so clean.
+            prop(IVec3::new(4, 6, 0), IVec3::new(16, 14, 2 * VS), MAT_SNOW);
+            prop(IVec3::new(4, t - 14, 0), IVec3::new(16, t - 6, 2 * VS), MAT_SNOW);
+            prop(IVec3::new(8, t - 12, 2 * VS), IVec3::new(13, t - 8, 2 * VS + 1), MAT_BLOOD);
+        }
+        RoomKind::Workshop => {
+            // A bench, and a powder cask nobody moved to safety in time.
+            prop(IVec3::new(4, t - 12, 0), IVec3::new(t - 8, t - 5, 3 * VS), MAT_TIMBER);
+            prop(IVec3::new(t - 12, 4, 0), IVec3::new(t - 5, 11, 6 * VS), MAT_CASK);
+        }
+        RoomKind::Chapel => {
+            // The altar, and candles that never go out.
+            prop(IVec3::new(8, t - 12, 0), IVec3::new(24, t - 5, 4 * VS), MAT_OBELISK);
+            prop(IVec3::new(10, t - 10, 4 * VS), IVec3::new(12, t - 8, 6 * VS), MAT_WARD);
+            prop(IVec3::new(20, t - 10, 4 * VS), IVec3::new(22, t - 8, 6 * VS), MAT_WARD);
+        }
+        RoomKind::Sanctum => {
+            // The corners of a chalked meditation ring, knee-high.
+            for (dx, dy) in [(8, 8), (t - 12, 8), (8, t - 12), (t - 12, t - 12)] {
+                prop(IVec3::new(dx, dy, 0), IVec3::new(dx + 4, dy + 4, VS), MAT_SIGIL);
+            }
+        }
+        RoomKind::DrillYard => {
+            // Sparring posts, notched by years of blades.
+            prop(IVec3::new(8, 8, 0), IVec3::new(11, 11, 6 * VS), MAT_TIMBER);
+            prop(IVec3::new(t - 11, t - 11, 0), IVec3::new(t - 8, t - 8, 6 * VS), MAT_TIMBER);
+        }
+        RoomKind::WardTower => {
+            // The tower's warded heart.
+            prop(IVec3::new(13, 13, 0), IVec3::new(19, 19, 9 * VS), MAT_WALL);
+            prop(IVec3::new(13, 13, 9 * VS), IVec3::new(19, 19, 10 * VS), MAT_WARD);
+        }
+        RoomKind::Kennel => {
+            // Straw, a low fence, and the smell of blessed dog.
+            prop(IVec3::new(4, 4, 0), IVec3::new(t - 4, t - 4, 1), MAT_TUFT);
+            prop(IVec3::new(4, t - 6, 0), IVec3::new(t - 4, t - 4, 3 * VS), MAT_TIMBER);
+        }
+        RoomKind::Vault => {
+            // Casks and strongboxes; something in them still glints.
+            prop(IVec3::new(4, t - 12, 0), IVec3::new(12, t - 4, 6 * VS), MAT_CASK);
+            prop(IVec3::new(14, t - 10, 0), IVec3::new(20, t - 4, 5 * VS), MAT_CASK);
+            prop(IVec3::new(t - 10, 4, 0), IVec3::new(t - 6, 8, 3 * VS), MAT_GLINT);
+        }
+    }
+}
+
 pub fn base_defense_fortified(
     seed: u64,
     mut soldiers: Vec<Unit>,
     demon_count: u32,
-    cells: &[(usize, usize)],
-    gate: (usize, usize),
-    wards: u32,
-    hounds: u32,
+    spec: &DefenseSpec,
 ) -> Battle {
     let grid = 6i32;
     let map_tiles = IVec3::new(grid * CELL_TILES, grid * CELL_TILES, 1);
@@ -1199,37 +1338,62 @@ pub fn base_defense_fortified(
         );
     };
 
+    let occupied: std::collections::HashSet<(i32, i32)> =
+        spec.rooms.iter().map(|&(x, y, _)| (x, y)).collect();
+
     // Carve 2x2 room interiors.
-    for &(cx, cy) in cells {
+    for &(cx, cy, _) in spec.rooms {
         for dy in 1..=2 {
             for dx in 1..=2 {
-                clear_tile(&mut world, cx as i32 * CELL_TILES + dx, cy as i32 * CELL_TILES + dy);
+                clear_tile(&mut world, cx * CELL_TILES + dx, cy * CELL_TILES + dy);
             }
         }
     }
     // Carve doorways between adjacent occupied cells.
-    for &(cx, cy) in cells {
-        let (cx, cy) = (cx as i32, cy as i32);
-        if cells.contains(&((cx + 1) as usize, cy as usize)) {
+    for &(cx, cy, _) in spec.rooms {
+        if occupied.contains(&(cx + 1, cy)) {
             let row = cy * CELL_TILES + 1;
             clear_tile(&mut world, cx * CELL_TILES + 3, row);
             clear_tile(&mut world, (cx + 1) * CELL_TILES, row);
         }
-        if cells.contains(&(cx as usize, (cy + 1) as usize)) {
+        if occupied.contains(&(cx, cy + 1)) {
             let col = cx * CELL_TILES + 1;
             clear_tile(&mut world, col, cy * CELL_TILES + 3);
             clear_tile(&mut world, col, (cy + 1) * CELL_TILES);
         }
     }
 
-    // Deployment: breadth-first flood from the gatehouse over walkable tiles.
-    // Demons pour in nearest the gate; defenders hold the deepest rooms.
+    // Dress every room as the facility it was yesterday.
+    for &(cx, cy, kind) in spec.rooms {
+        furnish_room(&mut world, cx, cy, kind);
+    }
+
+    // The breach: where the wall-breaker came through, masonry is a
+    // memory. Two wall tiles come down to rubble shoulders.
+    if let Some((bx, by)) = spec.breach {
+        for dy in 1..=2 {
+            let (tx, ty) = (bx * CELL_TILES + 3, by * CELL_TILES + dy);
+            clear_tile(&mut world, tx, ty);
+            let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
+            world.fill_box(
+                o + IVec3::new(2, 3, GROUND_TOP),
+                o + IVec3::new(12, 12, GROUND_TOP + 2 * VS),
+                MAT_RUBBLE,
+            );
+            world.fill_box(
+                o + IVec3::new(TILE_VOXELS - 12, TILE_VOXELS - 10, GROUND_TOP),
+                o + IVec3::new(TILE_VOXELS - 3, TILE_VOXELS - 2, GROUND_TOP + VS),
+                MAT_RUBBLE,
+            );
+        }
+    }
+
+    // Deployment: breadth-first flood from where the enemy enters — the
+    // gatehouse, or the smashed wall. Demons pour in nearest the entry;
+    // defenders hold the deepest rooms.
     let tiles = crate::tiles::TileMap::derive(&world, IVec3::ZERO, map_tiles);
-    let start = IVec3::new(
-        gate.0 as i32 * CELL_TILES + 1,
-        gate.1 as i32 * CELL_TILES + 1,
-        0,
-    );
+    let entry = spec.breach.unwrap_or(spec.gate);
+    let start = IVec3::new(entry.0 * CELL_TILES + 1, entry.1 * CELL_TILES + 1, 0);
     let mut order = vec![start];
     let mut seen = std::collections::HashSet::from([start]);
     let mut head = 0;
@@ -1245,10 +1409,21 @@ pub fn base_defense_fortified(
     }
 
     let mut ward_tiles = Vec::new();
-    for k in 0..wards as usize {
+    for k in 0..spec.wards as usize {
         let idx = 5 + k * 3;
         if idx < order.len().saturating_sub(8) {
             ward_tiles.push(order[idx]);
+        }
+    }
+    // Every Ward Tower's floor was chalked years ago, for exactly today.
+    for &(cx, cy, kind) in spec.rooms {
+        if kind == RoomKind::WardTower {
+            for (dx, dy) in [(1, 1), (2, 1), (1, 2)] {
+                let tile = IVec3::new(cx * CELL_TILES + dx, cy * CELL_TILES + dy, 0);
+                if tiles.is_walkable(tile) {
+                    ward_tiles.push(tile);
+                }
+            }
         }
     }
 
@@ -1261,28 +1436,51 @@ pub fn base_defense_fortified(
         s.tile = order[order.len() - 1 - i];
         units.push(s);
     }
-    let demon_count = (demon_count as usize).min(8).min(order.len() - defenders);
-    for i in 0..demon_count {
+    let demon_count =
+        (demon_count as usize).min(8).min(order.len().saturating_sub(defenders));
+    let lead = if spec.behemoth && demon_count > 0 {
+        units.push(Unit::behemoth(defenders as u32, "Doorbreaker", order[0]));
+        1
+    } else {
+        0
+    };
+    for i in lead..demon_count {
         units.push(Unit::imp(
             (defenders + i) as u32,
             &format!("Imp of {}", demon_names[i]),
             order[i],
         ));
     }
-    // The kennels open: blessed hounds hold the halls with the garrison.
-    for h in 0..hounds as usize {
-        let idx = order.len().saturating_sub(defenders + h + 1);
-        if idx < demon_count {
-            break; // no room left that isn't already contested
-        }
+    // The kennels open: blessed hounds hold their own runs if they can,
+    // and fall back beside the garrison if the runs are contested.
+    let kennel_tiles: Vec<IVec3> = spec
+        .rooms
+        .iter()
+        .filter(|r| r.2 == RoomKind::Kennel)
+        .flat_map(|&(cx, cy, _)| {
+            [(2, 1), (1, 2)]
+                .map(|(dx, dy)| IVec3::new(cx * CELL_TILES + dx, cy * CELL_TILES + dy, 0))
+        })
+        .filter(|tile| {
+            tiles.is_walkable(*tile)
+                && !order[..demon_count].contains(tile)
+                && !order[order.len() - defenders..].contains(tile)
+        })
+        .collect();
+    for h in 0..spec.hounds as usize {
+        let tile = kennel_tiles.get(h).copied().or_else(|| {
+            let idx = order.len().saturating_sub(defenders + h + 1);
+            (idx >= demon_count).then(|| order[idx])
+        });
+        let Some(tile) = tile else { break };
         let id = units.len() as u32;
-        let mut hound = Unit::hellhound(id, &format!("Blessed Hound {}", h + 1), order[idx]);
+        let mut hound = Unit::hellhound(id, &format!("Blessed Hound {}", h + 1), tile);
         hound.side = crate::units::Side::Order;
         units.push(hound);
     }
 
     let mut battle = Battle::new(world, IVec3::ZERO, map_tiles, units, seed);
-    // The gate corridor is chalked and salted in advance: standing ward
+    // The entry corridor is chalked and salted in advance: standing ward
     // lines the breach must cross before it reaches the halls.
     for tile in ward_tiles {
         battle.place_ward(tile);
@@ -1438,6 +1636,60 @@ mod tests {
             turns += 1;
         }
         assert!(b.winner.is_some(), "base defense must resolve within 60 turns");
+    }
+
+    #[test]
+    fn a_breached_defense_is_led_by_the_doorbreaker() {
+        use crate::units::Species;
+
+        let rooms = [
+            (2, 2, RoomKind::Gatehouse),
+            (2, 3, RoomKind::Quarters),
+            (3, 2, RoomKind::Library),
+            (3, 3, RoomKind::Workshop),
+            (4, 3, RoomKind::Kennel),
+            (4, 2, RoomKind::WardTower),
+        ];
+        let soldiers: Vec<Unit> = (0..4)
+            .map(|i| Unit::soldier(i, &format!("Guard {i}"), glam::IVec3::ZERO))
+            .collect();
+        let spec = DefenseSpec {
+            rooms: &rooms,
+            gate: (2, 2),
+            wards: 2,
+            hounds: 2,
+            breach: Some((4, 3)),
+            behemoth: true,
+        };
+        let b = super::base_defense_fortified(11, soldiers, 5, &spec);
+
+        for u in &b.units {
+            assert!(b.tiles.is_walkable(u.tile), "{} spawns in rock at {}", u.name, u.tile);
+        }
+        let tiles: std::collections::HashSet<_> = b.units.iter().map(|u| u.tile).collect();
+        assert_eq!(tiles.len(), b.units.len(), "no two units share a tile");
+        assert!(
+            b.units.iter().any(|u| u.species == Species::Behemoth && u.side == Side::Demons),
+            "the wall-breaker leads the assault"
+        );
+        let hounds = b
+            .units
+            .iter()
+            .filter(|u| u.species == Species::Hellhound && u.side == Side::Order)
+            .count();
+        assert!(hounds > 0, "the kennels open");
+        // The demons enter at the breached kennel, not the gatehouse: the
+        // behemoth stands in the kennel cell's rooms, far from the gate.
+        let lead = b
+            .units
+            .iter()
+            .find(|u| u.species == Species::Behemoth)
+            .expect("just asserted");
+        assert!(
+            lead.tile.x / CELL_TILES >= 4,
+            "the doorbreaker enters through the smashed wall, at {}",
+            lead.tile
+        );
     }
 
     #[test]
