@@ -540,7 +540,7 @@ fn push_unit(
     // The fine carve: every tagged box is rasterized into one cell grid,
     // then only the exposed shell is meshed. Ten times the grain of the
     // old slabs, still animated per frame.
-    let mut grid: std::collections::HashMap<(i16, i16, i16), [f32; 4]> =
+    let mut grid: std::collections::HashMap<(i16, i16, i16), ([f32; 4], BodyPart)> =
         std::collections::HashMap::new();
     for part in blueprint(unit.species) {
         // Weapons fall from unconscious hands.
@@ -575,33 +575,33 @@ fn push_unit(
                 1.0,
             ];
         }
-        // The stride: legs scissor forward and back, arms answer
-        // opposite, the swinging leg lifts, the weapon rides the recoil,
-        // and the whole body rocks back off the line of a shot.
+        // Recoil rocks the whole body off the line; the weapon jumps.
         let mut offset = Vec3::new(0.0, -kick * 9.0, 0.0);
-        if z_scale >= 0.7 && fall < 0.2 {
-            match part.part {
-                BodyPart::LeftLeg => {
-                    offset.y += swing * 1.4;
-                    offset.z += swing.max(0.0) * 0.8;
-                }
-                BodyPart::RightLeg => {
-                    offset.y -= swing * 1.4;
-                    offset.z += (-swing).max(0.0) * 0.8;
-                }
-                BodyPart::LeftArm => offset.y -= swing * 0.9,
-                BodyPart::RightArm | BodyPart::Weapon => {
-                    offset.y += swing * 0.9;
-                    if part.part == BodyPart::Weapon {
-                        offset.z += kick * 12.0;
-                    }
-                }
-                _ => {}
-            }
+        if part.part == BodyPart::Weapon {
+            offset.z += kick * 12.0;
         }
-        rasterize_box(&mut grid, part.min + offset, part.max + offset, color);
+        rasterize_box(&mut grid, part.part, part.min + offset, part.max + offset, color);
     }
-    emit_shell(vertices, indices, &grid, unit.id.0, &place, &turn_normal);
+
+    // The stride, done properly: limbs PIVOT from hip and shoulder
+    // instead of sliding, so the gait reads as walking, not skating.
+    let strides = z_scale >= 0.7 && fall < 0.2;
+    let limb = move |part: BodyPart, p: Vec3| -> Vec3 {
+        if !strides || swing == 0.0 {
+            return p;
+        }
+        let (pivot, ang) = match part {
+            BodyPart::LeftLeg => (5.0f32, swing * 0.55),
+            BodyPart::RightLeg => (5.0, -swing * 0.55),
+            BodyPart::LeftArm => (8.2, -swing * 0.35),
+            BodyPart::RightArm | BodyPart::Weapon => (8.2, swing * 0.35),
+            _ => return p,
+        };
+        let (sa, ca) = ang.sin_cos();
+        let (dy, dz) = (p.y, p.z - pivot);
+        Vec3::new(p.x, dy * ca - dz * sa, pivot + dy * sa + dz * ca)
+    };
+    emit_shell(vertices, indices, &grid, unit.id.0, &limb, &place, &turn_normal);
 }
 
 /// Figure-space voxel cell size: the fine grain figures are carved at.
@@ -613,7 +613,8 @@ const CELL: f32 = 0.6;
 /// every cell keeps the color of the LAST box that claimed it —
 /// blueprint order is paint order.
 fn rasterize_box(
-    grid: &mut std::collections::HashMap<(i16, i16, i16), [f32; 4]>,
+    grid: &mut std::collections::HashMap<(i16, i16, i16), ([f32; 4], BodyPart)>,
+    part: BodyPart,
     min: Vec3,
     max: Vec3,
     color: [f32; 4],
@@ -646,7 +647,7 @@ fn rasterize_box(
                         continue;
                     }
                 }
-                grid.insert((x as i16, y as i16, z as i16), color);
+                grid.insert((x as i16, y as i16, z as i16), (color, part));
             }
         }
     }
@@ -657,8 +658,9 @@ fn rasterize_box(
 fn emit_shell(
     vertices: &mut Vec<LitVertex>,
     indices: &mut Vec<u32>,
-    grid: &std::collections::HashMap<(i16, i16, i16), [f32; 4]>,
+    grid: &std::collections::HashMap<(i16, i16, i16), ([f32; 4], BodyPart)>,
     seed: u32,
+    limb: &impl Fn(BodyPart, Vec3) -> Vec3,
     place: &impl Fn(Vec3) -> Vec3,
     turn_normal: &impl Fn([f32; 3]) -> [f32; 3],
 ) {
@@ -675,7 +677,7 @@ fn emit_shell(
         // ±6% brightness: cloth weave, worn steel, scarred hide.
         0.94 + 0.12 * (((h >> 8) & 255) as f32 / 255.0)
     };
-    for (&cell, &base) in grid {
+    for (&cell, &(base, part)) in grid {
         let g = grain(cell);
         // Light falls from above: feet in shadow, crown lit.
         let height = (cell.2 as f32 * CELL / 14.0).clamp(0.0, 1.0);
@@ -690,7 +692,9 @@ fn emit_shell(
                     n[d] += if front { 1 } else { -1 };
                     (n[0], n[1], n[2])
                 };
-                if grid.contains_key(&neighbor) {
+                // Cull only within a part: joints keep their skin, so a
+                // swung leg never opens a hole in the hip.
+                if grid.get(&neighbor).is_some_and(|(_, np)| *np == part) {
                     continue; // buried face
                 }
                 let u = (d + 1) % 3;
@@ -704,7 +708,7 @@ fn emit_shell(
                     p[d] = plane;
                     p[u] = cu;
                     p[v] = cv;
-                    place(p)
+                    place(limb(part, p))
                 };
                 let (p00, p10, p11, p01) = (
                     corner(lo[u], lo[v]),
