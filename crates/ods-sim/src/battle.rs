@@ -664,6 +664,14 @@ impl Battle {
         self.world.raycast(from, delta / len, len - 0.75).is_none()
     }
 
+    /// Straight sight between two tiles (eye to chest), smoke included —
+    /// the AI's "could I see, or be seen, from there" probe. Range is the
+    /// caller's problem.
+    pub fn sight_line(&self, from: IVec3, to: IVec3) -> bool {
+        self.los_clear(Self::eye(from), Self::chest(to))
+            && !self.smoke_blocks(Self::eye(from), Self::chest(to))
+    }
+
     pub fn can_see(&self, a: UnitId, b: UnitId) -> bool {
         let (a, b) = (self.unit(a), self.unit(b));
         let d = (b.tile - a.tile).abs();
