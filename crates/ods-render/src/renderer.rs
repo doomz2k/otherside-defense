@@ -17,6 +17,29 @@ const VOXEL_SHADER: &str = r#"
 struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
+struct Sun { vp: mat4x4<f32> };
+@group(1) @binding(0) var<uniform> sun_cam: Sun;
+@group(1) @binding(1) var shadow_tex: texture_depth_2d;
+@group(1) @binding(2) var shadow_smp: sampler_comparison;
+
+// How much of the sun reaches this point: 0 in cast shadow, 1 in the open.
+// Four PCF taps soften the edge without turning it to mush.
+fn sun_shadow(world: vec3<f32>) -> f32 {
+    let pos = sun_cam.vp * vec4<f32>(world, 1.0);
+    let ndc = pos.xyz / pos.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (uv.x <= 0.0 || uv.x >= 1.0 || uv.y <= 0.0 || uv.y >= 1.0 || ndc.z >= 1.0) {
+        return 1.0;
+    }
+    let ts = 0.75 / 2048.0;
+    var lit = 0.0;
+    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(-ts, -ts), ndc.z - 0.0022);
+    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(ts, -ts), ndc.z - 0.0022);
+    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(-ts, ts), ndc.z - 0.0022);
+    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(ts, ts), ndc.z - 0.0022);
+    return lit / 4.0;
+}
+
 // Entries 16+ are EMISSIVE: they ignore the sun and pulse on the clock.
 var<private> PALETTE: array<vec3<f32>, 26> = array<vec3<f32>, 26>(
     vec3<f32>(1.0, 0.0, 1.0),    // 0: unused (empty)
@@ -121,7 +144,9 @@ fn fs_main(in: VsOut) -> FsOut {
     let jitter = 0.86 + 0.22 * voxel_hash(cell);
     // Face-quantized light, with the sun deciding only how hard the
     // contrast bites (flat per face — no smooth gradients anywhere).
-    let sun_bite = 0.7 + 0.3 * max(dot(n, camera.sun.xyz), 0.0);
+    // The direct term dies in cast shadow; ambient carries the rest.
+    let s = sun_shadow(in.world + n * 0.5);
+    let sun_bite = 0.58 + 0.42 * max(dot(n, camera.sun.xyz), 0.0) * s;
     // Baked corner occlusion: pits darken, edges pop.
     var color = base * face_shade(n) * sun_bite * jitter * in.ao;
     // Crush to banded levels with ordered dithering: the 1994 finish.
@@ -172,6 +197,29 @@ const LIT_SHADER: &str = r#"
 struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
+struct Sun { vp: mat4x4<f32> };
+@group(1) @binding(0) var<uniform> sun_cam: Sun;
+@group(1) @binding(1) var shadow_tex: texture_depth_2d;
+@group(1) @binding(2) var shadow_smp: sampler_comparison;
+
+// How much of the sun reaches this point: 0 in cast shadow, 1 in the open.
+// Four PCF taps soften the edge without turning it to mush.
+fn sun_shadow(world: vec3<f32>) -> f32 {
+    let pos = sun_cam.vp * vec4<f32>(world, 1.0);
+    let ndc = pos.xyz / pos.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (uv.x <= 0.0 || uv.x >= 1.0 || uv.y <= 0.0 || uv.y >= 1.0 || ndc.z >= 1.0) {
+        return 1.0;
+    }
+    let ts = 0.75 / 2048.0;
+    var lit = 0.0;
+    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(-ts, -ts), ndc.z - 0.0022);
+    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(ts, -ts), ndc.z - 0.0022);
+    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(-ts, ts), ndc.z - 0.0022);
+    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(ts, ts), ndc.z - 0.0022);
+    return lit / 4.0;
+}
+
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -181,6 +229,7 @@ struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) world: vec3<f32>,
 };
 
 @vertex
@@ -189,6 +238,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.clip = camera.view_proj * vec4<f32>(in.position, 1.0);
     out.normal = in.normal;
     out.color = in.color;
+    out.world = in.position;
     return out;
 }
 
@@ -214,7 +264,8 @@ struct FsOut {
 @fragment
 fn fs_main(in: VsOut) -> FsOut {
     let n = normalize(in.normal);
-    let sun_bite = 0.7 + 0.3 * max(dot(n, camera.sun.xyz), 0.0);
+    let s = sun_shadow(in.world + n * 0.5);
+    let sun_bite = 0.58 + 0.42 * max(dot(n, camera.sun.xyz), 0.0) * s;
     var color = in.color.rgb * lit_face_shade(n) * sun_bite;
     let levels = 6.0;
     let d = lit_bayer(in.clip.xy) / levels;
@@ -223,6 +274,18 @@ fn fs_main(in: VsOut) -> FsOut {
     out.color = vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), in.color.a);
     out.glow = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     return out;
+}
+"#;
+
+/// Depth-only: the world as the sun sees it. One shader serves both
+/// vertex layouts — only location 0 is read.
+const SHADOW_CAST_SHADER: &str = r#"
+struct Sun { vp: mat4x4<f32> };
+@group(0) @binding(0) var<uniform> sun_cam: Sun;
+
+@vertex
+fn vs_main(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return sun_cam.vp * vec4<f32>(position, 1.0);
 }
 "#;
 
@@ -544,9 +607,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 "#;
 
 /// Default virtual-pixel size: the world renders at 1/scale resolution and
-/// upscales with hard nearest-neighbor pixels — 1994 in the cheapest honest
-/// way. The UI paints at full resolution on top.
-const PIXEL_SCALE: u32 = 3;
+/// upscales with hard nearest-neighbor pixels. The dense carve deserves to
+/// be SEEN, so full resolution is the default; 2-4 is the optional 1994
+/// filter. The UI paints at full resolution on top either way.
+const PIXEL_SCALE: u32 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SunUniform {
+    vp: [[f32; 4]; 4],
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -586,6 +656,14 @@ pub struct Renderer {
     crt: bool,
     voxel_pipeline: wgpu::RenderPipeline,
     overlay_pipeline: wgpu::RenderPipeline,
+    /// The sun's depth map and everything that feeds or reads it.
+    shadow_view: wgpu::TextureView,
+    shadow_buffer: wgpu::Buffer,
+    shadow_cast_bind_group: wgpu::BindGroup,
+    shadow_sample_bind_group: wgpu::BindGroup,
+    shadow_voxel_pipeline: wgpu::RenderPipeline,
+    shadow_lit_pipeline: wgpu::RenderPipeline,
+    sun_dir: glam::Vec3,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     lit_pipeline: wgpu::RenderPipeline,
@@ -805,11 +883,149 @@ impl Renderer {
             }],
         });
 
+        // ---------------------------------------------- the sun's eye
+        let shadow_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow-map"),
+            size: wgpu::Extent3d { width: 2048, height: 2048, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_view = shadow_tex.create_view(&Default::default());
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("shadow-sampler"),
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let shadow_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sun-vp"),
+            contents: bytemuck::bytes_of(&SunUniform { vp: Mat4::IDENTITY.to_cols_array_2d() }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let shadow_cast_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("shadow-cast-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let shadow_cast_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow-cast-bind"),
+            layout: &shadow_cast_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: shadow_buffer.as_entire_binding(),
+            }],
+        });
+        let shadow_sample_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("shadow-sample-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
+                ],
+            });
+        let shadow_sample_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow-sample-bind"),
+            layout: &shadow_sample_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: shadow_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+            ],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ods-pipeline-layout"),
-            bind_group_layouts: &[&camera_layout],
+            bind_group_layouts: &[&camera_layout, &shadow_sample_layout],
             push_constant_ranges: &[],
         });
+        let shadow_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("shadow-pipeline-layout"),
+                bind_group_layouts: &[&shadow_cast_layout],
+                push_constant_ranges: &[],
+            });
+        let shadow_cast_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shadow-cast-shader"),
+            source: wgpu::ShaderSource::Wgsl(SHADOW_CAST_SHADER.into()),
+        });
+        // Depth-only casters for both vertex layouts; the bias keeps the
+        // map's own faces from freckling themselves.
+        let shadow_pipeline = |buffers: &[wgpu::VertexBufferLayout], label| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&shadow_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shadow_cast_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers,
+                },
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: Default::default(),
+                    bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
+                }),
+                multisample: Default::default(),
+                fragment: None,
+                multiview: None,
+                cache: None,
+            })
+        };
+        let shadow_voxel_pipeline = shadow_pipeline(&[Vertex::LAYOUT], "shadow-voxel");
+        let shadow_lit_pipeline = shadow_pipeline(&[LitVertex::LAYOUT], "shadow-lit");
 
         let voxel_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("voxel-shader"),
@@ -1063,6 +1279,13 @@ impl Renderer {
             voxel_pipeline,
             overlay_pipeline,
             camera_buffer,
+            shadow_view,
+            shadow_buffer,
+            shadow_cast_bind_group,
+            shadow_sample_bind_group,
+            shadow_voxel_pipeline,
+            shadow_lit_pipeline,
+            sun_dir: glam::Vec3::new(0.35, 0.5, 0.8).normalize(),
             camera_bind_group,
             lit_pipeline,
             globe_pipeline,
@@ -1228,6 +1451,7 @@ impl Renderer {
     /// Upload the camera. `clock` (seconds, wrapping is fine) drives the
     /// pulse of emissive materials and rides in the sun vector's w lane.
     pub fn set_camera(&mut self, view_proj: Mat4, sun: glam::Vec3, clock: f32) {
+        self.sun_dir = sun.normalize_or(glam::Vec3::Z);
         let sun = sun.normalize_or(glam::Vec3::Z);
         self.queue.write_buffer(
             &self.camera_buffer,
@@ -1312,6 +1536,75 @@ impl Renderer {
             );
         }
 
+        // The sun surveys the field before anyone paints it: an ortho
+        // depth pass over the whole battlefield feeds the shadow lookups.
+        {
+            let sun_vp = if self.chunk_meshes.is_empty() {
+                // No field, no shadows: park every lookup at "fully lit".
+                Mat4::from_cols(
+                    glam::Vec4::ZERO,
+                    glam::Vec4::ZERO,
+                    glam::Vec4::ZERO,
+                    glam::Vec4::new(0.0, 0.0, -10.0, 1.0),
+                )
+            } else {
+                let cs = ods_voxel::CHUNK_SIZE;
+                let (mut lo, mut hi) = (IVec3::MAX, IVec3::MIN);
+                for &coord in self.chunk_meshes.keys() {
+                    lo = lo.min(coord * cs);
+                    hi = hi.max((coord + IVec3::ONE) * cs);
+                }
+                let center = (lo + hi).as_vec3() / 2.0;
+                let radius = ((hi - lo).as_vec3() / 2.0).length().max(1.0);
+                let eye = center + self.sun_dir * (radius + 60.0);
+                let view = Mat4::look_at_rh(eye, center, glam::Vec3::Z);
+                let proj = Mat4::orthographic_rh(
+                    -radius,
+                    radius,
+                    -radius,
+                    radius,
+                    1.0,
+                    2.0 * radius + 120.0,
+                );
+                proj * view
+            };
+            self.queue.write_buffer(
+                &self.shadow_buffer,
+                0,
+                bytemuck::bytes_of(&SunUniform { vp: sun_vp.to_cols_array_2d() }),
+            );
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow-pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            if !self.chunk_meshes.is_empty() {
+                pass.set_pipeline(&self.shadow_voxel_pipeline);
+                pass.set_bind_group(0, &self.shadow_cast_bind_group, &[]);
+                for mesh in self.chunk_meshes.values().chain(self.unit_mesh.iter()) {
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
+                pass.set_pipeline(&self.shadow_lit_pipeline);
+                pass.set_bind_group(0, &self.shadow_cast_bind_group, &[]);
+                for mesh in self.figure_mesh.iter().chain(self.skirt_mesh.iter()) {
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
+            }
+        }
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main-pass"),
@@ -1351,6 +1644,10 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+
+            // Group 1 (the sun's depth map) rides every pipeline that
+            // shares the layout; set once and forget.
+            pass.set_bind_group(1, &self.shadow_sample_bind_group, &[]);
 
             // Space first: the nebula backdrop paints behind the globe —
             // and the battlefield gets a sky of its own.
@@ -1604,6 +1901,7 @@ mod shader_tests {
             ("starfield", super::STARFIELD_SHADER),
             ("blur", super::BLUR_SHADER),
             ("sky", super::SKY_SHADER),
+            ("shadow-cast", super::SHADOW_CAST_SHADER),
         ] {
             let module = naga::front::wgsl::parse_str(src)
                 .unwrap_or_else(|e| panic!("{name} shader fails to parse: {e}"));

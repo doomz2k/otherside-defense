@@ -15,6 +15,9 @@ fn yes() -> bool {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Config {
+    /// Config schema generation, for one-time migrations of old files.
+    #[serde(default)]
+    pub version: u32,
     pub volume: f32,
     #[serde(default = "one")]
     pub music_volume: f32,
@@ -58,6 +61,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            version: 1,
             volume: 1.0,
             music_volume: 1.0,
             sfx_volume: 1.0,
@@ -65,7 +69,7 @@ impl Default for Config {
             ui_scale: 1.0,
             cam_sense: 1.0,
             anim_speed: 1.0,
-            pixel_scale: 3,
+            pixel_scale: 1,
             crt: false,
             event_cam: true,
             hints: true,
@@ -81,10 +85,20 @@ impl Default for Config {
 
 impl Config {
     pub fn load() -> Self {
-        std::fs::read_to_string(CONFIG_PATH)
+        let mut cfg: Config = std::fs::read_to_string(CONFIG_PATH)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Migration: files from before versioning carried pixel_scale 3 as
+        // the shipped default. Full resolution is the look now; anyone who
+        // wants 1994 back sets it in Options and it sticks from then on.
+        if cfg.version == 0 {
+            if cfg.pixel_scale == 3 {
+                cfg.pixel_scale = 1;
+            }
+            cfg.version = 1;
+        }
+        cfg
     }
 
     pub fn save(&self) {

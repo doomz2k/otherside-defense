@@ -423,6 +423,7 @@ impl Core {
 
     pub fn save_config(&self) {
         config::Config {
+            version: 1,
             volume: self.volume,
             music_volume: self.music_volume,
             sfx_volume: self.sfx_volume,
