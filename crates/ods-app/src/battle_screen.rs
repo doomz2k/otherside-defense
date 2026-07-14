@@ -77,6 +77,8 @@ pub struct BattleScreen {
     show_cones: bool,
     /// Colorblind-safe overlays: orange/blue instead of red/green.
     pub colorblind: bool,
+    /// Combat text floats over the field.
+    pub combat_text: bool,
     /// Damp screen flashes.
     pub reduce_flash: bool,
     /// The big tactical map ([M]).
@@ -168,6 +170,7 @@ impl BattleScreen {
             show_threat: false,
             show_cones: false,
             colorblind: false,
+            combat_text: true,
             reduce_flash: false,
             show_map: false,
             demon_turn_pending: false,
@@ -755,6 +758,7 @@ impl BattleScreen {
                             // The shot forecast: the resolver's true odds.
                             let mut line = format!("Target: {}", self.battle.unit(enemy).name);
                             let mut seen = true;
+                            let mut breakdown: Option<String> = None;
                             for (label, mode) in
                                 [("snap", FireMode::Snap), ("aimed", FireMode::Aimed), ("auto", FireMode::Auto)]
                             {
@@ -777,19 +781,49 @@ impl BattleScreen {
                                         } else {
                                             format!("  [dmg 0–{}]", f.power * 2)
                                         });
+                                        // The arithmetic, for whoever asks why.
+                                        breakdown = Some(format!(
+                                            "skill {} × mode {}%{}{} = {}%",
+                                            f.skill,
+                                            f.mode_pct,
+                                            if f.kneeling { " × kneel 115%" } else { "" },
+                                            if f.high_ground > 0 {
+                                                " + high ground 10"
+                                            } else {
+                                                ""
+                                            },
+                                            f.chance
+                                        ));
                                     }
                                 }
                             }
                             if !seen {
                                 line.push_str("  [NO LINE OF SIGHT]");
                             }
-                            ui.colored_label(egui::Color32::LIGHT_RED, line);
+                            let resp = ui.colored_label(egui::Color32::LIGHT_RED, line);
+                            if let Some(b) = breakdown {
+                                resp.on_hover_text(b);
+                            }
                         } else if let Some((_, cost)) = &self.hover_path {
                             let u = self.battle.unit(id);
                             let ok = *cost <= u.tu;
+                            // A move that eats the banked shot deserves a word.
+                            let breaks_watch = u.reserve.is_some_and(|m| {
+                                u.fire_cost(m).is_some_and(|c| *cost > u.tu - c)
+                            });
                             ui.colored_label(
-                                if ok { egui::Color32::LIGHT_GREEN } else { egui::Color32::GRAY },
-                                format!("Move: {cost} TU of {}", u.tu),
+                                if !ok {
+                                    egui::Color32::GRAY
+                                } else if breaks_watch {
+                                    egui::Color32::from_rgb(230, 180, 70)
+                                } else {
+                                    egui::Color32::LIGHT_GREEN
+                                },
+                                format!(
+                                    "Move: {cost} TU of {}{}",
+                                    u.tu,
+                                    if ok && breaks_watch { " — BREAKS YOUR WATCH" } else { "" }
+                                ),
                             );
                         }
                     }
@@ -1080,6 +1114,13 @@ impl BattleScreen {
                                 if !u.conscious {
                                     icons::draw(ui, Icon::Down, 11.0).on_hover_text("down");
                                 }
+                                if u.is_active()
+                                    && u.fire_cost(FireMode::Snap)
+                                        .is_none_or(|c| u.tu < c)
+                                {
+                                    ui.label(egui::RichText::new("✔").weak().small())
+                                        .on_hover_text("spent: no shot left this turn");
+                                }
                             });
                             mini_bar(
                                 ui,
@@ -1238,24 +1279,48 @@ impl BattleScreen {
 
         // The end-turn guard's question.
         if self.confirm_end {
-            let idle = self
-                .battle
-                .units
-                .iter()
-                .filter(|u| {
-                    u.is_active() && u.side == Side::Order && !u.civilian && u.tu * 2 > u.tu_max
-                })
-                .count();
+            // The checklist: what the turn would leave on the table.
+            let mut items: Vec<(String, UnitId)> = Vec::new();
+            for u in &self.battle.units {
+                if !u.is_active() || u.side != Side::Order || u.civilian {
+                    continue;
+                }
+                if u.tu * 2 > u.tu_max {
+                    items.push((format!("{} holds {} TU", u.name, u.tu), u.id));
+                }
+                if u.wounds > 0 {
+                    items.push((format!("{} is BLEEDING", u.name), u.id));
+                }
+                if u.reserve.is_none()
+                    && u.fire_cost(FireMode::Snap).is_some_and(|c| u.tu >= c)
+                {
+                    items.push((format!("{} has no watch banked", u.name), u.id));
+                }
+            }
             let mut end = false;
             let mut stay = false;
+            let mut jump: Option<UnitId> = None;
             egui::Window::new("End the turn?")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 40.0])
                 .show(ctx, |ui| {
-                    ui.label(format!(
-                        "{idle} soldier(s) still hold more than half their time units."
-                    ));
+                    if items.is_empty() {
+                        ui.label("Nothing left on the table.");
+                    } else {
+                        ui.label("Left on the table (click to go to them):");
+                        for (line, id) in items.iter().take(8) {
+                            if ui
+                                .add(
+                                    egui::Label::new(egui::RichText::new(line).small())
+                                        .sense(egui::Sense::click()),
+                                )
+                                .clicked()
+                            {
+                                jump = Some(*id);
+                            }
+                        }
+                    }
                     ui.horizontal(|ui| {
                         if ui.button("End the turn").clicked() {
                             end = true;
@@ -1265,7 +1330,11 @@ impl BattleScreen {
                         }
                     });
                 });
-            if end {
+            if let Some(id) = jump {
+                self.selected = Some(id);
+                self.confirm_end = false;
+                self.refresh_scene(renderer);
+            } else if end {
                 self.end_turn(renderer, audio);
             } else if stay {
                 self.confirm_end = false;
@@ -1448,6 +1517,9 @@ impl BattleScreen {
     }
 
     fn float(&mut self, over: UnitId, text: impl Into<String>, color: egui::Color32) {
+        if !self.combat_text {
+            return;
+        }
         let mut world = self.unit_pos(over, 20.0);
         // Stack, don't overlap: each floater sharing the spot rides higher.
         let crowd = self
@@ -1473,6 +1545,9 @@ impl BattleScreen {
         };
         // Floating combat text: the numbers rise from where they happened.
         match event {
+            Event::Damaged { unit, amount: 0, .. } => {
+                self.float(*unit, "CLINK", egui::Color32::from_gray(200));
+            }
             Event::Damaged { unit, amount, .. } => {
                 self.float(*unit, format!("-{amount}"), egui::Color32::from_rgb(240, 80, 60));
             }
@@ -2293,7 +2368,18 @@ impl BattleScreen {
     }
 
     fn select_next_soldier(&mut self) {
-        let soldiers: Vec<UnitId> = self.battle.living(Side::Order).map(|u| u.id).collect();
+        // Cycle those who can still do something; fall back to everyone.
+        let mut soldiers: Vec<UnitId> = self
+            .battle
+            .living(Side::Order)
+            .filter(|u| {
+                !u.civilian && u.fire_cost(FireMode::Snap).is_some_and(|c| u.tu >= c)
+            })
+            .map(|u| u.id)
+            .collect();
+        if soldiers.is_empty() {
+            soldiers = self.battle.living(Side::Order).map(|u| u.id).collect();
+        }
         if soldiers.is_empty() {
             self.selected = None;
             return;
@@ -2520,6 +2606,15 @@ impl BattleScreen {
                 _ => {}
             }
         }
+        // The ground within this turn's legs, faintly.
+        if let Some(id) = self.selected
+            && self.battle.unit(id).is_active()
+        {
+            for (tile, _) in self.battle.reachable(id) {
+                push_tile_quad(&mut verts, &mut indices, tile, [0.9, 0.9, 0.7, 0.035]);
+            }
+        }
+
         // Watch cones: the ground each soldier's reaction arc actually
         // covers — sightline and facing both. The selected soldier's cone
         // always shows; the squad's ghost in when toggled [N].

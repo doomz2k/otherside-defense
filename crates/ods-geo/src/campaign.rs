@@ -415,6 +415,9 @@ pub struct Soldier {
     /// The lifetime ledger the callings are read from.
     #[serde(default)]
     pub deeds: Deeds,
+    /// The sheet as it stood at recruitment, for growth-at-a-glance.
+    #[serde(default)]
+    pub base_stats: Option<SoldierStats>,
     #[serde(default)]
     pub has_circlet: bool,
     /// Fitted armor tier.
@@ -1247,7 +1250,7 @@ impl Campaign {
         .trim()
         .to_string();
         self.recruits_hired += 1;
-        Soldier {
+        let mut recruit = Soldier {
             name,
             callsign: String::new(),
             stats: SoldierStats {
@@ -1280,6 +1283,7 @@ impl Campaign {
             has_blade: false,
             confessor: false,
             deeds: Deeds::default(),
+            base_stats: None,
             has_circlet: false,
             armor: ArmorTier::Vestments,
             relic: None,
@@ -1296,7 +1300,10 @@ impl Campaign {
                 7 => Some(Quirk::Butcher),
                 _ => None,
             },
-        }
+        };
+        // The founding sheet, kept for growth-at-a-glance.
+        recruit.base_stats = Some(recruit.stats);
+        recruit
     }
 
     fn guard_over(&self) -> Result<(), GeoError> {

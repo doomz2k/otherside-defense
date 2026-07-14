@@ -188,25 +188,65 @@ impl Core {
                     if !std::path::Path::new(&path).exists() {
                         continue;
                     }
-                    if ui
-                        .button(egui::RichText::new(format!("Load {label}")).size(16.0))
-                        .clicked()
-                    {
-                        match std::fs::read_to_string(&path)
-                            .map_err(|e| e.to_string())
-                            .and_then(|s| Campaign::load_from_str(&s).map_err(|e| e.to_string()))
+                    // The record card: what this save actually holds.
+                    let desc = std::fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                        .map(|v| {
+                            let soldiers =
+                                v["soldiers"].as_array().map(|a| a.len()).unwrap_or(0);
+                            format!(
+                                "month {} · {}k · {} soldiers · {}{}",
+                                v["month"],
+                                v["funds"],
+                                soldiers,
+                                v["difficulty"].as_str().unwrap_or("?"),
+                                if v["ironman"].as_bool().unwrap_or(false) {
+                                    " · IRONMAN"
+                                } else {
+                                    ""
+                                }
+                            )
+                        })
+                        .unwrap_or_else(|| "unreadable record".to_string());
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(egui::RichText::new(format!("Load {label}")).size(16.0))
+                            .on_hover_text(&desc)
+                            .clicked()
                         {
-                            Ok(c) => {
-                                self.log = vec![format!(
-                                    "Campaign restored ({label}): month {}, day {}, {}k banked.",
-                                    c.month, c.day, c.funds
-                                )];
-                                self.campaign = Some(c);
-                                self.enter_geoscape();
+                            match std::fs::read_to_string(&path)
+                                .map_err(|e| e.to_string())
+                                .and_then(|s| {
+                                    Campaign::load_from_str(&s).map_err(|e| e.to_string())
+                                }) {
+                                Ok(c) => {
+                                    self.log = vec![format!(
+                                        "Campaign restored ({label}): month {}, day {}, {}k banked.",
+                                        c.month, c.day, c.funds
+                                    )];
+                                    self.campaign = Some(c);
+                                    self.enter_geoscape();
+                                }
+                                Err(e) => self.status = Some(format!("load failed: {e}")),
                             }
-                            Err(e) => self.status = Some(format!("load failed: {e}")),
                         }
-                    }
+                        ui.label(egui::RichText::new(&desc).weak().small());
+                        let staged = self.pending_delete.as_deref() == Some(path.as_str());
+                        let del_label = if staged { "Certain?" } else { "🗑" };
+                        if ui
+                            .small_button(del_label)
+                            .on_hover_text("delete this record")
+                            .clicked()
+                        {
+                            if staged {
+                                let _ = std::fs::remove_file(&path);
+                                self.pending_delete = None;
+                            } else {
+                                self.pending_delete = Some(path.clone());
+                            }
+                        }
+                    });
                 }
                 ui.add_space(8.0);
                 if ui.button(egui::RichText::new("Quick skirmish").size(18.0)).clicked() {
@@ -234,8 +274,34 @@ impl Core {
         egui::TopBottomPanel::top("geo-top").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 use crate::icons::{self, Icon};
+                ui.strong(format!("M{} · D{}", c.month, c.day));
+                ui.separator();
                 ui.label(format!("Treasury {}k", c.funds));
                 ui.label(format!("Score {}", c.month_score));
+                let crises = c.rifts.iter().filter(|r| r.detected).count() + c.nests.len();
+                if crises > 0 {
+                    ui.colored_label(
+                        if crises >= 3 {
+                            egui::Color32::from_rgb(230, 100, 70)
+                        } else {
+                            egui::Color32::from_rgb(230, 180, 70)
+                        },
+                        format!("⚠ {crises} crisis(es)"),
+                    );
+                }
+                ui.label(format!("🛩 {}/{}", c.sorties.len(), c.zeppelins))
+                    .on_hover_text("sorties aloft / zeppelins");
+                if c.heresy > 0 {
+                    ui.colored_label(
+                        if c.heresy >= 25 {
+                            egui::Color32::from_rgb(220, 60, 60)
+                        } else {
+                            egui::Color32::from_rgb(230, 180, 70)
+                        },
+                        format!("☿ heresy {}", c.heresy),
+                    )
+                    .on_hover_text("the council reads its ledger at every month's end");
+                }
                 ui.separator();
                 icons::stat(ui, Icon::Brimstone, c.brimstone.to_string(), "brimstone salvage");
                 icons::stat(ui, Icon::Hellsteel, c.hellsteel.to_string(), "hellsteel salvage");
@@ -301,7 +367,19 @@ impl Core {
                         .clicked()
                     {
                         self.geo_speed = speed;
+                        self.run_to_event = false;
                     }
+                }
+                if ui
+                    .add_enabled(
+                        alive && !sky_held,
+                        egui::Button::selectable(self.run_to_event, "⏭"),
+                    )
+                    .on_hover_text("run the clock until something happens, then stop")
+                    .clicked()
+                {
+                    self.run_to_event = !self.run_to_event;
+                    self.geo_speed = if self.run_to_event { 3 } else { 0 };
                 }
             });
             ui.add(
@@ -409,9 +487,42 @@ impl Core {
                 });
             }
             if ui.add_sized(wide, egui::Button::new("Menu")).clicked() {
-                self.screen = Screen::Menu;
+                self.confirm_menu = true;
             }
         });
+
+        // Leaving the war table wants a nod (and offers the quicksave).
+        if self.confirm_menu {
+            let mut close = false;
+            egui::Window::new("Leave the war table?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Anything unsaved stays behind.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Save & leave").clicked() {
+                            match std::fs::write(SAVE_PATH, c.save_to_string()) {
+                                Ok(()) => {
+                                    self.screen = Screen::Menu;
+                                }
+                                Err(e) => self.log.push(format!("save failed: {e}")),
+                            }
+                            close = true;
+                        }
+                        if ui.button("Leave").clicked() {
+                            self.screen = Screen::Menu;
+                            close = true;
+                        }
+                        if ui.button("Stay").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            if close {
+                self.confirm_menu = false;
+            }
+        }
 
         // ------------------------------------------------- the dogfight
         // Gargoyles on a led sortie's wind: the commander flies the
@@ -503,7 +614,8 @@ impl Core {
         // ------------------------------------------------- operations
         egui::SidePanel::left("geo-ops").default_width(360.0).show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading("Incursions");
+                let open_now = c.rifts.iter().filter(|r| r.detected).count();
+                ui.heading(format!("War room — {open_now} incursion(s)"));
                 let fit = c.soldiers.iter().filter(|s| s.is_fit()).count();
                 ui.label(format!("{fit} soldiers fit for duty"));
                 ui.horizontal_wrapped(|ui| {
@@ -514,16 +626,29 @@ impl Core {
                 });
                 ui.separator();
 
-                let rifts: Vec<_> = c
+                let mut rifts: Vec<_> = c
                     .rifts
                     .iter()
                     .filter(|r| r.detected)
-                    .map(|r| (r.id, r.kind, r.region, r.days_left, r.is_stabilized(), r.lat, r.lon))
+                    .map(|r| {
+                        (
+                            r.id,
+                            r.kind,
+                            r.region,
+                            r.days_left,
+                            r.is_stabilized(),
+                            r.lat,
+                            r.lon,
+                            r.effective_garrison(),
+                        )
+                    })
                     .collect();
+                // The shortest fuse burns at the top of the queue.
+                rifts.sort_by_key(|r| r.3);
                 if rifts.is_empty() {
                     ui.label("No detected rifts. The augurs keep watch.");
                 }
-                for (id, kind, region, days_left, stabilized, lat, lon) in rifts {
+                for (id, kind, region, days_left, stabilized, lat, lon, garrison) in rifts {
                     let local = c.bases.iter().any(|b| b.region == region);
                     let sortie = c.sorties.iter().find(|s| s.rift_id == id).copied();
                     ui.horizontal_wrapped(|ui| {
@@ -535,13 +660,19 @@ impl Core {
                             self.geo_swing =
                                 Some((lon.to_radians(), lat.to_radians().clamp(0.15, 1.2)));
                         }
-                        ui.label(format!(
-                            "{} in {} ({}) — {days_left}d{}",
+                        let line = format!(
+                            "{} in {} — {days_left}d · ~{garrison} demons{}",
                             kind.name(),
                             region.name(),
-                            region.biome().name(),
                             if stabilized { " (DUG IN)" } else { " (unstable)" }
-                        ));
+                        );
+                        let urgency = match days_left {
+                            0..=1 => egui::Color32::from_rgb(230, 90, 70),
+                            2 => egui::Color32::from_rgb(230, 180, 70),
+                            _ => ui.visuals().text_color(),
+                        };
+                        ui.colored_label(urgency, line)
+                            .on_hover_text(format!("{} country", region.biome().name()));
                         match sortie {
                             // In the air: nothing to do but watch the clock.
                             Some(s) if s.days_left > 0 => {
@@ -554,7 +685,7 @@ impl Core {
                             Some(_) => {
                                 ui.colored_label(egui::Color32::LIGHT_GREEN, "on site");
                                 if ui.button("⚔ Lead").clicked() {
-                                    action = GeoAction::LeadMission(MissionKind::Rift(id));
+                                    self.pending_launch = Some(MissionKind::Rift(id));
                                 }
                                 if ui.button("🎲 Auto").clicked() {
                                     match c.assault_rift(id) {
@@ -568,7 +699,7 @@ impl Core {
                             // Local rifts strike same-day; distant ones fly.
                             None if local => {
                                 if ui.button("⚔ Lead").clicked() {
-                                    action = GeoAction::LeadMission(MissionKind::Rift(id));
+                                    self.pending_launch = Some(MissionKind::Rift(id));
                                 }
                                 if ui.button("🎲 Auto").clicked() {
                                     match c.assault_rift(id) {
@@ -636,7 +767,7 @@ impl Core {
                     ui.horizontal(|ui| {
                         ui.label(format!("nest in {}", region.name()));
                         if ui.button("⚔ Lead").clicked() {
-                            action = GeoAction::LeadMission(MissionKind::Nest(id));
+                            self.pending_launch = Some(MissionKind::Nest(id));
                         }
                         if ui.button("🎲 Auto").clicked() {
                             match c.raze_nest(id) {
@@ -664,13 +795,13 @@ impl Core {
                             .button(egui::RichText::new("⚔ INTO THE SANCTUM").strong())
                             .clicked()
                         {
-                            action = GeoAction::LeadMission(MissionKind::FinalSanctum);
+                            self.pending_launch = Some(MissionKind::FinalSanctum);
                         }
                     } else if ui
                         .button(egui::RichText::new("⚔ THE FINAL ASSAULT").strong())
                         .clicked()
                     {
-                        action = GeoAction::LeadMission(MissionKind::FinalAssault);
+                        self.pending_launch = Some(MissionKind::FinalAssault);
                     }
                 }
 
@@ -719,12 +850,108 @@ impl Core {
                         let mut lance_toggle: Option<(usize, bool)> = None;
                         let mut transfer: Option<usize> = None;
                         let mut squad_rotate: Option<usize> = None;
-                        egui::Grid::new("roster").striped(true).show(ui, |ui| {
-                            for h in ["Name", "Rank", "Quirk", "Squad", "Mind", "TU", "Sta", "HP", "Fir", "Thr", "Mel", "Str", "K", "🧨", "✚", "Lance", "Status"] {
-                                ui.strong(h);
+                        // Sorting and density are the commander's choice.
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.roster_compact, "compact")
+                                .on_hover_text("vitals only: hide kit and skill columns");
+                            if ui
+                                .small_button("issue standard kit")
+                                .on_hover_text(
+                                    "2 charges, 2 dressings, 2 blessed magazines, all hands",
+                                )
+                                .clicked()
+                            {
+                                for s in c.soldiers.iter_mut() {
+                                    s.grenades_loadout = 2;
+                                    s.dressings_loadout = 2;
+                                    s.mags_loadout = 2;
+                                    s.mag_pref = ods_sim::units::MagKind::Blessed;
+                                }
+                                self.log.push(
+                                    "The quartermaster issues the standard kit to all hands."
+                                        .to_string(),
+                                );
                             }
+                            if self.roster_sort.is_some() && ui.small_button("muster order").clicked()
+                            {
+                                self.roster_sort = None;
+                            }
+                        });
+                        let compact = self.roster_compact;
+                        // Display order: click a sortable header to reorder.
+                        let mut order: Vec<usize> = (0..c.soldiers.len()).collect();
+                        if let Some((col, asc)) = self.roster_sort {
+                            order.sort_by_key(|&i| {
+                                let s = &c.soldiers[i];
+                                match col {
+                                    0 => s.sanity as i64,
+                                    1 => s.stats.tu as i64,
+                                    2 => s.stats.health as i64,
+                                    3 => s.stats.accuracy as i64,
+                                    4 => s.kills as i64,
+                                    _ => s.missions as i64,
+                                }
+                            });
+                            if !asc {
+                                order.reverse();
+                            }
+                        }
+                        let sort_state = &mut self.roster_sort;
+                        egui::Grid::new("roster").striped(true).show(ui, |ui| {
+                            let mut header =
+                                |ui: &mut egui::Ui, label: &str, col: Option<usize>| {
+                                    let arrow = match (col, *sort_state) {
+                                        (Some(c1), Some((c2, true))) if c1 == c2 => " ▲",
+                                        (Some(c1), Some((c2, false))) if c1 == c2 => " ▼",
+                                        _ => "",
+                                    };
+                                    let resp = ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!("{label}{arrow}"))
+                                                .strong(),
+                                        )
+                                        .sense(egui::Sense::click()),
+                                    );
+                                    if let Some(c1) = col
+                                        && resp
+                                            .on_hover_text("click to sort")
+                                            .clicked()
+                                    {
+                                        *sort_state = match *sort_state {
+                                            Some((c2, true)) if c2 == c1 => Some((c1, false)),
+                                            Some((c2, false)) if c2 == c1 => None,
+                                            _ => Some((c1, true)),
+                                        };
+                                    }
+                                };
+                            header(ui, "Name", None);
+                            header(ui, "Rank", Some(5));
+                            if !compact {
+                                header(ui, "Quirk", None);
+                                header(ui, "Squad", None);
+                            }
+                            header(ui, "Mind", Some(0));
+                            header(ui, "TU", Some(1));
+                            if !compact {
+                                header(ui, "Sta", None);
+                            }
+                            header(ui, "HP", Some(2));
+                            header(ui, "Fir", Some(3));
+                            if !compact {
+                                header(ui, "Thr", None);
+                                header(ui, "Mel", None);
+                                header(ui, "Str", None);
+                            }
+                            header(ui, "K", Some(4));
+                            if !compact {
+                                header(ui, "🧨", None);
+                                header(ui, "✚", None);
+                                header(ui, "Lance", None);
+                            }
+                            header(ui, "Status", None);
                             ui.end_row();
-                            for (si, s) in c.soldiers.iter_mut().enumerate() {
+                            for si in order {
+                                let s = &mut c.soldiers[si];
                                 let mut tag = String::new();
                                 if !s.scars.is_empty() {
                                     tag.push('*');
@@ -754,13 +981,15 @@ impl Core {
                                         ));
                                     }
                                 }
-                                ui.label(s.quirk.map_or("–", |q| q.name()));
-                                {
+                                if !compact {
+                                    ui.label(s.quirk.map_or("–", |q| q.name()));
                                     let tag = ods_geo::SQUAD_NAMES[s.squad as usize];
                                     let short: String = tag.chars().take(4).collect();
                                     if ui
                                         .small_button(short)
-                                        .on_hover_text(format!("standing squad: {tag} (click to rotate)"))
+                                        .on_hover_text(format!(
+                                            "standing squad: {tag} (click to rotate)"
+                                        ))
                                         .clicked()
                                     {
                                         squad_rotate = Some(si);
@@ -778,41 +1007,55 @@ impl Core {
                                     mind.on_hover_text(format!("phobia: {}", phobia.name()));
                                 }
                                 ui.label(s.stats.tu.to_string());
-                                ui.label(s.stats.stamina.to_string());
+                                if !compact {
+                                    ui.label(s.stats.stamina.to_string());
+                                }
                                 ui.label(s.stats.health.to_string());
                                 ui.label(s.stats.accuracy.to_string())
                                     .on_hover_text("firing accuracy");
-                                ui.label(s.stats.throwing.to_string())
-                                    .on_hover_text("throwing accuracy");
-                                ui.label(s.stats.melee.to_string())
-                                    .on_hover_text("melee accuracy");
-                                ui.label(s.stats.strength.to_string());
+                                if !compact {
+                                    ui.label(s.stats.throwing.to_string())
+                                        .on_hover_text("throwing accuracy");
+                                    ui.label(s.stats.melee.to_string())
+                                        .on_hover_text("melee accuracy");
+                                    ui.label(s.stats.strength.to_string());
+                                }
                                 ui.label(s.kills.to_string());
-                                ui.horizontal(|ui| {
-                                    if ui.small_button("-").clicked() && s.grenades_loadout > 0 {
-                                        s.grenades_loadout -= 1;
+                                if !compact {
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("-").clicked()
+                                            && s.grenades_loadout > 0
+                                        {
+                                            s.grenades_loadout -= 1;
+                                        }
+                                        ui.label(s.grenades_loadout.to_string());
+                                        if ui.small_button("+").clicked()
+                                            && s.grenades_loadout < 4
+                                        {
+                                            s.grenades_loadout += 1;
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("-").clicked()
+                                            && s.dressings_loadout > 0
+                                        {
+                                            s.dressings_loadout -= 1;
+                                        }
+                                        ui.label(s.dressings_loadout.to_string());
+                                        if ui.small_button("+").clicked()
+                                            && s.dressings_loadout < 4
+                                        {
+                                            s.dressings_loadout += 1;
+                                        }
+                                    });
+                                    if lance_ok {
+                                        let label = if s.has_lance { "🔥" } else { "–" };
+                                        if ui.small_button(label).clicked() {
+                                            lance_toggle = Some((si, !s.has_lance));
+                                        }
+                                    } else {
+                                        ui.label("–");
                                     }
-                                    ui.label(s.grenades_loadout.to_string());
-                                    if ui.small_button("+").clicked() && s.grenades_loadout < 4 {
-                                        s.grenades_loadout += 1;
-                                    }
-                                });
-                                ui.horizontal(|ui| {
-                                    if ui.small_button("-").clicked() && s.dressings_loadout > 0 {
-                                        s.dressings_loadout -= 1;
-                                    }
-                                    ui.label(s.dressings_loadout.to_string());
-                                    if ui.small_button("+").clicked() && s.dressings_loadout < 4 {
-                                        s.dressings_loadout += 1;
-                                    }
-                                });
-                                if lance_ok {
-                                    let label = if s.has_lance { "🔥" } else { "–" };
-                                    if ui.small_button(label).clicked() {
-                                        lance_toggle = Some((si, !s.has_lance));
-                                    }
-                                } else {
-                                    ui.label("–");
                                 }
                                 if s.is_broken() {
                                     ui.colored_label(egui::Color32::from_rgb(220, 60, 60), "broken")
@@ -1029,12 +1272,276 @@ impl Core {
         egui::TopBottomPanel::bottom("geo-log")
             .default_height(130.0)
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    for (i, label) in
+                        [(0u8, "All"), (1, "Battles"), (2, "Council"), (3, "Augurs")]
+                    {
+                        if ui.selectable_label(self.log_filter == i, label).clicked() {
+                            self.log_filter = i;
+                        }
+                    }
+                    ui.label(
+                        egui::RichText::new("click a line naming a region to swing to it")
+                            .weak()
+                            .small(),
+                    );
+                });
+                let keep = |line: &str| -> bool {
+                    match self.log_filter {
+                        1 => {
+                            line.contains("VICTORY")
+                                || line.contains("REPELLED")
+                                || line.contains("RECKONING")
+                                || line.contains("sortie")
+                        }
+                        2 => {
+                            line.contains("council")
+                                || line.contains("INQUISITION")
+                                || line.contains("month")
+                                || line.contains("demand")
+                        }
+                        3 => {
+                            line.contains("augur")
+                                || line.contains("rift")
+                                || line.contains("RIFT")
+                                || line.contains("quiet")
+                                || line.contains("MOON")
+                        }
+                        _ => true,
+                    }
+                };
+                let mut swing: Option<ods_geo::Region> = None;
                 egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-                    for line in &self.log {
-                        ui.colored_label(log_color(line), line);
+                    for line in self.log.iter().filter(|l| keep(l)) {
+                        let resp = ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(line).color(log_color(line)),
+                            )
+                            .sense(egui::Sense::click()),
+                        );
+                        if resp.clicked()
+                            && let Some(region) =
+                                ods_geo::Region::ALL.iter().find(|r| line.contains(r.name()))
+                        {
+                            swing = Some(*region);
+                        }
                     }
                 });
+                if let Some(region) = swing {
+                    let (lat, lon) = region.centroid();
+                    self.geo_swing =
+                        Some((lon.to_radians(), lat.to_radians().clamp(0.15, 1.2)));
+                }
             });
+
+        // Hover cards: the globe answers before it is asked.
+        if !ctx.is_pointer_over_area() {
+            let ppp = ctx.pixels_per_point();
+            let (w, h) = self.renderer.size();
+            let (origin, dir) =
+                self.geo_camera.screen_ray(self.cursor.0, self.cursor.1, w, h);
+            if let Some(region) = crate::globe::pick_region(origin, dir) {
+                let rifts: Vec<_> = c
+                    .rifts
+                    .iter()
+                    .filter(|r| r.detected && r.region == region)
+                    .collect();
+                let nests = c.nests.iter().filter(|n| n.region == region).count();
+                if !rifts.is_empty() || nests > 0 {
+                    egui::Area::new(egui::Id::new("globe-hover"))
+                        .fixed_pos(egui::pos2(
+                            self.cursor.0 / ppp + 14.0,
+                            self.cursor.1 / ppp + 10.0,
+                        ))
+                        .show(ctx, |ui| {
+                            egui::Frame::window(ui.style()).show(ui, |ui| {
+                                ui.strong(region.name());
+                                for r in &rifts {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} — {}d{} · ~{} demons",
+                                            r.kind.name(),
+                                            r.days_left,
+                                            if r.is_stabilized() { " (DUG IN)" } else { "" },
+                                            r.effective_garrison()
+                                        ))
+                                        .small(),
+                                    );
+                                }
+                                if nests > 0 {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{nests} standing nest(s)"
+                                        ))
+                                        .small(),
+                                    );
+                                }
+                                if let Some(r) = rifts.first()
+                                    && let Ok(days) = c.travel_days(r.id)
+                                {
+                                    ui.label(
+                                        egui::RichText::new(if days == 0 {
+                                            "local: strikes roll same-day".to_string()
+                                        } else {
+                                            format!("travel: {days}d by zeppelin")
+                                        })
+                                        .weak()
+                                        .small(),
+                                    );
+                                }
+                            });
+                        });
+                }
+            }
+        }
+
+        // ------------------------------------------- the muster sheet
+        // Every led mission passes the sheet: who answers, and what they
+        // are missing, before boots leave the ground.
+        if let Some(kind) = self.pending_launch {
+            let mut go = false;
+            let mut stay = false;
+            egui::Window::new("THE MUSTER SHEET")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, -20.0])
+                .show(ctx, |ui| {
+                    ui.strong(format!("Operation: {}", kind.label().to_uppercase()));
+                    let want = c.active_squad;
+                    let mut squad: Vec<usize> = c
+                        .soldiers
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| s.is_fit() && want != 0 && s.squad == want)
+                        .map(|(i, _)| i)
+                        .take(6)
+                        .collect();
+                    for (i, s) in c.soldiers.iter().enumerate() {
+                        if squad.len() >= 6 {
+                            break;
+                        }
+                        if s.is_fit() && !squad.contains(&i) {
+                            squad.push(i);
+                        }
+                    }
+                    let mut mags_wanted = 0;
+                    for &i in &squad {
+                        let s = &c.soldiers[i];
+                        let mut flags: Vec<&str> = Vec::new();
+                        if s.mags_loadout == 0 {
+                            flags.push("NO SPARE MAGS");
+                        }
+                        if s.dressings_loadout == 0 {
+                            flags.push("no dressings");
+                        }
+                        if s.sanity < 40 {
+                            flags.push("mind frayed");
+                        }
+                        mags_wanted += s.mags_loadout;
+                        if flags.is_empty() {
+                            ui.label(format!("{} — ready", s.name));
+                        } else {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(230, 180, 70),
+                                format!("{} — {}", s.name, flags.join(", ")),
+                            );
+                        }
+                    }
+                    if squad.is_empty() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(220, 60, 60),
+                            "Nobody is fit to muster.",
+                        );
+                    } else if squad.len() < 6 {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(230, 180, 70),
+                            format!("Understrength: {} of 6.", squad.len()),
+                        );
+                    }
+                    if mags_wanted > c.quarrel_stock {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(230, 180, 70),
+                            format!(
+                                "The stores cannot fill every belt ({} wanted, {} pressed).",
+                                mags_wanted, c.quarrel_stock
+                            ),
+                        );
+                    }
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if !squad.is_empty()
+                            && ui.button(egui::RichText::new("⚔ Launch").strong()).clicked()
+                        {
+                            go = true;
+                        }
+                        if ui.button("Stand down").clicked() {
+                            stay = true;
+                        }
+                    });
+                });
+            if go {
+                action = GeoAction::LeadMission(kind);
+                self.pending_launch = None;
+            } else if stay {
+                self.pending_launch = None;
+            }
+        }
+
+        // ------------------------------------- demolition wants a nod
+        if let Some((bi, x, y)) = self.pending_demolish {
+            let name = c.bases.get(bi).and_then(|b| b.facility_at(x, y)).map(|(f, _)| f.name());
+            let mut done = false;
+            egui::Window::new("Tear it down?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 20.0])
+                .show(ctx, |ui| {
+                    match name {
+                        Some(n) => ui.label(format!(
+                            "The {n} comes down for a quarter of its stone. This is not \
+                             a scaffold — it is a finished hall."
+                        )),
+                        None => ui.label("Nothing stands there anymore."),
+                    };
+                    ui.horizontal(|ui| {
+                        if name.is_some() && ui.button("Demolish").clicked() {
+                            match c.demolish_facility(bi, x, y) {
+                                Ok((f, refund)) => {
+                                    self.log.push(format!(
+                                        "{} torn down; {refund}k reclaimed in stone.",
+                                        f.name()
+                                    ));
+                                    self.base_dirty = true;
+                                }
+                                Err(e) => self.log.push(format!("cannot demolish: {e:?}")),
+                            }
+                            done = true;
+                        }
+                        if ui.button("Let it stand").clicked() {
+                            done = true;
+                        }
+                    });
+                });
+            if done {
+                self.pending_demolish = None;
+            }
+        }
+
+        // Transient notices, top-right, fading as they age.
+        if !self.toasts.is_empty() {
+            egui::Area::new(egui::Id::new("toasts"))
+                .anchor(egui::Align2::RIGHT_TOP, [-12.0, 40.0])
+                .show(ctx, |ui| {
+                    for (text, ttl) in &self.toasts {
+                        let alpha = (*ttl * 255.0 / 2.0).clamp(0.0, 220.0) as u8;
+                        egui::Frame::window(ui.style())
+                            .fill(egui::Color32::from_rgba_unmultiplied(24, 22, 20, alpha))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new(text).small());
+                            });
+                    }
+                });
+        }
 
         // Under a blood moon the whole sky is a wound.
         if c.blood_moon.is_some() {
@@ -1094,7 +1601,7 @@ impl Core {
                         );
                         ui.horizontal(|ui| {
                             if ui.button("⚔ Lead the purge").clicked() {
-                                action = GeoAction::LeadMission(MissionKind::Purge(region));
+                                self.pending_launch = Some(MissionKind::Purge(region));
                             }
                             if ui.button("🎲 Auto").clicked() {
                                 match c.purge_patron(region) {
@@ -1270,7 +1777,13 @@ impl Core {
                         ui.separator();
                         stat_bars(ui, &c.soldiers[si]);
                         ui.separator();
-                        inventory_grid(ui, c, si);
+                        inventory_grid(
+                            ui,
+                            c,
+                            si,
+                            &mut self.presets,
+                            &mut self.preset_name,
+                        );
                         ui.horizontal(|ui| {
                             use ods_sim::units::MagKind;
                             ui.label("Pressed with");
@@ -1503,6 +2016,9 @@ impl Core {
                     &mut self.build_choice,
                     &mut self.log,
                     &mut self.base_dirty,
+                    &mut self.desk_tab,
+                    &mut self.pending_demolish,
+                    &mut self.relic_confirm,
                 );
             });
         });
@@ -1516,6 +2032,44 @@ impl Core {
                         .small(),
                 );
             });
+
+        if let Some((bi, x, y)) = self.pending_demolish {
+            let name = c.bases.get(bi).and_then(|b| b.facility_at(x, y)).map(|(f, _)| f.name());
+            let mut done = false;
+            egui::Window::new("Tear it down?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 20.0])
+                .show(ctx, |ui| {
+                    match name {
+                        Some(n) => ui.label(format!(
+                            "The {n} comes down for a quarter of its stone."
+                        )),
+                        None => ui.label("Nothing stands there anymore."),
+                    };
+                    ui.horizontal(|ui| {
+                        if name.is_some() && ui.button("Demolish").clicked() {
+                            match c.demolish_facility(bi, x, y) {
+                                Ok((f, refund)) => {
+                                    self.log.push(format!(
+                                        "{} torn down; {refund}k reclaimed in stone.",
+                                        f.name()
+                                    ));
+                                    self.base_dirty = true;
+                                }
+                                Err(e) => self.log.push(format!("cannot demolish: {e:?}")),
+                            }
+                            done = true;
+                        }
+                        if ui.button("Let it stand").clicked() {
+                            done = true;
+                        }
+                    });
+                });
+            if done {
+                self.pending_demolish = None;
+            }
+        }
         back
     }
 }
@@ -1655,6 +2209,7 @@ fn seed_from_clock() -> u64 {
 
 /// The chapterhouse desk: build grid, founding, hiring, drills, the Codex,
 /// and the Workshop. Shared by the Basescape's side panel.
+#[allow(clippy::too_many_arguments)] // the commander's desk has many drawers
 fn chapterhouse_panel(
     ui: &mut egui::Ui,
     c: &mut Campaign,
@@ -1662,6 +2217,9 @@ fn chapterhouse_panel(
     build_choice: &mut Facility,
     log: &mut Vec<String>,
     base_dirty: &mut bool,
+    tab: &mut u8,
+    pending_demolish: &mut Option<(usize, usize, usize)>,
+    relic_confirm: &mut bool,
 ) {
     let before = (*selected_base, snapshot(c, *selected_base));
                 ui.horizontal_wrapped(|ui| {
@@ -1672,6 +2230,17 @@ fn chapterhouse_panel(
                 *selected_base = (*selected_base).min(c.bases.len() - 1);
                 let bi = *selected_base;
                 ui.heading(format!("Chapterhouse — {}", c.bases[bi].region.name()));
+                ui.horizontal(|ui| {
+                    for (i, label) in
+                        [(0u8, "Halls"), (1, "Codex"), (2, "Forge"), (3, "Broker")]
+                    {
+                        if ui.selectable_label(*tab == i, label).clicked() {
+                            *tab = i;
+                        }
+                    }
+                });
+                ui.separator();
+                if *tab == 0 {
 
                 ui.horizontal_wrapped(|ui| {
                     for f in Facility::BUILDABLE {
@@ -1751,12 +2320,18 @@ fn chapterhouse_panel(
                                 log.push(format!("cannot build: {e:?}"));
                             }
                             if resp.secondary_clicked() && cell.is_some() {
-                                match c.demolish_facility(bi, x, y) {
-                                    Ok((f, refund)) => log.push(format!(
-                                        "{} torn down; {refund}k reclaimed in stone.",
-                                        f.name()
-                                    )),
-                                    Err(e) => log.push(format!("cannot demolish: {e:?}")),
+                                if days.is_none() {
+                                    // A finished hall waits for the nod.
+                                    *pending_demolish = Some((bi, x, y));
+                                } else {
+                                    // Canceling a scaffold is cheap and instant.
+                                    match c.demolish_facility(bi, x, y) {
+                                        Ok((f, refund)) => log.push(format!(
+                                            "{} works canceled; {refund}k reclaimed.",
+                                            f.name()
+                                        )),
+                                        Err(e) => log.push(format!("cannot demolish: {e:?}")),
+                                    }
                                 }
                             }
                         }
@@ -1920,6 +2495,8 @@ fn chapterhouse_panel(
                     });
                 }
 
+                } // halls
+                if *tab == 1 {
                 ui.add_space(6.0);
                 ui.heading("Forbidden Codex");
                 {
@@ -1976,6 +2553,8 @@ fn chapterhouse_panel(
                     });
                 }
 
+                } // codex
+                if *tab == 2 {
                 ui.add_space(6.0);
                 ui.heading(format!("Workshop — {}", c.bases[bi].region.name()));
                 match c.jobs.iter().find(|j| j.base == bi) {
@@ -2022,6 +2601,8 @@ fn chapterhouse_panel(
                             .on_hover_text(item_lore(item.name()));
                     });
                 }
+    } // forge
+    if *tab == 3 {
     ui.add_space(6.0);
     ui.heading("The Shadow Broker");
     let heresy_color = match c.heresy {
@@ -2071,17 +2652,29 @@ fn chapterhouse_panel(
                 Err(e) => log.push(format!("no deal: {e:?}")),
             }
         }
+        let relic_label = if *relic_confirm {
+            "Certain? It does not come back"
+        } else {
+            "Sell a relic (120k)"
+        };
         if ui
-            .add_enabled(!c.relic_pool.is_empty(), egui::Button::new("Sell a relic (120k)"))
+            .add_enabled(!c.relic_pool.is_empty(), egui::Button::new(relic_label))
             .on_hover_text("something old and holy, gone quietly abroad; +2 heresy")
             .clicked()
         {
-            match c.dark_sell_relic() {
-                Ok(_) => log.push("A reliquary case leaves by the night road.".into()),
-                Err(e) => log.push(format!("no deal: {e:?}")),
+            if *relic_confirm {
+                match c.dark_sell_relic() {
+                    Ok(_) => log.push("A reliquary case leaves by the night road.".into()),
+                    Err(e) => log.push(format!("no deal: {e:?}")),
+                }
+                *relic_confirm = false;
+            } else {
+                *relic_confirm = true;
             }
         }
     });
+
+    } // broker
 
     // Anything that changed the halls redraws the diorama.
     if before.0 != *selected_base || before.1 != snapshot(c, *selected_base) {
@@ -2112,16 +2705,42 @@ fn stat_bars(ui: &mut egui::Ui, s: &ods_geo::Soldier) {
         ("Strength", s.stats.strength, 60, egui::Color32::from_rgb(220, 150, 85)),
         ("Sanity", s.sanity, 100, egui::Color32::from_rgb(160, 165, 230)),
     ];
+    // The founding sheet, for growth-at-a-glance on hover.
+    let base = s.base_stats;
+    let base_of = |label: &str| -> Option<i32> {
+        let b = base?;
+        Some(match label {
+            "Time Units" => b.tu,
+            "Stamina" => b.stamina,
+            "Health" => b.health,
+            "Bravery" => b.bravery,
+            "Reactions" => b.reactions,
+            "Firing Accuracy" => b.accuracy,
+            "Throwing Accuracy" => b.throwing,
+            "Melee Accuracy" => b.melee,
+            "Strength" => b.strength,
+            _ => return None,
+        })
+    };
     for (label, value, max, color) in rows {
         ui.horizontal(|ui| {
             ui.add_sized(
                 [118.0, 12.0],
                 egui::Label::new(egui::RichText::new(label).small()),
             );
-            ui.add_sized(
+            let value_label = ui.add_sized(
                 [22.0, 12.0],
                 egui::Label::new(egui::RichText::new(value.to_string()).small().strong()),
             );
+            if let Some(b) = base_of(label) {
+                let delta = value - b;
+                if delta != 0 {
+                    value_label.on_hover_text(format!(
+                        "{}{delta} since recruitment (was {b})",
+                        if delta > 0 { "+" } else { "" }
+                    ));
+                }
+            }
             let (rect, _) = ui.allocate_exact_size(egui::vec2(110.0, 7.0), egui::Sense::hover());
             let paint = ui.painter_at(rect);
             paint.rect_filled(rect, 1.0, egui::Color32::from_gray(38));
@@ -2154,7 +2773,13 @@ fn kit_cell(ui: &mut egui::Ui, icon: &str, hover: &str, in_pack: bool) {
 /// slots are the first three consumable uses at the plain price; below
 /// them, everything else rides in the pack at +6 TU a fetch. Strength
 /// carries the weight — overload it and the hands slow.
-fn inventory_grid(ui: &mut egui::Ui, c: &mut Campaign, si: usize) {
+fn inventory_grid(
+    ui: &mut egui::Ui,
+    c: &mut Campaign,
+    si: usize,
+    presets: &mut Vec<(String, u32, u32, u32, String)>,
+    preset_name: &mut String,
+) {
     let s = &c.soldiers[si];
 
     // Hands: what the paper doll below actually assigns.
@@ -2242,6 +2867,55 @@ fn inventory_grid(ui: &mut egui::Ui, c: &mut Campaign, si: usize) {
         "capacity is 2 + Strength/8; charges and dressings weigh one \
          apiece, two magazines ride as one",
     );
+
+    // Presets: a kit worth keeping gets a name.
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new("Presets:").weak().small());
+        let mut apply: Option<usize> = None;
+        let mut delete: Option<usize> = None;
+        for (i, (name, ..)) in presets.iter().enumerate() {
+            let resp = ui.small_button(name).on_hover_text(
+                "click to apply · right-click to forget",
+            );
+            if resp.clicked() {
+                apply = Some(i);
+            }
+            if resp.secondary_clicked() {
+                delete = Some(i);
+            }
+        }
+        if let Some(i) = apply {
+            let (_, g, d, m, kind) = presets[i].clone();
+            let s = &mut c.soldiers[si];
+            s.grenades_loadout = g;
+            s.dressings_loadout = d;
+            s.mags_loadout = m;
+            s.mag_pref = match kind.as_str() {
+                "cold iron" => ods_sim::units::MagKind::ColdIron,
+                "salt" => ods_sim::units::MagKind::Salt,
+                _ => ods_sim::units::MagKind::Blessed,
+            };
+        }
+        if let Some(i) = delete {
+            presets.remove(i);
+        }
+        ui.add(
+            egui::TextEdit::singleline(preset_name)
+                .desired_width(70.0)
+                .hint_text("name"),
+        );
+        if ui.small_button("save kit").clicked() && !preset_name.trim().is_empty() {
+            let s = &c.soldiers[si];
+            presets.push((
+                preset_name.trim().to_string(),
+                s.grenades_loadout,
+                s.dressings_loadout,
+                s.mags_loadout,
+                s.mag_pref.name().to_string(),
+            ));
+            preset_name.clear();
+        }
+    });
 
     // The quartermaster's counters.
     ui.horizontal(|ui| {

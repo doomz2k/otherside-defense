@@ -446,6 +446,13 @@ pub struct ShotForecast {
     pub stun: bool,
     /// Whether the shooter can actually see the target right now.
     pub seen: bool,
+    /// The arithmetic behind `chance`, for the HUD's breakdown card:
+    /// raw skill, the mode's multiplier (percent), kneel (percent bonus
+    /// applied), injury tax (percent of chance kept), high-ground bonus.
+    pub skill: i32,
+    pub mode_pct: i32,
+    pub kneeling: bool,
+    pub high_ground: i32,
 }
 
 impl Battle {
@@ -823,7 +830,13 @@ impl Battle {
         let (cost, chance) = (s.fire_cost(mode)?, s.hit_chance(mode)?);
         let t = self.unit(target);
         // Mirror the resolver's high-ground bonus.
-        let chance = if s.tile.z > t.tile.z { (chance + 10).min(95) } else { chance };
+        let high_ground = if s.tile.z > t.tile.z { 10 } else { 0 };
+        let chance = (chance + high_ground).min(95);
+        let mode_pct = match mode {
+            FireMode::Snap => s.weapon.snap_acc,
+            FireMode::Aimed => s.weapon.aimed_acc,
+            FireMode::Auto => s.weapon.auto.as_ref()?.acc,
+        };
         Some(ShotForecast {
             chance,
             cost,
@@ -831,6 +844,10 @@ impl Battle {
             power: s.weapon.power,
             stun: s.weapon.stun_power > 0,
             seen: self.can_see(shooter, target),
+            skill: if s.weapon.melee { s.melee } else { s.accuracy },
+            mode_pct,
+            kneeling: s.kneeling,
+            high_ground,
         })
     }
 

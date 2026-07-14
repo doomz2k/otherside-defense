@@ -211,6 +211,34 @@ pub struct Core {
     pub show_help: bool,
     /// First-encounter hints in the log (the guided first month).
     pub hints: bool,
+    /// Which desk of the chapterhouse panel is open (Halls/Codex/Forge/Broker).
+    pub desk_tab: u8,
+    /// Roster sort: (column, ascending); None keeps muster order.
+    pub roster_sort: Option<(usize, bool)>,
+    /// Roster shows only the vitals.
+    pub roster_compact: bool,
+    /// Log filter chip: 0 all, 1 battles, 2 council, 3 augurs.
+    pub log_filter: u8,
+    /// Transient corner notices: (text, seconds left).
+    pub toasts: Vec<(String, f32)>,
+    /// A mission awaiting the muster sheet's confirmation.
+    pub pending_launch: Option<ods_geo::MissionKind>,
+    /// Run the clock until something happens, then stop.
+    pub run_to_event: bool,
+    /// A finished facility awaiting demolition confirmation (base, x, y).
+    pub pending_demolish: Option<(usize, usize, usize)>,
+    /// Combat text floats over the field.
+    pub combat_text: bool,
+    /// The Menu button asks before abandoning the table.
+    pub confirm_menu: bool,
+    /// A relic sale on the night road awaits its second click.
+    pub relic_confirm: bool,
+    /// A save file staged for deletion (second click confirms).
+    pub pending_delete: Option<String>,
+    /// Saved kit templates: (name, charges, dressings, mags, pressing).
+    pub presets: Vec<(String, u32, u32, u32, String)>,
+    /// The name being typed for the next saved kit.
+    pub preset_name: String,
     /// Which hints have already fired this run.
     pub hints_seen: std::collections::HashSet<&'static str>,
     /// Colorblind-safe overlays: orange/blue instead of red/green.
@@ -330,6 +358,20 @@ impl Core {
             event_cam: cfg.event_cam,
             show_help: false,
             hints: cfg.hints,
+            desk_tab: 0,
+            roster_sort: None,
+            roster_compact: false,
+            log_filter: 0,
+            toasts: Vec::new(),
+            pending_launch: None,
+            run_to_event: false,
+            pending_demolish: None,
+            combat_text: cfg.combat_text,
+            confirm_menu: false,
+            relic_confirm: false,
+            pending_delete: None,
+            presets: cfg.presets.clone(),
+            preset_name: String::new(),
             hints_seen: std::collections::HashSet::new(),
             colorblind: cfg.colorblind,
             reduce_flash: cfg.reduce_flash,
@@ -371,6 +413,8 @@ impl Core {
             crt: self.renderer.crt(),
             event_cam: self.event_cam,
             hints: self.hints,
+            presets: self.presets.clone(),
+            combat_text: self.combat_text,
             colorblind: self.colorblind,
             reduce_flash: self.reduce_flash,
             binds: self
@@ -440,6 +484,7 @@ impl Core {
             .unwrap_or(42);
         let battle = scenario::skirmish(seed);
         let mut screen = BattleScreen::new(&mut self.renderer, battle, None);
+        screen.combat_text = self.combat_text;
         screen.colorblind = self.colorblind;
         screen.reduce_flash = self.reduce_flash;
         self.battle = Some(screen);
@@ -592,6 +637,10 @@ impl Core {
         self.clock = (self.clock + dt) % 3600.0;
         self.fade = (self.fade - dt * 2.2).max(0.0);
         self.pause_flash = (self.pause_flash - dt).max(0.0);
+        for t in &mut self.toasts {
+            t.1 -= dt;
+        }
+        self.toasts.retain(|t| t.1 > 0.0);
         if (self.egui_ctx.zoom_factor() - self.ui_scale).abs() > 0.01 {
             self.egui_ctx.set_zoom_factor(self.ui_scale.clamp(0.8, 1.4));
         }
@@ -683,7 +732,28 @@ impl Core {
                             if !events.is_empty() {
                                 // Something happened: the clock waits.
                                 self.geo_speed = 0;
+                                self.run_to_event = false;
                                 self.day_progress = 0.0;
+                                for e in &events {
+                                    let toast = match e {
+                                        ods_geo::GeoEvent::FacilityComplete { facility } => {
+                                            Some(format!("🔨 {} complete", facility.name()))
+                                        }
+                                        ods_geo::GeoEvent::ResearchComplete { project } => {
+                                            Some(format!("📜 Codex: {}", project.name()))
+                                        }
+                                        ods_geo::GeoEvent::ManufactureComplete { item } => {
+                                            Some(format!("⚒ Delivered: {}", item.name()))
+                                        }
+                                        ods_geo::GeoEvent::CallingEarned { name, calling } => {
+                                            Some(format!("☩ {name} is called {calling}"))
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(t) = toast {
+                                        self.toasts.push((t, 6.0));
+                                    }
+                                }
                                 self.pause_flash = if self.reduce_flash { 0.0 } else { 1.2 };
                                 if let Some(a) = &self.audio {
                                     a.play(audio::Sound::PauseDrum);
@@ -1018,6 +1088,13 @@ impl Core {
                     self.save_config();
                 }
                 if ui
+                    .checkbox(&mut self.combat_text, "Floating combat text")
+                    .on_hover_text("damage, misses, and terror rising off the figures (next battle)")
+                    .changed()
+                {
+                    self.save_config();
+                }
+                if ui
                     .checkbox(&mut self.colorblind, "Colorblind overlays")
                     .on_hover_text("orange/blue field overlays instead of red/green (applies to the next battle)")
                     .changed()
@@ -1150,6 +1227,7 @@ impl Core {
                 lines.push(format!("Squad: {}", squad.join(", ")));
 
                 let mut screen = BattleScreen::new(&mut self.renderer, battle, Some(token));
+                screen.combat_text = self.combat_text;
                 screen.colorblind = self.colorblind;
                 screen.reduce_flash = self.reduce_flash;
                 screen.briefing = Some(lines);

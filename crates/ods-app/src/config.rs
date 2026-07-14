@@ -35,6 +35,12 @@ pub struct Config {
     /// First-encounter hints in the log (the guided first month).
     #[serde(default = "yes")]
     pub hints: bool,
+    /// Floating combat text over the field.
+    #[serde(default = "yes")]
+    pub combat_text: bool,
+    /// Saved kit templates: (name, charges, dressings, mags, pressing).
+    #[serde(default)]
+    pub presets: Vec<(String, u32, u32, u32, String)>,
     /// Colorblind-safe overlays: orange/blue instead of red/green.
     #[serde(default)]
     pub colorblind: bool,
@@ -60,6 +66,8 @@ impl Default for Config {
             crt: false,
             event_cam: true,
             hints: true,
+            combat_text: true,
+            presets: Vec::new(),
             colorblind: false,
             reduce_flash: false,
             binds: Vec::new(),
