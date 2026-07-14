@@ -73,6 +73,8 @@ pub struct BattleScreen {
     floor_cap: bool,
     /// Tint the ground known demons can see ([T]).
     show_threat: bool,
+    /// Watch cones: the ground each soldier's reaction arc covers [N].
+    show_cones: bool,
     /// The big tactical map ([M]).
     show_map: bool,
     /// The demon turn waits behind the HIDDEN MOVEMENT curtain.
@@ -160,6 +162,7 @@ impl BattleScreen {
             banner: Some(("THE SQUAD DEPLOYS".to_string(), 1.6, 1.6)),
             floor_cap: false,
             show_threat: false,
+            show_cones: false,
             show_map: false,
             demon_turn_pending: false,
             hidden_timer: 0.0,
@@ -353,6 +356,32 @@ impl BattleScreen {
                     let result = self.battle.perform(Action::Reload { unit: id });
                     self.apply(renderer, audio, result);
                 }
+            }
+            KeyCode::KeyZ => {
+                if let Some(id) = self.selected {
+                    let me = self.battle.unit(id).tile;
+                    let victim = self
+                        .battle
+                        .units
+                        .iter()
+                        .find(|v| {
+                            v.alive
+                                && !v.conscious
+                                && v.side == Side::Demons
+                                && (v.tile - me).abs().max_element() <= 1
+                        })
+                        .map(|v| v.id);
+                    if let Some(target) = victim {
+                        let result = self.battle.perform(Action::Execute { unit: id, target });
+                        self.apply(renderer, audio, result);
+                    } else {
+                        self.log.push("nothing helpless within reach".to_string());
+                    }
+                }
+            }
+            KeyCode::KeyN => {
+                self.show_cones = !self.show_cones;
+                self.refresh_scene(renderer);
             }
             KeyCode::KeyI => {
                 if let Some(id) = self.selected {
@@ -551,6 +580,54 @@ impl BattleScreen {
                             .clicked()
                         {
                             let result = self.battle.perform(Action::SwapWeapon { unit: id });
+                            self.apply(renderer, audio, result);
+                        }
+                    }
+                    // A helpless enemy in arm's reach can simply be ended.
+                    let me = self.battle.unit(id).tile;
+                    let victim = self
+                        .battle
+                        .units
+                        .iter()
+                        .find(|v| {
+                            v.alive
+                                && !v.conscious
+                                && v.side == Side::Demons
+                                && (v.tile - me).abs().max_element() <= 1
+                        })
+                        .map(|v| v.id);
+                    if let Some(target) = victim
+                        && ui
+                            .button("✖ Execute [Z]")
+                            .on_hover_text(
+                                "10 TU — certain, quick, and final; the capture is forfeit",
+                            )
+                            .clicked()
+                    {
+                        let result = self.battle.perform(Action::Execute { unit: id, target });
+                        self.apply(renderer, audio, result);
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("Watch:").weak());
+                    let current = self.battle.unit(id).reserve;
+                    for (label, mode, hint) in [
+                        ("–", None, "spend TUs freely; react with a snap"),
+                        ("Snap", Some(FireMode::Snap), "bank a snap: the cheap trip-wire"),
+                        ("Aim", Some(FireMode::Aimed), "bank an aimed shot: one good answer"),
+                        ("Auto", Some(FireMode::Auto), "bank the whole burst: the storm"),
+                    ] {
+                        if let Some(m) = mode
+                            && self.battle.unit(id).fire_cost(m).is_none()
+                        {
+                            continue;
+                        }
+                        if ui
+                            .selectable_label(current == mode, label)
+                            .on_hover_text(hint)
+                            .clicked()
+                        {
+                            let result =
+                                self.battle.perform(Action::SetReserve { unit: id, mode });
                             self.apply(renderer, audio, result);
                         }
                     }
@@ -2353,6 +2430,40 @@ impl BattleScreen {
                 _ => {}
             }
         }
+        // Watch cones: the ground each soldier's reaction arc actually
+        // covers — sightline and facing both. The selected soldier's cone
+        // always shows; the squad's ghost in when toggled [N].
+        {
+            let in_arc = |u: &ods_sim::units::Unit, tile: IVec3| -> bool {
+                let d = tile - u.tile;
+                if d.x == 0 && d.y == 0 {
+                    return true;
+                }
+                let dir = glam::Vec2::new(d.x as f32, d.y as f32).normalize_or_zero();
+                let face =
+                    glam::Vec2::new(u.facing.x as f32, u.facing.y as f32).normalize_or_zero();
+                dir.dot(face) >= 0.38
+            };
+            for u in &self.battle.units {
+                if !u.is_active() || u.side != Side::Order || u.civilian {
+                    continue;
+                }
+                let is_sel = self.selected == Some(u.id);
+                if !self.show_cones && !is_sel {
+                    continue;
+                }
+                let color = if is_sel {
+                    [0.95, 0.8, 0.3, 0.10]
+                } else {
+                    [0.5, 0.65, 0.9, 0.05]
+                };
+                for tile in self.battle.tiles_seen_from(&[u.tile]) {
+                    if in_arc(u, tile) {
+                        push_tile_quad(&mut verts, &mut indices, tile, color);
+                    }
+                }
+            }
+        }
         // Fallen weapons glint where they lie: a low steel cross wherever
         // the squad can see the floor.
         for (tile, _, _) in &self.battle.ground {
@@ -2694,6 +2805,20 @@ fn describe(event: &Event, battle: &Battle) -> String {
         }
         Event::WeaponDropped { unit, .. } => {
             format!("{}'s weapon falls to the ground", name(unit))
+        }
+        Event::Executed { unit, target } => {
+            format!("{} puts {} down where it lies", name(unit), name(target))
+        }
+        Event::RestGranted { unit } => {
+            format!("{} is at rest — the wall remembers", name(unit))
+        }
+        Event::PackShaken => "the last driver is dead: the pack feels the leash go slack".into(),
+        Event::PackBroken => "THE PACK BREAKS — everything that knows fear turns and runs".into(),
+        Event::Escaped { unit } => {
+            format!("{} reaches the way out and is gone — to tell of you", name(unit))
+        }
+        Event::Lashed { unit } => {
+            format!("a Prince's will falls across {} — it turns back", name(unit))
         }
         Event::NoiseInDark { near } => {
             format!("something shrieks in the dark, out in {}...", place(near))

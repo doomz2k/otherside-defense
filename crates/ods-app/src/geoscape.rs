@@ -1561,6 +1561,14 @@ fn report_line(what: &str, r: ods_geo::BattleReport) -> String {
                 String::new()
             } else {
                 format!(" — {} forged weapon(s) came home off the field", r.recovered.len())
+            } + &if r.escaped > 0 {
+                format!(" — {} fled to tell of it", r.escaped)
+            } else {
+                String::new()
+            } + &if r.executed > 0 {
+                format!(" — {} put down where they lay", r.executed)
+            } else {
+                String::new()
             }
         )
     } else {

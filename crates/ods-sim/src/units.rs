@@ -207,8 +207,13 @@ pub struct Unit {
     pub melee: i32,
     /// Kneeling: +15% accuracy until the unit moves.
     pub kneeling: bool,
-    /// Reserve enough TUs for a snap shot when moving.
-    pub reserve_snap: bool,
+    /// Overwatch stance: TUs banked for this fire mode while moving, and
+    /// reaction fire answers with it. None = spend freely, react snap.
+    pub reserve: Option<FireMode>,
+    /// Broken as a pack: running for where it came in, done fighting.
+    pub routed: bool,
+    /// It reached the way out and is gone — alive, uncounted, reporting.
+    pub escaped: bool,
     /// Can use the Terrify psi attack.
     pub psi: bool,
     /// Can use full Possession (Princes).
@@ -302,7 +307,9 @@ impl Unit {
             throwing: 45,
             melee: 40,
             kneeling: false,
-            reserve_snap: false,
+            reserve: None,
+            routed: false,
+            escaped: false,
             psi: false,
             psi_master: false,
             facing: IVec3::new(-1, 0, 0),

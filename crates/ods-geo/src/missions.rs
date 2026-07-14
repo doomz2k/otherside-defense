@@ -37,6 +37,10 @@ pub struct BattleReport {
     /// Forged weapons picked off a held field (balance-table keys): the
     /// fallen's arms come home when the field is won.
     pub recovered: Vec<String>,
+    /// Demons that routed and reached the way out: alive, gone, reporting.
+    pub escaped: u32,
+    /// Helpless enemies put down where they lay.
+    pub executed: u32,
     pub species_captured: Vec<ods_sim::units::Species>,
     /// Horrors witnessed per survivor (squad index, count) — sanity damage.
     pub horrors: Vec<(usize, u32)>,
@@ -236,7 +240,7 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
         if !u.civilian && !species_seen.contains(&u.species) {
             species_seen.push(u.species);
         }
-        if !u.alive && !u.civilian && !species_slain.contains(&u.species) {
+        if !u.alive && !u.escaped && !u.civilian && !species_slain.contains(&u.species) {
             species_slain.push(u.species);
         }
     }
@@ -273,7 +277,11 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
         injuries,
         severed,
         recovered,
-        demons_slain: demons_total.saturating_sub(battle.living(Side::Demons).count() as u32),
+        demons_slain: demons_total
+            .saturating_sub(battle.living(Side::Demons).count() as u32)
+            .saturating_sub(battle.units.iter().filter(|u| u.escaped).count() as u32),
+        escaped: battle.units.iter().filter(|u| u.escaped).count() as u32,
+        executed: battle.executed,
         captured_grunts,
         captured_overseers,
         civilians_saved,

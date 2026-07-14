@@ -833,6 +833,17 @@ pub fn incursion_mission(
         battle.register_cask(tile);
     }
     battle.set_objective(obelisk_min, obelisk_max);
+    // The rift keeps giving: a second wave scribes in at the spawn ground
+    // unless the obelisk falls first. Stronger months send more, sooner.
+    if strength >= 2 {
+        battle.schedule_summon(IVec3::new(DEMON_SPAWNS[4].0, DEMON_SPAWNS[4].1, 0), 4, strength);
+    }
+    if strength >= 5 {
+        battle.schedule_summon(IVec3::new(DEMON_SPAWNS[5].0, DEMON_SPAWNS[5].1, 0), 4, strength);
+    }
+    if strength >= 7 {
+        battle.schedule_summon(IVec3::new(DEMON_SPAWNS[6].0, DEMON_SPAWNS[6].1, 0), 7, strength);
+    }
     // The mission rule, made concrete.
     match spec {
         MissionSpec::Standard => {}
@@ -1055,6 +1066,8 @@ pub fn nest_map(seed: u64, mut soldiers: Vec<Unit>, demon_count: u32, strength: 
 
     let mut battle = Battle::new(world, IVec3::ZERO, MAP_TILES, units, seed);
     battle.set_objective(heart_min, heart_max);
+    // The warren is theirs: its garrison holds the dark and waits.
+    battle.demons_hold = true;
     battle
 }
 
@@ -1123,6 +1136,8 @@ pub fn manor_purge(seed: u64, soldiers: Vec<Unit>, demon_count: u32) -> Battle {
     const MANOR: [(usize, usize); 9] =
         [(1, 1), (2, 1), (1, 2), (2, 2), (3, 2), (2, 3), (3, 3), (4, 2), (4, 3)];
     let mut battle = base_defense(seed, soldiers, demon_count, &MANOR, (4, 3));
+    // The house is theirs: cultists hold their rooms and bank the shot.
+    battle.demons_hold = true;
     // Every second demon is a turned servant of the house.
     let mut cultist = 0;
     for u in &mut battle.units {

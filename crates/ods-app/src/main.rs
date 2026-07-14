@@ -794,6 +794,8 @@ impl Core {
                             ("Reload", "C"),
                             ("Draw sidearm", "I"),
                             ("Take up a fallen weapon", "J"),
+                            ("Execute the helpless", "Z"),
+                            ("Watch cones", "N"),
                             ("Turn the field", "Q / E"),
                             ("Pan", "W A S D / screen edge"),
                             ("Orbit", "right-drag"),

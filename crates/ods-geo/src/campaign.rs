@@ -2233,6 +2233,12 @@ impl Campaign {
         // The quartermaster walks a held field: forged weapons come home.
         self.take_salvage(&report.recovered);
 
+        // What flees, reports: every rout that reached the way out feeds
+        // hell's picture of where the Order stands.
+        if report.escaped > 0 {
+            self.reckoning_heat += 1;
+        }
+
         // Shared fields forge bonds: two seasoned, unbonded survivors of a
         // held field sometimes stop pretending they aren't a pair. This must
         // read the roster BEFORE the dead are struck from it — squad indices
@@ -4738,6 +4744,8 @@ mod tests {
             horrors: vec![],
             atrocities_found: 0,
             recovered: vec![],
+            escaped: 0,
+            executed: 0,
         };
         let squad_idx: Vec<usize> = (0..c.soldiers.len().min(6)).collect();
         c.apply_to_roster(&squad_idx, &report, "a test");

@@ -166,6 +166,18 @@ fn run_side_turn(battle: &mut Battle, side: Side) -> Vec<Event> {
 
 fn pick_action(battle: &Battle, id: UnitId, side: Side) -> Option<Action> {
     let me = battle.unit(id);
+    // The routed are done fighting: run for where the pack came in.
+    if me.routed {
+        let exit = battle.demon_exit;
+        if dist(me.tile, exit) <= 1 {
+            return None; // the way out takes them at the turn's edge
+        }
+        let step = nearest_open_neighbor(battle, exit, me.tile, false)?;
+        if step == me.tile {
+            return None;
+        }
+        return Some(Action::Move { unit: id, to: step });
+    }
     // Senses, not omniscience: hunt what the side can SEE, or what is close
     // enough to smell. The blind investigate noise, then drift toward where
     // the enemy came from. Crouched, quiet squads exploit exactly this.
@@ -344,6 +356,14 @@ fn skirmisher(
         }
         return None; // in contact but dry — hold position
     }
+    // A defending gunline with nothing in its sights holds its ground in
+    // cover and banks the shot: the first thing through the door eats it.
+    if battle.demons_hold && me.side == Side::Demons && hugs_cover(battle, me.tile) {
+        if me.reserve.is_none() {
+            return Some(Action::SetReserve { unit: me.id, mode: Some(FireMode::Snap) });
+        }
+        return None;
+    }
     // Nothing in my sights: hunt a firing position on the nearest known
     // enemy, cover to cover.
     let wish = Wish {
@@ -475,6 +495,46 @@ fn stalker(
     prey_id: UnitId,
     prey_tile: IVec3,
 ) -> Option<Action> {
+    // The helpless are the harvest: an unconscious soldier nobody stands
+    // over can be Taken without ever waking.
+    let downed = battle.units.iter().find(|u| {
+        u.alive
+            && !u.conscious
+            && u.side == side.enemy()
+            && u.species == Species::Soldier
+            && !u.civilian
+            && dist(me.tile, u.tile) <= SCENT_TILES + 4
+            && !battle.units.iter().any(|g| {
+                g.is_active()
+                    && g.side == u.side
+                    && !g.civilian
+                    && g.id != u.id
+                    && dist(g.tile, u.tile) <= 1
+            })
+    });
+    if let Some(d) = downed {
+        if dist(me.tile, d.tile) <= 1 {
+            if me.tu >= crate::battle::DEFILE_TU {
+                return Some(Action::Defile { unit: me.id, corpse: d.id });
+            }
+            return None; // crouch over the body until the strength comes
+        }
+        let wish = Wish {
+            goal: d.tile,
+            band: (1, dist(me.tile, d.tile).max(2) - 1),
+            needs_sight: false,
+            fears_sight: true,
+            cover: true,
+            flank: None,
+        };
+        if let Some(to) = better_tile(battle, me, guns, &wish) {
+            return Some(Action::Move { unit: me.id, to });
+        }
+        let step = nearest_open_neighbor(battle, d.tile, me.tile, true)?;
+        if step != me.tile {
+            return Some(Action::Move { unit: me.id, to: step });
+        }
+    }
     // Prefer whoever has the fewest friends in arm's reach.
     let victim = known
         .iter()
