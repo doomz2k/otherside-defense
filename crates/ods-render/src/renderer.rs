@@ -18,7 +18,7 @@ struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 // Entries 16+ are EMISSIVE: they ignore the sun and pulse on the clock.
-var<private> PALETTE: array<vec3<f32>, 22> = array<vec3<f32>, 22>(
+var<private> PALETTE: array<vec3<f32>, 26> = array<vec3<f32>, 26>(
     vec3<f32>(1.0, 0.0, 1.0),    // 0: unused (empty)
     vec3<f32>(0.33, 0.34, 0.27), // 1: ground: dark field-green-grey
     vec3<f32>(0.40, 0.24, 0.18), // 2: chapel brick, soot-darkened
@@ -40,7 +40,11 @@ var<private> PALETTE: array<vec3<f32>, 22> = array<vec3<f32>, 22>(
     vec3<f32>(0.70, 0.20, 0.85), // 18: corruption glow (the obelisk's veins)
     vec3<f32>(0.20, 0.36, 0.12), // 19: grass tuft
     vec3<f32>(0.58, 0.10, 0.08), // 20: wildflower red
-    vec3<f32>(0.52, 0.58, 0.68)  // 21: frost glint / scree
+    vec3<f32>(0.52, 0.58, 0.68), // 21: frost glint / scree
+    vec3<f32>(0.30, 0.23, 0.15), // 22: bare earth, turned soil
+    vec3<f32>(0.44, 0.38, 0.28), // 23: the worn road, packed pale
+    vec3<f32>(0.29, 0.37, 0.18), // 24: meadow grass, a lighter green
+    vec3<f32>(0.38, 0.38, 0.35)  // 25: field boulder grey
 );
 
 struct VsIn {
@@ -99,7 +103,7 @@ fn bayer(frag: vec2<f32>) -> f32 {
 fn fs_main(in: VsOut) -> FsOut {
     var out: FsOut;
     out.glow = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-    let base = PALETTE[min(in.material, 21u)];
+    let base = PALETTE[min(in.material, 25u)];
     if in.material >= 16u && in.material <= 18u {
         // Occult light: full-bright, breathing on the clock. Unlit by sun,
         // so sigils burn brightest exactly where the night is darkest —

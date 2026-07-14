@@ -45,6 +45,14 @@ pub const MAT_BLOOD: Voxel = Voxel(14);
 pub const MAT_TUFT: Voxel = Voxel(19);
 pub const MAT_FLOWER: Voxel = Voxel(20);
 pub const MAT_GLINT: Voxel = Voxel(21);
+/// Bare turned earth where the grass gives out.
+pub const MAT_EARTH: Voxel = Voxel(22);
+/// The packed pale road that was here before the war.
+pub const MAT_PATH: Voxel = Voxel(23);
+/// A lighter meadow green blended through the field grass.
+pub const MAT_MEADOW: Voxel = Voxel(24);
+/// Field boulder grey.
+pub const MAT_STONE: Voxel = Voxel(25);
 /// Viscera. What overkill leaves.
 pub const MAT_GORE: Voxel = Voxel(15);
 /// Glowing sigil-crimson: summoning circles, the obelisk's runes. EMISSIVE.
@@ -243,6 +251,7 @@ pub fn incursion_mission(
         IVec3::new(MAP_TILES.x * TILE_VOXELS, MAP_TILES.y * TILE_VOXELS, GROUND_TOP),
         ground,
     );
+    sculpt_ground(&mut world, seed, biome);
     stipple_ground(&mut world, seed, biome);
     build_gondola(&mut world);
     match seed % 3 {
@@ -425,23 +434,132 @@ pub fn incursion_mission(
         let probe = tile * TILE_VOXELS + IVec3::new(8, 8, GROUND_TOP + 1);
         world.voxel(probe) == Voxel::EMPTY
     };
-    // A climbable mound of loose material: walkable high ground (a ramp).
-    let mound_at = |world: &mut VoxelWorld, tile: IVec3, mat: Voxel| {
+    let hash = |a: i32, b: i32, k: u32| -> u32 {
+        let mut h = (seed as u32)
+            .wrapping_mul(747796405)
+            .wrapping_add(a as u32)
+            .wrapping_mul(2654435761)
+            .wrapping_add(b as u32)
+            .wrapping_mul(1274126177)
+            .wrapping_add(k);
+        h ^= h >> 15;
+        h.wrapping_mul(2246822519) >> 8
+    };
+    // A climbable mound of loose material: walkable high ground (a ramp),
+    // with its rim shaved down so it reads as a heap, not a die.
+    let mound_at = move |world: &mut VoxelWorld, tile: IVec3, mat: Voxel| {
         let o = tile * TILE_VOXELS;
         world.fill_box(
             o + IVec3::new(0, 0, GROUND_TOP),
             o + IVec3::new(TILE_VOXELS, TILE_VOXELS, 10 * VS),
             mat,
         );
+        // Shave the top rim on a dome profile; the climbable core stays.
+        let c = TILE_VOXELS as f32 / 2.0;
+        for y in 0..TILE_VOXELS {
+            for x in 0..TILE_VOXELS {
+                let d = (((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt() / c).min(1.0);
+                let bumpy = (hash(tile.x * 64 + x, tile.y * 64 + y, 5) % 3) as i32;
+                let keep = 10 * VS - (d * 7.0) as i32 - bumpy;
+                for z in keep.max(GROUND_TOP + 3)..(10 * VS) {
+                    world.set_voxel(o + IVec3::new(x, y, z), Voxel::EMPTY);
+                }
+            }
+        }
     };
-    // A solid obstacle from ground to shoulder height.
-    let block_at = |world: &mut VoxelWorld, tile: IVec3, mat: Voxel, top: i32| {
+    // A great fieldstone: an irregular half-buried dome, not a die.
+    let boulder_at = move |world: &mut VoxelWorld, tile: IVec3, mat: Voxel| {
         let o = tile * TILE_VOXELS;
+        let c = TILE_VOXELS as f32 / 2.0;
+        let r = 11.0 + (hash(tile.x, tile.y, 7) % 4) as f32;
+        for z in GROUND_TOP..(GROUND_TOP + r as i32) {
+            for y in 0..TILE_VOXELS {
+                for x in 0..TILE_VOXELS {
+                    let dz = (z - GROUND_TOP) as f32 * 1.35;
+                    let wob = (hash(x * 3 + z, y * 3 - z, 9) % 5) as f32 * 0.5;
+                    let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2) + dz * dz).sqrt();
+                    if d + wob < r {
+                        world.set_voxel(o + IVec3::new(x, y, z), mat);
+                    }
+                }
+            }
+        }
+    };
+    // A hedge, wall stub, or drift: a shaped bar with gnawed edges.
+    let bar_at = move |world: &mut VoxelWorld, tile: IVec3, mat: Voxel, top: i32, along_x: bool| {
+        let o = tile * TILE_VOXELS;
+        let (w0, w1) = (TILE_VOXELS / 2 - 6, TILE_VOXELS / 2 + 6);
+        let (min, max) = if along_x {
+            (IVec3::new(0, w0, GROUND_TOP), IVec3::new(TILE_VOXELS, w1, top * VS))
+        } else {
+            (IVec3::new(w0, 0, GROUND_TOP), IVec3::new(w1, TILE_VOXELS, top * VS))
+        };
+        world.fill_box(o + min, o + max, mat);
+        // Gnaw the crown and flanks so the bar reads grown, not extruded.
+        for i in 0..TILE_VOXELS {
+            let drop = (hash(tile.x * 64 + i, tile.y, 13) % 4) as i32;
+            let pinch = (hash(tile.y * 64 + i, tile.x, 17) % 3) as i32;
+            for d in 0..drop {
+                let z = top * VS - 1 - d;
+                for w in (w0 - 1)..=(w1 + 1) {
+                    let p = if along_x { IVec3::new(i, w, z) } else { IVec3::new(w, i, z) };
+                    world.set_voxel(o + p, Voxel::EMPTY);
+                }
+            }
+            for d in 0..pinch {
+                let (wa, wb) = (w0 + d, w1 - 1 - d);
+                for z in (GROUND_TOP + 6)..(top * VS) {
+                    let (pa, pb) = if along_x {
+                        (IVec3::new(i, wa, z), IVec3::new(i, wb, z))
+                    } else {
+                        (IVec3::new(wa, i, z), IVec3::new(wb, i, z))
+                    };
+                    if d == pinch - 1 && z % 3 != 0 {
+                        continue;
+                    }
+                    world.set_voxel(o + pa, Voxel::EMPTY);
+                    world.set_voxel(o + pb, Voxel::EMPTY);
+                }
+            }
+        }
+    };
+    // An oak: a real trunk under a lobed canopy. The trunk's tile blocks;
+    // the canopy rides above head height (neighbors keep their ground).
+    let tree_at = move |world: &mut VoxelWorld, tile: IVec3| {
+        let o = tile * TILE_VOXELS + IVec3::new(TILE_VOXELS / 2, TILE_VOXELS / 2, 0);
         world.fill_box(
-            o + IVec3::new(0, 0, GROUND_TOP),
-            o + IVec3::new(TILE_VOXELS, TILE_VOXELS, top * VS),
-            mat,
+            o + IVec3::new(-2, -2, GROUND_TOP),
+            o + IVec3::new(2, 2, TILE_VOXELS + 4),
+            MAT_TIMBER,
         );
+        // Root flare.
+        world.fill_box(
+            o + IVec3::new(-4, -4, GROUND_TOP),
+            o + IVec3::new(4, 4, GROUND_TOP + 3),
+            MAT_TIMBER,
+        );
+        // Canopy: overlapping leaf-blobs, clamped above the head band so
+        // the tiles around the trunk stay walkable underneath.
+        for (bx, by, bz, r) in [
+            (0i32, 0i32, TILE_VOXELS + 8, 9i32),
+            (-6, 3, TILE_VOXELS + 6, 7),
+            (5, -4, TILE_VOXELS + 7, 7),
+            (2, 6, TILE_VOXELS + 10, 6),
+        ] {
+            let center = o + IVec3::new(bx, by, bz);
+            for z in -r..=r {
+                for y in -r..=r {
+                    for x in -r..=r {
+                        let wob = (hash(x * 5 + z, y * 5 - z, 19) % 4) as f32 * 0.6;
+                        let d = ((x * x + y * y) as f32 + (z as f32 * 1.3).powi(2)).sqrt();
+                        let p = center + IVec3::new(x, y, z);
+                        if d + wob < r as f32 && p.z >= TILE_VOXELS {
+                            world.set_voxel(p, MAT_FOLIAGE);
+                        }
+                    }
+                }
+            }
+        }
     };
     let roll_open = |world: &VoxelWorld, rng: &mut crate::SimRng| -> Option<IVec3> {
         for _ in 0..12 {
@@ -454,27 +572,38 @@ pub fn incursion_mission(
     };
     match biome {
         Biome::Temperate => {
-            // Hedgerows (short foliage walls) and old rubble.
+            // Hedgerows, old rubble, fieldstones, and oaks.
             for _ in 0..4 {
                 if let Some(t) = roll_open(&world, &mut rng) {
+                    let along_x = rng.roll(2) == 0;
                     let step =
-                        if rng.roll(2) == 0 { IVec3::new(1, 0, 0) } else { IVec3::new(0, 1, 0) };
+                        if along_x { IVec3::new(1, 0, 0) } else { IVec3::new(0, 1, 0) };
                     for i in 0..2 + rng.roll(2) as i32 {
                         let seg = t + step * i;
                         if is_open(&world, seg) {
-                            block_at(&mut world, seg, MAT_FOLIAGE, 11);
+                            bar_at(&mut world, seg, MAT_FOLIAGE, 11, along_x);
                         }
                     }
                 }
             }
-            for _ in 0..3 {
+            for _ in 0..2 {
                 if let Some(t) = roll_open(&world, &mut rng) {
                     mound_at(&mut world, t, MAT_RUBBLE);
                 }
             }
+            for _ in 0..2 {
+                if let Some(t) = roll_open(&world, &mut rng) {
+                    boulder_at(&mut world, t, MAT_STONE);
+                }
+            }
+            for _ in 0..3 {
+                if let Some(t) = roll_open(&world, &mut rng) {
+                    tree_at(&mut world, t);
+                }
+            }
         }
         Biome::Desert => {
-            // Dunes to climb and dry-stone stubs to hide behind.
+            // Dunes to climb, dry-stone stubs, and sun-split boulders.
             for _ in 0..7 {
                 if let Some(t) = roll_open(&world, &mut rng) {
                     mound_at(&mut world, t, MAT_SAND);
@@ -482,14 +611,20 @@ pub fn incursion_mission(
             }
             for _ in 0..3 {
                 if let Some(t) = roll_open(&world, &mut rng) {
+                    let along_x = rng.roll(2) == 0;
                     let step =
-                        if rng.roll(2) == 0 { IVec3::new(1, 0, 0) } else { IVec3::new(0, 1, 0) };
+                        if along_x { IVec3::new(1, 0, 0) } else { IVec3::new(0, 1, 0) };
                     for i in 0..2 {
                         let seg = t + step * i;
                         if is_open(&world, seg) {
-                            block_at(&mut world, seg, MAT_WALL, 12);
+                            bar_at(&mut world, seg, MAT_STONE, 12, along_x);
                         }
                     }
+                }
+            }
+            for _ in 0..2 {
+                if let Some(t) = roll_open(&world, &mut rng) {
+                    boulder_at(&mut world, t, MAT_STONE);
                 }
             }
         }
@@ -528,7 +663,7 @@ pub fn incursion_mission(
             }
             for _ in 0..4 {
                 if let Some(t) = roll_open(&world, &mut rng) {
-                    block_at(&mut world, t, MAT_SNOW, 13);
+                    boulder_at(&mut world, t, MAT_GLINT);
                 }
             }
         }
@@ -937,6 +1072,86 @@ fn build_gondola(world: &mut VoxelWorld) {
             o + IVec3::new(TILE_VOXELS - VS, ly + 2 * VS, gunwale + 3 * VS),
             MAT_WARD,
         );
+    }
+}
+
+/// Sculpt the raw ground plane into a place: broad noise-blended patches
+/// of second and third surface materials, shallow dips where the topsoil
+/// gives way to turned earth, and one worn road wandering the long axis.
+/// Everything happens AT or BELOW the ground top, so walkability, sight,
+/// and pathfinding never move — only the eye does.
+fn sculpt_ground(world: &mut VoxelWorld, seed: u64, biome: Biome) {
+    let span = IVec3::new(MAP_TILES.x * TILE_VOXELS, MAP_TILES.y * TILE_VOXELS, 0);
+    let hash01 = |x: i32, y: i32, k: u32| -> f32 {
+        let mut h = (seed as u32)
+            .wrapping_mul(747796405)
+            .wrapping_add(x as u32)
+            .wrapping_mul(2654435761)
+            .wrapping_add(y as u32)
+            .wrapping_mul(1274126177)
+            .wrapping_add(k);
+        h ^= h >> 15;
+        ((h.wrapping_mul(2246822519) >> 8) & 0xFFFF) as f32 / 65535.0
+    };
+    // Smooth value noise on an 8-voxel lattice: patches, not confetti.
+    let noise = |x: i32, y: i32, k: u32| -> f32 {
+        let (gx, gy) = (x.div_euclid(8), y.div_euclid(8));
+        let (fx, fy) = (x.rem_euclid(8) as f32 / 8.0, y.rem_euclid(8) as f32 / 8.0);
+        let (a, b) = (hash01(gx, gy, k), hash01(gx + 1, gy, k));
+        let (c, d) = (hash01(gx, gy + 1, k), hash01(gx + 1, gy + 1, k));
+        // Smoothstep the lerp so lattice lines don't show.
+        let (sx, sy) = (fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy));
+        a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy
+    };
+    let (patch_a, patch_b) = match biome {
+        Biome::Temperate => (MAT_EARTH, MAT_MEADOW),
+        Biome::Jungle => (MAT_EARTH, MAT_FOLIAGE),
+        Biome::Desert => (MAT_STONE, MAT_PATH),
+        Biome::Tundra => (MAT_GLINT, MAT_EARTH),
+    };
+    let top = GROUND_TOP - 1;
+    for y in 0..span.y {
+        for x in 0..span.x {
+            let p = IVec3::new(x, y, top);
+            let n = noise(x, y, 11);
+            if n > 0.64 {
+                world.set_voxel(p, patch_a);
+            } else if n < 0.24 {
+                world.set_voxel(p, patch_b);
+            }
+            // Shallow dips: the topsoil gives way to darker turned earth,
+            // one or two voxels down. Support stays; only the eye drops.
+            let m = noise(x, y, 23);
+            if m > 0.72 {
+                world.set_voxel(p, Voxel::EMPTY);
+                world.set_voxel(p - IVec3::Z, MAT_EARTH);
+                if m > 0.85 {
+                    world.set_voxel(p - IVec3::Z, Voxel::EMPTY);
+                    world.set_voxel(p - IVec3::Z * 2, MAT_EARTH);
+                }
+            }
+        }
+    }
+    // The road: it was here before the war and will outlast it. It wanders
+    // the long axis, and it refills any dip it crosses — roads are packed.
+    let amp = span.y as f32 * 0.16;
+    let base_y = span.y as f32 * (0.42 + 0.2 * hash01(7, 7, 31));
+    for x in 0..span.x {
+        let center = base_y
+            + (x as f32 * 0.035 + hash01(3, 3, 41) * 6.0).sin() * amp
+            + noise(x, 0, 53) * 6.0
+            - 3.0;
+        let half = 3 + (noise(x, 9, 61) * 3.0) as i32;
+        for dy in -half..=half {
+            let y = center as i32 + dy;
+            if y < 0 || y >= span.y {
+                continue;
+            }
+            let p = IVec3::new(x, y, top);
+            world.set_voxel(p, MAT_PATH);
+            // Level the roadbed through any dip.
+            world.set_voxel(p - IVec3::Z, MAT_PATH);
+        }
     }
 }
 
