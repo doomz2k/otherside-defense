@@ -7,7 +7,9 @@ pub fn apply(ctx: &egui::Context) {
 
     v.dark_mode = true;
     v.override_text_color = Some(egui::Color32::from_rgb(214, 202, 178)); // parchment
-    v.panel_fill = egui::Color32::from_rgba_premultiplied(16, 10, 12, 235); // stone
+    // Furniture, not glass: every panel is solid cabinetry. The world is
+    // seen through the viewport, never through the desk.
+    v.panel_fill = egui::Color32::from_rgb(17, 13, 12); // stone, opaque
     v.window_fill = egui::Color32::from_rgb(22, 14, 16);
     v.window_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 96, 48));
     v.faint_bg_color = egui::Color32::from_rgb(30, 20, 22);
@@ -22,7 +24,8 @@ pub fn apply(ctx: &egui::Context) {
     let iron = egui::Color32::from_rgb(38, 28, 26);
     let iron_lit = egui::Color32::from_rgb(56, 40, 34);
     v.widgets.noninteractive.bg_fill = iron;
-    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 54, 40));
+    // Bronze joinery: separators and frames read as fittings, not hairlines.
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(96, 74, 46));
     v.widgets.inactive.bg_fill = iron;
     v.widgets.inactive.weak_bg_fill = iron;
     v.widgets.hovered.bg_fill = iron_lit;
