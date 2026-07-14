@@ -57,8 +57,8 @@ impl RiftKind {
         match self {
             RiftKind::Scouting => 10,
             RiftKind::Harvest => 20,
-            RiftKind::Terror => 40,
-            RiftKind::Infiltration => 30,
+            RiftKind::Terror => 35,
+            RiftKind::Infiltration => 28,
             RiftKind::NestBuilding => 15,
         }
     }

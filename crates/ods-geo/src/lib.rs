@@ -8,6 +8,7 @@
 
 mod base;
 mod campaign;
+pub mod data;
 mod director;
 mod geography;
 mod missions;

@@ -159,6 +159,12 @@ impl Core {
                 }
                 ui.add_space(6.0);
                 if ui.button(egui::RichText::new("New campaign").size(18.0)).clicked() {
+                    self.maybe_hint(
+                        "start",
+                        "The Geoscape: run time with the sidebar (it pauses itself when \
+                         anything happens). The augurs only see rifts in regions they \
+                         watch — coverage is life.",
+                    );
                     let mut c = Campaign::new_with(seed_from_clock(), self.difficulty_choice);
                     c.ironman = self.ironman_choice;
                     self.campaign = Some(c);
@@ -760,10 +766,12 @@ impl Core {
                                         squad_rotate = Some(si);
                                     }
                                 }
-                                let mind_color = match s.sanity {
-                                    0..=20 => egui::Color32::from_rgb(220, 60, 60),
-                                    21..=50 => egui::Color32::from_rgb(230, 180, 70),
-                                    _ => egui::Color32::from_rgb(140, 200, 140),
+                                let mind_color = match (s.sanity, self.colorblind) {
+                                    (0..=20, false) => egui::Color32::from_rgb(220, 60, 60),
+                                    (0..=20, true) => egui::Color32::from_rgb(235, 140, 30),
+                                    (21..=50, _) => egui::Color32::from_rgb(230, 180, 70),
+                                    (_, false) => egui::Color32::from_rgb(140, 200, 140),
+                                    (_, true) => egui::Color32::from_rgb(120, 170, 235),
                                 };
                                 let mind = ui.colored_label(mind_color, s.sanity.to_string());
                                 if let Some(phobia) = s.phobia {

@@ -75,6 +75,10 @@ pub struct BattleScreen {
     show_threat: bool,
     /// Watch cones: the ground each soldier's reaction arc covers [N].
     show_cones: bool,
+    /// Colorblind-safe overlays: orange/blue instead of red/green.
+    pub colorblind: bool,
+    /// Damp screen flashes.
+    pub reduce_flash: bool,
     /// The big tactical map ([M]).
     show_map: bool,
     /// The demon turn waits behind the HIDDEN MOVEMENT curtain.
@@ -163,6 +167,8 @@ impl BattleScreen {
             floor_cap: false,
             show_threat: false,
             show_cones: false,
+            colorblind: false,
+            reduce_flash: false,
             show_map: false,
             demon_turn_pending: false,
             hidden_timer: 0.0,
@@ -1625,7 +1631,9 @@ impl BattleScreen {
                 });
                 self.spawn_debris(p + Vec3::Z * 4.0 * VS_F, [0.55, 0.42, 0.28, 0.9], 8);
                 self.shake += 5.0;
-                self.flash = 0.16;
+                if !self.reduce_flash {
+                    self.flash = 0.16;
+                }
                 self.emit(audio, Sound::Blast, p);
             }
             Event::TerrainDestroyed { center, .. } => {
@@ -1722,7 +1730,11 @@ impl BattleScreen {
                     kind: FxKind::Flash,
                     from: p,
                     to: p,
-                    color: [1.0, 0.15, 0.1, 0.7],
+                    color: if self.colorblind {
+                        [1.0, 0.55, 0.05, 0.7]
+                    } else {
+                        [1.0, 0.15, 0.1, 0.7]
+                    },
                     age: 0.0,
                     life: 0.6,
                 });
@@ -2447,7 +2459,12 @@ impl BattleScreen {
         if let Some(id) = self.selected {
             let u = self.battle.unit(id);
             if u.alive {
-                push_tile_quad(&mut verts, &mut indices, u.tile, [0.2, 1.0, 0.35, 0.35]);
+                let friendly = if self.colorblind {
+                    [0.25, 0.6, 1.0, 0.35]
+                } else {
+                    [0.2, 1.0, 0.35, 0.35]
+                };
+                push_tile_quad(&mut verts, &mut indices, u.tile, friendly);
                 // The soldier's own cursor box, in the Order's gold.
                 push_wire_box(&mut verts, &mut indices, u.tile, [0.95, 0.85, 0.3, 0.9]);
                 // The facing wedge: where their reaction arc looks.
@@ -2483,7 +2500,12 @@ impl BattleScreen {
                     push_marker(&mut verts, &mut indices, base, 1.7 * VS_F, [0.7, 0.82, 1.0, 0.65]);
                 }
                 Side::Demons if visible.contains(&u.tile) => {
-                    push_marker(&mut verts, &mut indices, base, 2.2 * VS_F, [1.0, 0.15, 0.1, 0.9]);
+                    let danger = if self.colorblind {
+                        [1.0, 0.55, 0.05, 0.9]
+                    } else {
+                        [1.0, 0.15, 0.1, 0.9]
+                    };
+                    push_marker(&mut verts, &mut indices, base, 2.2 * VS_F, danger);
                 }
                 _ => {}
             }

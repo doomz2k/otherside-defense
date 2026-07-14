@@ -9,6 +9,10 @@ fn one() -> f32 {
     1.0
 }
 
+fn yes() -> bool {
+    true
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Config {
     pub volume: f32,
@@ -28,6 +32,15 @@ pub struct Config {
     /// Pan the battle camera to visible demon action during their turn.
     #[serde(default)]
     pub event_cam: bool,
+    /// First-encounter hints in the log (the guided first month).
+    #[serde(default = "yes")]
+    pub hints: bool,
+    /// Colorblind-safe overlays: orange/blue instead of red/green.
+    #[serde(default)]
+    pub colorblind: bool,
+    /// Damp screen flashes and pulses.
+    #[serde(default)]
+    pub reduce_flash: bool,
     /// Only the bindings that differ from default: (action label, key name).
     #[serde(default)]
     pub binds: Vec<(String, String)>,
@@ -46,6 +59,9 @@ impl Default for Config {
             pixel_scale: 3,
             crt: false,
             event_cam: true,
+            hints: true,
+            colorblind: false,
+            reduce_flash: false,
             binds: Vec::new(),
         }
     }

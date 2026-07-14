@@ -15,11 +15,11 @@ use crate::research::{ManufactureItem, Project, ResearchState};
 
 pub const DAYS_PER_MONTH: u32 = 30;
 pub const SOLDIER_HIRE_COST: i64 = 40;
-pub const SOLDIER_SALARY: i64 = 20;
+pub const SOLDIER_SALARY: i64 = 24;
 pub const OCCULTIST_HIRE_COST: i64 = 60;
-pub const OCCULTIST_SALARY: i64 = 30;
+pub const OCCULTIST_SALARY: i64 = 34;
 pub const ARTIFICER_HIRE_COST: i64 = 50;
-pub const ARTIFICER_SALARY: i64 = 25;
+pub const ARTIFICER_SALARY: i64 = 28;
 pub const SQUAD_SIZE: usize = 6;
 /// A month at or below this score is a "losing badly" month.
 pub const BAD_MONTH_SCORE: i64 = -100;
@@ -828,7 +828,7 @@ fn default_steel_price() -> i64 {
 }
 
 fn d_quarrels() -> u32 {
-    24
+    30
 }
 
 fn d_mags() -> u32 {
@@ -1078,7 +1078,7 @@ impl Campaign {
             soldiers: Vec::new(),
             legacy_occultists: 0,
             legacy_artificers: 0,
-            region_funding: Region::ALL.iter().map(|&r| (r, 150)).collect(),
+            region_funding: Region::ALL.iter().map(|&r| (r, 135)).collect(),
             rifts: Vec::new(),
             nests: Vec::new(),
             research: ResearchState::default(),
@@ -1086,7 +1086,7 @@ impl Campaign {
             hellsteel: 0,
             grenade_stock: 12,
             dressing_stock: 12,
-            quarrel_stock: 24,
+            quarrel_stock: 30,
             coldiron_stock: 0,
             salt_stock: 0,
             manufacture: None,
@@ -1187,8 +1187,8 @@ impl Campaign {
 
     /// How much of each salvage the undercrofts can hold before overflow.
     pub fn store_capacity(&self) -> u32 {
-        STORE_BASE_CAP
-            + STORE_VAULT_CAP
+        crate::data::economy().store_base_cap
+            + crate::data::economy().store_vault_cap
                 * self
                     .bases
                     .iter()
@@ -1363,13 +1363,13 @@ impl Campaign {
         if base >= self.bases.len() {
             return Err(GeoError::UnknownBase);
         }
-        if self.funds < SOLDIER_HIRE_COST {
+        if self.funds < crate::data::economy().soldier_hire {
             return Err(GeoError::NoFunds);
         }
         if self.personnel() >= self.quarters_capacity() {
             return Err(GeoError::QuartersFull);
         }
-        self.funds -= SOLDIER_HIRE_COST;
+        self.funds -= crate::data::economy().soldier_hire;
         self.stats.soldiers_hired += 1;
         let mut s = self.roll_recruit();
         s.home = base;
@@ -1382,13 +1382,13 @@ impl Campaign {
         if base >= self.bases.len() {
             return Err(GeoError::UnknownBase);
         }
-        if self.funds < OCCULTIST_HIRE_COST {
+        if self.funds < crate::data::economy().occultist_hire {
             return Err(GeoError::NoFunds);
         }
         if self.personnel() >= self.quarters_capacity() {
             return Err(GeoError::QuartersFull);
         }
-        self.funds -= OCCULTIST_HIRE_COST;
+        self.funds -= crate::data::economy().occultist_hire;
         self.bases[base].occultists += 1;
         Ok(())
     }
@@ -1398,13 +1398,13 @@ impl Campaign {
         if base >= self.bases.len() {
             return Err(GeoError::UnknownBase);
         }
-        if self.funds < ARTIFICER_HIRE_COST {
+        if self.funds < crate::data::economy().artificer_hire {
             return Err(GeoError::NoFunds);
         }
         if self.personnel() >= self.quarters_capacity() {
             return Err(GeoError::QuartersFull);
         }
-        self.funds -= ARTIFICER_HIRE_COST;
+        self.funds -= crate::data::economy().artificer_hire;
         self.bases[base].artificers += 1;
         Ok(())
     }
@@ -1511,10 +1511,10 @@ impl Campaign {
         if self.zeppelins >= MAX_ZEPPELINS {
             return Err(GeoError::BadAssignment);
         }
-        if self.funds < ZEPPELIN_COST {
+        if self.funds < crate::data::economy().zeppelin {
             return Err(GeoError::NoFunds);
         }
-        self.funds -= ZEPPELIN_COST;
+        self.funds -= crate::data::economy().zeppelin;
         self.zeppelins += 1;
         Ok(())
     }
@@ -1522,13 +1522,13 @@ impl Campaign {
     /// Found a second (third...) chapterhouse in a region without one.
     pub fn found_chapterhouse(&mut self, region: Region) -> Result<(), GeoError> {
         self.guard_over()?;
-        if self.funds < CHAPTERHOUSE_COST {
+        if self.funds < crate::data::economy().chapterhouse {
             return Err(GeoError::NoFunds);
         }
         if self.bases.iter().any(|b| b.region == region) {
             return Err(GeoError::Occupied);
         }
-        self.funds -= CHAPTERHOUSE_COST;
+        self.funds -= crate::data::economy().chapterhouse;
         self.bases.push(Chapterhouse::founding(region));
         Ok(())
     }
@@ -3501,9 +3501,10 @@ impl Campaign {
         let tithe_pct = ((self.heresy / 10) as i64 * 5).min(20);
         income -= income * tithe_pct / 100;
         self.heresy = self.heresy.saturating_sub(1); // penance, slowly
-        let expenses = self.soldiers.len() as i64 * SOLDIER_SALARY
-            + self.occultist_count() as i64 * OCCULTIST_SALARY
-            + self.artificer_count() as i64 * ARTIFICER_SALARY
+        let eco = crate::data::economy();
+        let expenses = self.soldiers.len() as i64 * eco.soldier_salary
+            + self.occultist_count() as i64 * eco.occultist_salary
+            + self.artificer_count() as i64 * eco.artificer_salary
             + self.bases.iter().map(|b| b.maintenance()).sum::<i64>();
         self.funds += income - expenses;
 
@@ -3900,7 +3901,7 @@ mod tests {
             }
         }
         let (income, expenses, funds) = report.expect("a month has passed");
-        assert_eq!(income, 8 * 150);
+        assert_eq!(income, 8 * 135);
         assert!(expenses > 0);
         assert_eq!(funds, Difficulty::Veteran.starting_funds() + income - expenses);
         assert_eq!(c.month, 2);

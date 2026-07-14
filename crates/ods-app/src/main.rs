@@ -209,6 +209,14 @@ pub struct Core {
     pub event_cam: bool,
     /// The controls overlay ([F1]).
     pub show_help: bool,
+    /// First-encounter hints in the log (the guided first month).
+    pub hints: bool,
+    /// Which hints have already fired this run.
+    pub hints_seen: std::collections::HashSet<&'static str>,
+    /// Colorblind-safe overlays: orange/blue instead of red/green.
+    pub colorblind: bool,
+    /// Damp screen flashes and pulses.
+    pub reduce_flash: bool,
     /// Gold flash on the sidebar clock when the world auto-pauses.
     pub pause_flash: f32,
     pub selected_region: Option<Region>,
@@ -321,6 +329,10 @@ impl Core {
             geo_swing: None,
             event_cam: cfg.event_cam,
             show_help: false,
+            hints: cfg.hints,
+            hints_seen: std::collections::HashSet::new(),
+            colorblind: cfg.colorblind,
+            reduce_flash: cfg.reduce_flash,
             pause_flash: 0.0,
             selected_region: None,
             globe_built_for: None,
@@ -338,6 +350,14 @@ impl Core {
     }
 
     /// Persist the player's preferences (called whenever one changes).
+    /// A first-encounter hint: fired once per key, and only while the
+    /// player wants teaching.
+    pub fn maybe_hint(&mut self, key: &'static str, text: &str) {
+        if self.hints && self.hints_seen.insert(key) {
+            self.log.push(format!("❖ {text}"));
+        }
+    }
+
     pub fn save_config(&self) {
         config::Config {
             volume: self.volume,
@@ -350,6 +370,9 @@ impl Core {
             pixel_scale: self.renderer.pixel_scale(),
             crt: self.renderer.crt(),
             event_cam: self.event_cam,
+            hints: self.hints,
+            colorblind: self.colorblind,
+            reduce_flash: self.reduce_flash,
             binds: self
                 .binds
                 .iter()
@@ -416,7 +439,10 @@ impl Core {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(42);
         let battle = scenario::skirmish(seed);
-        self.battle = Some(BattleScreen::new(&mut self.renderer, battle, None));
+        let mut screen = BattleScreen::new(&mut self.renderer, battle, None);
+        screen.colorblind = self.colorblind;
+        screen.reduce_flash = self.reduce_flash;
+        self.battle = Some(screen);
         self.menu_built = false;
         self.screen = Screen::Battle;
         self.fade = 1.0;
@@ -658,7 +684,7 @@ impl Core {
                                 // Something happened: the clock waits.
                                 self.geo_speed = 0;
                                 self.day_progress = 0.0;
-                                self.pause_flash = 1.2;
+                                self.pause_flash = if self.reduce_flash { 0.0 } else { 1.2 };
                                 if let Some(a) = &self.audio {
                                     a.play(audio::Sound::PauseDrum);
                                 }
@@ -684,6 +710,52 @@ impl Core {
                                             }
                                         }
                                         _ => {}
+                                    }
+                                }
+                                // First-encounter hints, on disjoint fields
+                                // (the campaign stays mutably borrowed above).
+                                {
+                                    let hints_on = self.hints;
+                                    let seen = &mut self.hints_seen;
+                                    let log = &mut self.log;
+                                    let mut hint = |key: &'static str, text: &str| {
+                                        if hints_on && seen.insert(key) {
+                                            log.push(format!("❖ {text}"));
+                                        }
+                                    };
+                                    for e in &events {
+                                        match e {
+                                            ods_geo::GeoEvent::RiftDetected { .. } => hint(
+                                                "rift",
+                                                "A rift: strike FAST — fresh rifts are lightly \
+                                                 held, dug-in ones are not. Distant ones need \
+                                                 a sortie (and a free zeppelin).",
+                                            ),
+                                            ods_geo::GeoEvent::ManufactureComplete { .. } => hint(
+                                                "forge",
+                                                "The workshop delivers into the armoury stores; \
+                                                 loadouts draw from them at launch. Keep the \
+                                                 magazine presses warm.",
+                                            ),
+                                            ods_geo::GeoEvent::CrisisConverges { .. } => hint(
+                                                "fleet",
+                                                "Two crises at once: one squad cannot answer \
+                                                 both. A second zeppelin (and a standing \
+                                                 second squad) can.",
+                                            ),
+                                            ods_geo::GeoEvent::SleeperQuiet { .. } => hint(
+                                                "sleeper",
+                                                "A region gone completely quiet is not at \
+                                                 peace. Watch it. Keep a squad rested.",
+                                            ),
+                                            ods_geo::GeoEvent::CallingEarned { .. } => hint(
+                                                "calling",
+                                                "Deeds become names: callings carry a small \
+                                                 edge, earned doing exactly the thing they \
+                                                 reward. The mirror shows each soldier's.",
+                                            ),
+                                            _ => {}
+                                        }
                                     }
                                 }
                                 break;
@@ -938,6 +1010,27 @@ impl Core {
                 {
                     self.save_config();
                 }
+                if ui
+                    .checkbox(&mut self.hints, "First-encounter hints")
+                    .on_hover_text("the guided first month: one hint per new thing, in the log")
+                    .changed()
+                {
+                    self.save_config();
+                }
+                if ui
+                    .checkbox(&mut self.colorblind, "Colorblind overlays")
+                    .on_hover_text("orange/blue field overlays instead of red/green (applies to the next battle)")
+                    .changed()
+                {
+                    self.save_config();
+                }
+                if ui
+                    .checkbox(&mut self.reduce_flash, "Reduce flashes")
+                    .on_hover_text("damp screen flashes and pulses (applies to the next battle)")
+                    .changed()
+                {
+                    self.save_config();
+                }
                 let mut crt = self.renderer.crt();
                 if ui.checkbox(&mut crt, "CRT dressing").on_hover_text(
                     "scanlines, a whisper of phosphor mask, corners that fall away",
@@ -1057,6 +1150,8 @@ impl Core {
                 lines.push(format!("Squad: {}", squad.join(", ")));
 
                 let mut screen = BattleScreen::new(&mut self.renderer, battle, Some(token));
+                screen.colorblind = self.colorblind;
+                screen.reduce_flash = self.reduce_flash;
                 screen.briefing = Some(lines);
                 self.battle = Some(screen);
                 self.menu_built = false;
@@ -1090,6 +1185,12 @@ impl Core {
                     let label = token.kind().label().to_string();
                     let report = c.conclude_mission(token, &screen.battle);
                     self.debrief = Some(Debrief::from_report(&label, &report, &names));
+                    self.maybe_hint(
+                        "after",
+                        "After action: the wounded convalesce (faster with an Infirmary \
+                         at their own house), survivors grow by what they did, and a held \
+                         field returns fallen weapons to the stores.",
+                    );
                     self.log.push(if report.victory {
                         format!(
                             "Mission complete: {} demons slain, {} soldiers lost.",
