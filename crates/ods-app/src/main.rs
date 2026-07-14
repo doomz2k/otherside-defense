@@ -706,7 +706,13 @@ impl Core {
                     } else {
                         Vec3::new(0.35, 0.5, 0.8)
                     };
-                    self.renderer.set_camera(vp, sun, self.clock);
+                    let flash = glam::Vec4::new(
+                        b.muzzle.0.x,
+                        b.muzzle.0.y,
+                        b.muzzle.0.z,
+                        b.muzzle.1,
+                    );
+                    self.renderer.set_camera_flash(vp, sun, self.clock, flash);
                 }
             }
             Screen::Geoscape

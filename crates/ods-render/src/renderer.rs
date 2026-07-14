@@ -14,7 +14,7 @@ use winit::window::Window;
 use crate::{GpuMesh, Vertex, upload_mesh};
 
 const VOXEL_SHADER: &str = r#"
-struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
+struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32>, flash: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 struct Sun { vp: mat4x4<f32> };
@@ -149,6 +149,11 @@ fn fs_main(in: VsOut) -> FsOut {
     let sun_bite = 0.58 + 0.42 * max(dot(n, camera.sun.xyz), 0.0) * s;
     // Baked corner occlusion: pits darken, edges pop.
     var color = base * face_shade(n) * sun_bite * jitter * in.ao;
+    // A transient light (muzzle, blast) warms everything near it.
+    if (camera.flash.w > 0.0) {
+        let fall = clamp(1.0 - distance(in.world, camera.flash.xyz) / 48.0, 0.0, 1.0);
+        color += vec3<f32>(1.0, 0.72, 0.35) * camera.flash.w * fall * fall;
+    }
     // Crush to banded levels with ordered dithering: the 1994 finish.
     let levels = 6.0;
     let d = bayer(in.clip.xy) / levels;
@@ -159,7 +164,7 @@ fn fs_main(in: VsOut) -> FsOut {
 "#;
 
 const OVERLAY_SHADER: &str = r#"
-struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
+struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32>, flash: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 struct VsIn {
@@ -194,7 +199,7 @@ fn fs_main(in: VsOut) -> FsOut {
 "#;
 
 const LIT_SHADER: &str = r#"
-struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
+struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32>, flash: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 struct Sun { vp: mat4x4<f32> };
@@ -267,6 +272,10 @@ fn fs_main(in: VsOut) -> FsOut {
     let s = sun_shadow(in.world + n * 0.5);
     let sun_bite = 0.58 + 0.42 * max(dot(n, camera.sun.xyz), 0.0) * s;
     var color = in.color.rgb * lit_face_shade(n) * sun_bite;
+    if (camera.flash.w > 0.0) {
+        let fall = clamp(1.0 - distance(in.world, camera.flash.xyz) / 48.0, 0.0, 1.0);
+        color += vec3<f32>(1.0, 0.72, 0.35) * camera.flash.w * fall * fall;
+    }
     let levels = 6.0;
     let d = lit_bayer(in.clip.xy) / levels;
     color = floor((color + d) * levels + 0.5) / levels;
@@ -290,7 +299,7 @@ fn vs_main(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
 "#;
 
 const GLOBE_SHADER: &str = r#"
-struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
+struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32>, flash: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 struct VsIn {
@@ -358,7 +367,7 @@ fn fs_main(in: VsOut) -> FsOut {
 "#;
 
 const STARFIELD_SHADER: &str = r#"
-struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
+struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32>, flash: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 struct VsOut {
@@ -427,7 +436,7 @@ fn fs_main(in: VsOut) -> FsOut {
 /// dusty amber daylight, near-black indigo night with stars — so the field
 /// sits under weather instead of floating in front of nothing.
 const SKY_SHADER: &str = r#"
-struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32> };
+struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32>, flash: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 struct VsOut {
@@ -623,6 +632,9 @@ struct SunUniform {
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
     sun: [f32; 4],
+    /// xyz = world position of the brightest transient light (a muzzle,
+    /// a blast); w = its intensity, 0 when the field is quiet.
+    flash: [f32; 4],
 }
 
 /// One frame's worth of egui output, ready to paint over the 3D scene.
@@ -858,6 +870,7 @@ impl Renderer {
             contents: bytemuck::bytes_of(&CameraUniform {
                 view_proj: Mat4::IDENTITY.to_cols_array_2d(),
                 sun: [0.35, 0.5, 0.8, 0.0],
+                flash: [0.0; 4],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1451,6 +1464,18 @@ impl Renderer {
     /// Upload the camera. `clock` (seconds, wrapping is fine) drives the
     /// pulse of emissive materials and rides in the sun vector's w lane.
     pub fn set_camera(&mut self, view_proj: Mat4, sun: glam::Vec3, clock: f32) {
+        self.set_camera_flash(view_proj, sun, clock, glam::Vec4::ZERO);
+    }
+
+    /// As `set_camera`, carrying a transient light: xyz its world seat,
+    /// w its intensity (0 = none).
+    pub fn set_camera_flash(
+        &mut self,
+        view_proj: Mat4,
+        sun: glam::Vec3,
+        clock: f32,
+        flash: glam::Vec4,
+    ) {
         self.sun_dir = sun.normalize_or(glam::Vec3::Z);
         let sun = sun.normalize_or(glam::Vec3::Z);
         self.queue.write_buffer(
@@ -1459,6 +1484,7 @@ impl Renderer {
             bytemuck::bytes_of(&CameraUniform {
                 view_proj: view_proj.to_cols_array_2d(),
                 sun: [sun.x, sun.y, sun.z, clock],
+                flash: flash.to_array(),
             }),
         );
     }

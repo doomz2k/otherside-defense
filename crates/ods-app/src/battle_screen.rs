@@ -31,7 +31,9 @@ struct Fx {
 }
 
 enum FxKind {
-    Tracer,
+    /// A projectile in flight: races from -> to over its life, lofted by
+    /// `arc` voxels at the apex, `width` across.
+    Bolt { arc: f32, width: f32 },
     Blast,
     Flash,
     /// A chip of the world knocked loose: flies, falls, fades.
@@ -72,6 +74,12 @@ pub struct BattleScreen {
     playback_wait: f32,
     /// Tile-by-tile walking routes the figures still owe the eye.
     waypoints: HashMap<u32, VecDeque<IVec3>>,
+    /// Spent brass, dropped magazines, fallen quarrels: tiny persistent
+    /// marks that make a long firefight look fought.
+    litter: Vec<(Vec3, [f32; 4])>,
+    /// The brightest transient light on the field (muzzle, blast):
+    /// position and dying intensity, fed to the renderer every frame.
+    pub muzzle: (Vec3, f32),
     /// Tile under the cursor, plus a cached move preview to it.
     hover: Option<IVec3>,
     hover_path: Option<(Vec<IVec3>, i32)>,
@@ -174,6 +182,8 @@ impl BattleScreen {
             playback: VecDeque::new(),
             playback_wait: 0.0,
             waypoints: HashMap::new(),
+            litter: Vec::new(),
+            muzzle: (Vec3::ZERO, 0.0),
             hover: None,
             hover_path: None,
             reachable: Vec::new(),
@@ -1009,12 +1019,31 @@ impl BattleScreen {
             }
             _ => {}
         }
-        // The event camera glances at demon action the squad can see.
+        // The camera directs: reaction fire snaps to the ambusher first;
+        // demon fire and deliberate shots frame shooter and target both.
         if self.event_cam
-            && let Event::Fired { unit, target, .. } = e
-            && self.battle.unit(*unit).side == Side::Demons
+            && let Event::Fired { unit, target, reaction, mode, .. } = e
         {
-            self.look_target = Some(self.unit_pos(*target, 0.0) * Vec3::new(1.0, 1.0, 0.0));
+            let flat = Vec3::new(1.0, 1.0, 0.0);
+            if *reaction {
+                self.look_target = Some(self.unit_pos(*unit, 0.0) * flat);
+            } else if self.battle.unit(*unit).side == Side::Demons
+                || *mode != FireMode::Snap
+            {
+                let mid = (self.unit_pos(*unit, 0.0) + self.unit_pos(*target, 0.0)) / 2.0;
+                self.look_target = Some(mid * flat);
+            }
+        }
+        // A kill lands in a breath of slow motion.
+        if matches!(e, Event::Died { .. } | Event::Gibbed { .. }) && self.time_scale >= 1.0 {
+            self.time_scale = 0.45;
+        }
+        // Reloads and swaps read on the figure: the weapon dips to the belt.
+        if let Event::Reloaded { unit } | Event::Swapped { unit } | Event::Scavenged { unit } = e
+        {
+            self.anim.entry(unit.0).or_default().reload = 0.55;
+            let ground = self.unit_pos(*unit, 0.4);
+            self.push_litter(ground, [0.22, 0.22, 0.25, 1.0]);
         }
     }
 
@@ -1038,8 +1067,15 @@ impl BattleScreen {
                     0.0
                 }
             }
-            Event::Fired { unit, .. } => {
-                if seen(unit) { 0.45 / self.anim_speed.max(0.1) } else { 0.05 }
+            Event::Fired { unit, target, .. } => {
+                if seen(unit) || seen(target) {
+                    // Wait for the bolt: consequences land when it does.
+                    let d = self.unit_pos(*unit, 9.0).distance(self.unit_pos(*target, 9.0));
+                    let (speed, ..) = projectile(&self.battle.unit(*unit).weapon.key);
+                    (d / speed + 0.3) / self.anim_speed.max(0.1)
+                } else {
+                    0.05
+                }
             }
             Event::Threw { .. }
             | Event::Exploded { .. }
@@ -1082,6 +1118,14 @@ impl BattleScreen {
     }
 
     /// Fights on the night side of the world are lit by muzzle and flame.
+    /// Drop a permanent speck on the field (brass, a spent magazine).
+    fn push_litter(&mut self, at: Vec3, color: [f32; 4]) {
+        if self.litter.len() >= 320 {
+            self.litter.remove(0);
+        }
+        self.litter.push((at, color));
+    }
+
     fn is_night(&self) -> bool {
         self.battle.vision_tiles < 14
     }
@@ -1276,25 +1320,32 @@ impl BattleScreen {
                 self.banner = Some((text.to_string(), 3.0, 3.0));
                 play(sound);
             }
-            Event::Fired { unit, target, .. } => {
-                // The shooter takes the kick.
+            Event::Fired { unit, target, hit, .. } => {
+                // The shooter takes the kick, weighted by what they fired.
                 self.anim.entry(unit.0).or_default().recoil = 0.14;
-                let side = self.battle.unit(*unit).side;
-                let color = if side == Side::Order {
-                    [1.0, 0.9, 0.4, 0.9]
-                } else {
-                    [0.9, 0.4, 0.2, 0.9]
-                };
+                let power = self.battle.unit(*unit).weapon.power;
+                self.shake += (power as f32 / 40.0).min(1.2);
+                let key = self.battle.unit(*unit).weapon.key.clone();
+                let (speed, arc_frac, mut color, width) = projectile(&key);
+                if !hit {
+                    color[3] *= 0.8; // a miss burns a little dimmer
+                }
+                let from = self.unit_pos(*unit, 13.0);
+                let to = self.unit_pos(*target, 9.0);
+                let dist = from.distance(to).max(1.0);
+                // The bolt takes real time to arrive; the playback queue
+                // holds the consequences until it does.
                 self.fx.push(Fx {
-                    kind: FxKind::Tracer,
-                    from: self.unit_pos(*unit, 13.0),
-                    to: self.unit_pos(*target, 9.0),
+                    kind: FxKind::Bolt { arc: dist * arc_frac, width },
+                    from,
+                    to,
                     color,
                     age: 0.0,
-                    life: 0.22,
+                    life: dist / speed,
                 });
-                // The muzzle answers with light — a lantern after dark.
+                // The muzzle answers with light and a curl of smoke.
                 let p = self.unit_pos(*unit, 10.0);
+                self.muzzle = (p, if self.is_night() { 1.0 } else { 0.45 });
                 self.fx.push(Fx {
                     kind: FxKind::Flash,
                     from: p,
@@ -1303,6 +1354,29 @@ impl BattleScreen {
                     age: 0.0,
                     life: if self.is_night() { 0.16 } else { 0.10 },
                 });
+                for k in 0..3 {
+                    let drift = Vec3::new(
+                        (self.fx_clock * 17.3 + k as f32).sin() * 3.0,
+                        (self.fx_clock * 11.7 + k as f32).cos() * 3.0,
+                        8.0 + k as f32 * 3.0,
+                    );
+                    self.fx.push(Fx {
+                        kind: FxKind::Debris { vel: drift },
+                        from: p,
+                        to: p,
+                        color: [0.55, 0.55, 0.55, 0.35],
+                        age: 0.0,
+                        life: 0.9,
+                    });
+                }
+                // Brass in the grass.
+                let scatter = Vec3::new(
+                    (self.fx_clock * 23.9).fract() * 8.0 - 4.0,
+                    (self.fx_clock * 31.7).fract() * 8.0 - 4.0,
+                    0.0,
+                );
+                let ground = self.unit_pos(*unit, 0.4) + scatter;
+                self.push_litter(ground, [0.75, 0.62, 0.28, 1.0]);
                 self.emit(audio, Sound::Shot, p);
             }
             Event::Exploded { at, .. } => {
@@ -1582,6 +1656,9 @@ impl BattleScreen {
             if state.recoil > 0.0 {
                 state.recoil = (state.recoil - dt).max(0.0);
             }
+            if state.reload > 0.0 {
+                state.reload = (state.reload - dt).max(0.0);
+            }
             let delta = target - *entry;
             let dist = delta.length();
             let mut heading = None;
@@ -1624,6 +1701,9 @@ impl BattleScreen {
                 figures::build_figures(&self.battle, &visible, &self.visual, &self.anim);
             renderer.set_figures(&fig_verts, &fig_indices);
         }
+
+        // The muzzle light dies fast; blasts die slower by burning hotter.
+        self.muzzle.1 = (self.muzzle.1 - dt * 5.0).max(0.0);
 
         if let Some((_, ttl, _)) = &mut self.banner {
             *ttl -= dt;
@@ -1715,24 +1795,34 @@ impl BattleScreen {
 
         let mut verts: Vec<OverlayVertex> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
+        // The permanent record first: brass, magazines, quarrels.
+        for (p, c) in &self.litter {
+            push_flat_square(&mut verts, &mut indices, *p, 0.6 * VS_F, *c);
+        }
         for fx in &self.fx {
             let t = (fx.age / fx.life).clamp(0.0, 1.0);
             let fade = 1.0 - t;
             let mut color = fx.color;
             color[3] *= fade;
             match fx.kind {
-                FxKind::Tracer => {
-                    // A bolt in flight: a short bright segment racing along
-                    // the line of fire.
-                    let head = fx.from.lerp(fx.to, t);
-                    let tail = fx.from.lerp(fx.to, (t - 0.3).max(0.0));
+                FxKind::Bolt { arc, width } => {
+                    // The projectile: a hot head with a fading tail, lofted
+                    // on a lobbed arc where the weapon calls for one.
+                    let lift = |q: f32| -> Vec3 {
+                        Vec3::Z * (arc * (q * std::f32::consts::PI).sin())
+                    };
+                    let head = fx.from.lerp(fx.to, t) + lift(t);
+                    let tail_t = (t - 0.12).max(0.0);
+                    let tail = fx.from.lerp(fx.to, tail_t) + lift(tail_t);
                     let dir = fx.to - fx.from;
-                    let perp = dir.cross(Vec3::Z).normalize_or(Vec3::X) * (0.5 * VS_F);
+                    let perp = dir.cross(Vec3::Z).normalize_or(Vec3::X) * (width * VS_F);
+                    let mut hot = fx.color;
+                    hot[3] = fx.color[3]; // the bolt does not fade mid-flight
                     push_quad(
                         &mut verts,
                         &mut indices,
                         [tail - perp, tail + perp, head + perp, head - perp],
-                        color,
+                        hot,
                     );
                 }
                 FxKind::Blast => {
@@ -2968,6 +3058,24 @@ fn push_marker(
 }
 
 /// A slim console gauge: background groove plus a colored fill fraction.
+/// What flies when a weapon speaks: (speed voxels/s, arc height as a
+/// fraction of range, color, half-width in voxels).
+fn projectile(key: &str) -> (f32, f32, [f32; 4], f32) {
+    if key.contains("mortar") {
+        (200.0, 0.35, [0.85, 0.9, 0.95, 0.95], 1.2)
+    } else if key.contains("censer") {
+        (240.0, 0.22, [1.0, 0.55, 0.15, 0.95], 1.0)
+    } else if key.contains("lance") {
+        (430.0, 0.0, [1.0, 0.4, 0.1, 0.95], 1.4)
+    } else if key.contains("arbalest") || key.contains("crossbow") {
+        (330.0, 0.05, [0.85, 0.75, 0.5, 0.95], 0.7)
+    } else if key.contains("bile") || key.contains("spit") || key.contains("gout") {
+        (190.0, 0.18, [0.5, 0.9, 0.2, 0.95], 1.1)
+    } else {
+        (360.0, 0.0, [1.0, 0.85, 0.45, 0.95], 0.6)
+    }
+}
+
 /// A labeled console bar: name at the left, value over the fill.
 fn plate_bar(ui: &mut egui::Ui, label: &str, val: i32, max: i32, color: egui::Color32) {
     ui.horizontal(|ui| {

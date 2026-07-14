@@ -356,6 +356,8 @@ pub struct AnimState {
     pub pose: f32,
     /// World heading in radians: (cos, sin) is where the chest points.
     pub yaw: f32,
+    /// Seconds left of the reload motion: the weapon dips to the belt.
+    pub reload: f32,
     /// The topple: 0 upright, 1 flat on the ground. Eased toward
     /// `fall_goal`, which event playback sets when a death is *seen* —
     /// the sim already knows, but the eye must not.
@@ -575,10 +577,14 @@ fn push_unit(
                 1.0,
             ];
         }
-        // Recoil rocks the whole body off the line; the weapon jumps.
+        // Recoil rocks the whole body off the line; the weapon jumps —
+        // and during a reload it dips to the belt.
         let mut offset = Vec3::new(0.0, -kick * 9.0, 0.0);
         if part.part == BodyPart::Weapon {
             offset.z += kick * 12.0;
+            let dip = anim.reload.clamp(0.0, 0.55);
+            offset.z -= dip * 6.0;
+            offset.y -= dip * 3.0;
         }
         rasterize_box(&mut grid, part.part, part.min + offset, part.max + offset, color);
     }
