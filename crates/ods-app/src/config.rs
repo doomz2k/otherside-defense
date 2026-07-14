@@ -47,6 +47,9 @@ pub struct Config {
     /// Damp screen flashes and pulses.
     #[serde(default)]
     pub reduce_flash: bool,
+    /// Borderless fullscreen at the desktop's own resolution (F11 toggles).
+    #[serde(default = "yes")]
+    pub fullscreen: bool,
     /// Only the bindings that differ from default: (action label, key name).
     #[serde(default)]
     pub binds: Vec<(String, String)>,
@@ -70,6 +73,7 @@ impl Default for Config {
             presets: Vec::new(),
             colorblind: false,
             reduce_flash: false,
+            fullscreen: true,
             binds: Vec::new(),
         }
     }

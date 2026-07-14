@@ -245,6 +245,8 @@ pub struct Core {
     pub colorblind: bool,
     /// Damp screen flashes and pulses.
     pub reduce_flash: bool,
+    /// Borderless fullscreen (F11 toggles it live).
+    pub fullscreen: bool,
     /// Gold flash on the sidebar clock when the world auto-pauses.
     pub pause_flash: f32,
     pub selected_region: Option<Region>,
@@ -262,11 +264,11 @@ pub struct Core {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.core.is_none() {
-            let window = Arc::new(
-                event_loop
-                    .create_window(Window::default_attributes().with_title("Otherside Defense"))
-                    .expect("create window"),
-            );
+            let mut attrs = Window::default_attributes().with_title("Otherside Defense");
+            if config::Config::load().fullscreen {
+                attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            }
+            let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
             match Core::new(window) {
                 Ok(core) => self.core = Some(core),
                 Err(e) => {
@@ -360,7 +362,8 @@ impl Core {
             hints: cfg.hints,
             desk_tab: 0,
             roster_sort: None,
-            roster_compact: false,
+            // Vitals-only by default: the full table is a horizontal scroll.
+            roster_compact: true,
             log_filter: 0,
             toasts: Vec::new(),
             pending_launch: None,
@@ -375,6 +378,7 @@ impl Core {
             hints_seen: std::collections::HashSet::new(),
             colorblind: cfg.colorblind,
             reduce_flash: cfg.reduce_flash,
+            fullscreen: cfg.fullscreen,
             pause_flash: 0.0,
             selected_region: None,
             globe_built_for: None,
@@ -400,6 +404,15 @@ impl Core {
         }
     }
 
+    /// Borderless fullscreen on the desktop's own resolution — no display
+    /// mode switch, so alt-tab stays instant.
+    pub fn set_fullscreen(&mut self, on: bool) {
+        self.fullscreen = on;
+        self.window
+            .set_fullscreen(on.then(|| winit::window::Fullscreen::Borderless(None)));
+        self.save_config();
+    }
+
     pub fn save_config(&self) {
         config::Config {
             volume: self.volume,
@@ -417,6 +430,7 @@ impl Core {
             combat_text: self.combat_text,
             colorblind: self.colorblind,
             reduce_flash: self.reduce_flash,
+            fullscreen: self.fullscreen,
             binds: self
                 .binds
                 .iter()
@@ -614,6 +628,13 @@ impl Core {
                         == PhysicalKey::Code(winit::keyboard::KeyCode::F1) =>
             {
                 self.show_help = !self.show_help;
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && event.physical_key
+                        == PhysicalKey::Code(winit::keyboard::KeyCode::F11) =>
+            {
+                self.set_fullscreen(!self.fullscreen);
             }
             WindowEvent::KeyboardInput { event, .. }
                 if self.screen == Screen::Battle && !response.consumed =>
@@ -944,6 +965,7 @@ impl Core {
                             ("Zoom", "wheel"),
                             ("Center on soldier", "double-click"),
                             ("Cancel / deselect", "Esc"),
+                            ("Fullscreen", "F11"),
                         ] {
                             ui.label(what);
                             ui.label(key);
@@ -1107,6 +1129,14 @@ impl Core {
                     .changed()
                 {
                     self.save_config();
+                }
+                let mut fs = self.fullscreen;
+                if ui
+                    .checkbox(&mut fs, "Fullscreen")
+                    .on_hover_text("borderless, at the desktop's own resolution (F11)")
+                    .changed()
+                {
+                    self.set_fullscreen(fs);
                 }
                 let mut crt = self.renderer.crt();
                 if ui.checkbox(&mut crt, "CRT dressing").on_hover_text(

@@ -612,7 +612,11 @@ impl Core {
         }
 
         // ------------------------------------------------- operations
-        egui::SidePanel::left("geo-ops").default_width(360.0).show(ctx, |ui| {
+        // Cap the width: the ops desk must never bury the world behind it.
+        egui::SidePanel::left("geo-ops")
+            .default_width(360.0)
+            .max_width(430.0)
+            .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let open_now = c.rifts.iter().filter(|r| r.detected).count();
                 ui.heading(format!("War room — {open_now} incursion(s)"));
@@ -897,6 +901,9 @@ impl Core {
                             }
                         }
                         let sort_state = &mut self.roster_sort;
+                        // The full table is wider than the desk: scroll it
+                        // sideways rather than let it shove the panel open.
+                        egui::ScrollArea::horizontal().id_salt("roster-h").show(ui, |ui| {
                         egui::Grid::new("roster").striped(true).show(ui, |ui| {
                             let mut header =
                                 |ui: &mut egui::Ui, label: &str, col: Option<usize>| {
@@ -1080,6 +1087,7 @@ impl Core {
                                 ui.end_row();
                             }
                         });
+                        });
                         if let Some(si) = squad_rotate {
                             c.soldiers[si].squad =
                                 (c.soldiers[si].squad + 1) % ods_geo::SQUAD_NAMES.len() as u8;
@@ -1125,6 +1133,7 @@ impl Core {
                         c.aegis_stock,
                     ));
                     let mut act: Option<(usize, u8)> = None;
+                    egui::ScrollArea::horizontal().id_salt("armoury-h").show(ui, |ui| {
                     egui::Grid::new("armoury").striped(true).show(ui, |ui| {
                         for h in ["Name", "Weapon", "Blade", "Circlet", "Armor", "Relic"] {
                             ui.strong(h);
@@ -1183,6 +1192,7 @@ impl Core {
                             }
                             ui.end_row();
                         }
+                    });
                     });
                     if let Some((si, what)) = act {
                         let outcome = match what {
@@ -2007,7 +2017,10 @@ impl Core {
             });
         });
 
-        egui::SidePanel::right("base-desk").default_width(390.0).show(ctx, |ui| {
+        egui::SidePanel::right("base-desk")
+            .default_width(390.0)
+            .max_width(460.0)
+            .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 chapterhouse_panel(
                     ui,

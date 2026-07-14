@@ -2384,13 +2384,13 @@ impl BattleScreen {
             self.selected = None;
             return;
         }
-        self.selected = match self.selected {
-            Some(current) => soldiers
-                .iter()
-                .cycle()
-                .skip_while(|&&id| id != current)
-                .nth(1)
-                .copied(),
+        // The current pick may not be in the list at all (spent, dead,
+        // possessed) — look up its position rather than cycling after it.
+        let at = self
+            .selected
+            .and_then(|cur| soldiers.iter().position(|&id| id == cur));
+        self.selected = match at {
+            Some(i) => Some(soldiers[(i + 1) % soldiers.len()]),
             None => soldiers.first().copied(),
         };
     }
