@@ -149,6 +149,9 @@ pub fn narrate(c: &Campaign, event: &GeoEvent) -> String {
         E::InquisitionCalled { fine } => format!(
             "{stamp} the council stops whispering: the INQUISITION arrives — {fine}k in fines and a colder ledger"
         ),
+        E::TheyComeForTheBound => format!(
+            "{stamp} !!! the cells are full, and something on the other side knows it: they will come for the bound"
+        ),
         E::RelicFound { name } => {
             format!("{stamp} in the rubble, something old and holy: {name}")
         }

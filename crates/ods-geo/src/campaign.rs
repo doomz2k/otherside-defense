@@ -553,6 +553,8 @@ pub enum GeoEvent {
     CallingEarned { name: String, calling: &'static str },
     /// The council stopped whispering: a fine, and a colder ledger.
     InquisitionCalled { fine: i64 },
+    /// The cells are full — and something on the other side knows it.
+    TheyComeForTheBound,
     /// A Prince walked off the field alive. It has a name now.
     NemesisRises { name: String },
     /// It slipped the squads again, and grew by it.
@@ -972,6 +974,9 @@ pub struct Campaign {
     pending_events: Vec<GeoEvent>,
     /// Rises with every banishment; at 5+, hell schedules a Reckoning.
     reckoning_heat: u32,
+    /// Rifts banished since the month began — hell counts them too.
+    #[serde(default)]
+    banished_this_month: u32,
     /// The council's ledger of what the Order does with hell's leavings:
     /// grafts, dark bargains, prisoners fed to the codex. It buys power
     /// now; it is answered for later.
@@ -1051,9 +1056,15 @@ impl Campaign {
             bad_months: 0,
             over: None,
             reckoning_heat: 0,
+            banished_this_month: 0,
             heresy: 0,
             reckoning_day: None,
-            month_plan: director::plan_month(&mut rng, 1, difficulty.plan_bonus()),
+            month_plan: director::plan_month(
+                &mut rng,
+                1,
+                difficulty.plan_bonus(),
+                &director::Mood::default(),
+            ),
             region_score: HashMap::new(),
             rng,
             next_id: 0,
@@ -1213,6 +1224,23 @@ impl Campaign {
     /// game continues with an identical stream of fate.
     pub fn save_to_string(&self) -> String {
         serde_json::to_string(self).expect("campaign state is always serializable")
+    }
+
+    /// What hell learned watching the Order this month.
+    fn hell_mood(&self) -> director::Mood {
+        director::Mood {
+            neglected: Region::ALL
+                .iter()
+                .copied()
+                .filter(|&r| {
+                    !self.bases.iter().any(|b| b.region == r) && self.augurs_in(r) == 0
+                })
+                .collect(),
+            captures_held: self.prisoners.grunts + self.prisoners.overseers,
+            banished_last_month: self.banished_this_month,
+            heresy: self.heresy,
+            home: self.bases.first().map(|b| b.region),
+        }
     }
 
     pub fn load_from_str(save: &str) -> Result<Self, serde_json::Error> {
@@ -2513,6 +2541,7 @@ impl Campaign {
                         self.collect_salvage(kind, report.demons_slain);
                         self.reckoning_heat += 1;
                         self.stats.rifts_banished += 1;
+                        self.banished_this_month += 1;
                         if let Some(req) = &mut self.request
                             && req.region == region {
                                 req.done += 1;
@@ -3349,7 +3378,14 @@ impl Campaign {
         self.month_score = 0;
         self.region_score.clear();
         let cruelty = self.difficulty.plan_bonus() + if self.second_dawn { 5 } else { 0 };
-        self.month_plan = director::plan_month(&mut self.rng, self.month, cruelty);
+        // Hell reads the board before it deals: soft ground, full cells,
+        // a winning tempo, a thinning faith — all of it bends the plan.
+        let mood = self.hell_mood();
+        if mood.captures_held >= 3 {
+            events.push(GeoEvent::TheyComeForTheBound);
+        }
+        self.month_plan = director::plan_month(&mut self.rng, self.month, cruelty, &mood);
+        self.banished_this_month = 0;
 
         // Panic cools a little with time — but where it has boiled over,
         // hell smells the fear and sends terror to feed on it.
