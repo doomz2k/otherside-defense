@@ -1281,6 +1281,38 @@ impl Core {
                                  blessed magazines on launch",
                             );
                         });
+                        ui.horizontal(|ui| {
+                            use ods_sim::units::MagKind;
+                            ui.label("Pressed with");
+                            let pref = &mut c.soldiers[si].mag_pref;
+                            for (kind, hint) in [
+                                (MagKind::Blessed, "the standard: consecrated shot"),
+                                (
+                                    MagKind::ColdIron,
+                                    "+4 power — old iron, older grudges",
+                                ),
+                                (
+                                    MagKind::Salt,
+                                    "-4 power, +6 stun a hit — for taking them breathing",
+                                ),
+                            ] {
+                                if ui
+                                    .selectable_label(*pref == kind, kind.name())
+                                    .on_hover_text(hint)
+                                    .clicked()
+                                {
+                                    *pref = kind;
+                                }
+                            }
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "(iron {}, salt {})",
+                                    c.coldiron_stock, c.salt_stock
+                                ))
+                                .weak()
+                                .small(),
+                            );
+                        });
                         if let Some(calling) =
                             ods_geo::calling_from(&c.soldiers[si].deeds)
                         {
@@ -1888,12 +1920,12 @@ fn chapterhouse_panel(
                     c.quarters_capacity()
                 ));
 
-                if c.bases.iter().any(|b| b.count_active(Facility::TrainingGround) > 0) {
+                if c.bases[bi].count_active(Facility::TrainingGround) > 0 {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.label("Drills:");
+                        ui.label("This house drills:");
                         for f in ods_geo::Focus::ALL {
-                            ui.selectable_value(&mut c.training_focus, f, f.name());
+                            ui.selectable_value(&mut c.bases[bi].focus, f, f.name());
                         }
                     });
                 }

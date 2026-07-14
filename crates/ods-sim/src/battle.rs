@@ -71,6 +71,8 @@ pub const SWAP_TU: i32 = 6;
 pub const SCAVENGE_TU: i32 = 8;
 /// Putting down something helpless at your feet.
 pub const EXECUTE_TU: i32 = 10;
+/// Digging a consumable out of the pack once the belt runs empty.
+pub const PACK_FETCH_TU: i32 = 6;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CloudKind {
@@ -725,6 +727,19 @@ impl Battle {
         self.world.raycast(from, delta / len, len - 0.75).is_none()
     }
 
+    /// The belt holds the first few consumables at hand; after that,
+    /// everything is dug out of the pack. Returns the TU surcharge the
+    /// caller must ADD to its action cost (check first, then settle).
+    fn fetch_surcharge(&self, id: UnitId) -> i32 {
+        if self.unit(id).belt > 0 { 0 } else { PACK_FETCH_TU }
+    }
+
+    /// Settle the belt after a paid fetch: one slot spent if any remain.
+    fn spend_belt(&mut self, id: UnitId) {
+        let u = self.unit_mut(id);
+        u.belt = u.belt.saturating_sub(1);
+    }
+
     /// Straight sight between two tiles (eye to chest), smoke included —
     /// the AI's "could I see, or be seen, from there" probe. Range is the
     /// caller's problem.
@@ -956,10 +971,11 @@ impl Battle {
         if cheb(u.tile, at) > 10 {
             return Err(ActionError::OutOfRange);
         }
-        let cost = u.tu_max * 12 / 100;
+        let cost = u.tu_max * 12 / 100 + self.fetch_surcharge(id);
         if u.tu < cost {
             return Err(ActionError::NotEnoughTu);
         }
+        self.spend_belt(id);
         self.unit_mut(id).tu -= cost;
         self.unit_mut(id).flares -= 1;
         self.flares.push(at);
@@ -1073,11 +1089,13 @@ impl Battle {
         if u.mags == 0 {
             return Err(ActionError::NoCharges);
         }
-        if u.tu < RELOAD_TU {
+        let fetch = self.fetch_surcharge(id);
+        if u.tu < RELOAD_TU + fetch {
             return Err(ActionError::NotEnoughTu);
         }
+        self.spend_belt(id);
         let u = self.unit_mut(id);
-        u.tu -= RELOAD_TU;
+        u.tu -= RELOAD_TU + fetch;
         u.mags -= 1;
         u.ammo = u.weapon.clip as i32;
         // The click carries.
@@ -1984,7 +2002,7 @@ impl Battle {
         reaction: bool,
         events: &mut Vec<Event>,
     ) {
-        let (cost, chance, rounds, power, breach, melee, silent, stun_power) = {
+        let (cost, chance, rounds, power, breach, melee, silent, stun_power, mag) = {
             let s = self.unit(shooter);
             if !s.has_shot() {
                 return; // the chamber is empty; nothing leaves the barrel
@@ -1992,15 +2010,23 @@ impl Battle {
             let (Some(cost), Some(chance)) = (s.fire_cost(mode), s.hit_chance(mode)) else {
                 return;
             };
+            let mag = if s.weapon.clip > 0 { s.mag_kind } else { crate::units::MagKind::Blessed };
+            // Cold iron bites deeper; salt trades blood for trauma.
+            let power = match mag {
+                crate::units::MagKind::Blessed => s.weapon.power,
+                crate::units::MagKind::ColdIron => s.weapon.power + 4,
+                crate::units::MagKind::Salt => (s.weapon.power - 4).max(2),
+            };
             (
                 cost,
                 chance,
                 s.rounds_per_action(mode),
-                s.weapon.power,
+                power,
                 s.weapon.breach_radius,
                 s.weapon.melee,
                 s.weapon.silent,
                 s.weapon.stun_power,
+                mag,
             )
         };
         {
@@ -2073,6 +2099,17 @@ impl Battle {
                     // 0–200% of weapon power, the original's famous swingy roll.
                     let damage = power * self.rng.roll(201) as i32 / 100;
                     self.apply_damage(target, damage, Some(shooter), events);
+                    // Salt rounds leave them ringing as well as bleeding.
+                    if mag == crate::units::MagKind::Salt && self.unit(target).alive {
+                        let t = self.unit_mut(target);
+                        t.stun += 6;
+                        let total = t.stun;
+                        events.push(Event::Stunned { unit: target, stun: total });
+                        if t.stun >= t.health && t.conscious {
+                            t.conscious = false;
+                            events.push(Event::Subdued { unit: target });
+                        }
+                    }
                     // The ram hammer cracks scenery through its target.
                     if melee && breach > 0.0 {
                         let c = (self.unit(target).tile * TILE_VOXELS).as_vec3()
@@ -2122,7 +2159,7 @@ impl Battle {
         if u.grenades == 0 {
             return Err(ActionError::NoCharges);
         }
-        let cost = u.tu_max * GRENADE_COST_PCT / 100;
+        let cost = u.tu_max * GRENADE_COST_PCT / 100 + self.fetch_surcharge(id);
         if u.tu < cost {
             return Err(ActionError::NotEnoughTu);
         }
@@ -2131,6 +2168,7 @@ impl Battle {
             return Err(ActionError::OutOfRange);
         }
 
+        self.spend_belt(id);
         {
             let u = self.unit_mut(id);
             u.tu -= cost;
@@ -2207,13 +2245,15 @@ impl Battle {
         if m.heal_charges == 0 {
             return Err(ActionError::NoCharges);
         }
-        if m.tu < HEAL_COST_TU {
+        let fetch = self.fetch_surcharge(medic);
+        if m.tu < HEAL_COST_TU + fetch {
             return Err(ActionError::NotEnoughTu);
         }
 
+        self.spend_belt(medic);
         {
             let m = self.unit_mut(medic);
-            m.tu -= HEAL_COST_TU;
+            m.tu -= HEAL_COST_TU + fetch;
             m.heal_charges -= 1;
         }
         {
@@ -3331,6 +3371,91 @@ mod tests {
             }
         }
         assert!(destroyed > 0, "stray shots must scar the battlefield");
+    }
+
+    #[test]
+    fn the_belt_runs_out_and_the_pack_costs_time() {
+        let mut b = open_field(duelists(), 51);
+        b.xp_push_for_test();
+        let u = &mut b.units[0];
+        u.grenades = 4;
+        u.strength = 60; // range is not the question here
+        u.tu = 400;
+        u.tu_max = 200; // costs key off max; the pool is padded for the test
+        assert_eq!(u.belt, 3);
+        let base = 200 * GRENADE_COST_PCT / 100;
+        // Three throws off the belt at the plain price...
+        for i in 0..3 {
+            let before = b.unit(UnitId(0)).tu;
+            b.perform(Action::Throw { unit: UnitId(0), at: IVec3::new(4, 8, 0) }).unwrap();
+            assert_eq!(before - b.unit(UnitId(0)).tu, base, "belt throw {i}");
+        }
+        assert_eq!(b.unit(UnitId(0)).belt, 0);
+        // ...and the fourth is dug out of the pack.
+        let before = b.unit(UnitId(0)).tu;
+        b.perform(Action::Throw { unit: UnitId(0), at: IVec3::new(4, 8, 0) }).unwrap();
+        assert_eq!(
+            before - b.unit(UnitId(0)).tu,
+            base + PACK_FETCH_TU,
+            "the pack costs time"
+        );
+    }
+
+    #[test]
+    fn salt_rounds_ring_and_cold_iron_bites() {
+        use crate::units::MagKind;
+        // Salt: every hit adds stun on top of (reduced) blood.
+        let mut units = duelists();
+        units[0].accuracy = 95;
+        units[1].tile = IVec3::new(3, 5, 0);
+        let mut b = open_field(units, 52);
+        b.xp_push_for_test();
+        b.units[0].mag_kind = MagKind::Salt;
+        b.units[1].armor_front = 90; // no blood, pure ring
+        b.units[1].armor_side = 90;
+        b.units[1].armor_rear = 90;
+        let mut stunned = false;
+        for _ in 0..6 {
+            let ev = b
+                .perform(Action::Fire { unit: UnitId(0), target: UnitId(1), mode: FireMode::Snap })
+                .unwrap();
+            if ev.iter().any(|e| matches!(e, Event::Stunned { .. })) {
+                stunned = true;
+                break;
+            }
+            b.units[0].tu = b.units[0].tu_max;
+            b.units[0].ammo = 12;
+        }
+        assert!(stunned, "salt leaves them ringing");
+    }
+
+    #[test]
+    fn the_breaker_smashes_the_cover_you_hide_behind() {
+        // A soldier hugging the chapel's west wall; the behemoth inside.
+        let mut b = crate::scenario::skirmish(53);
+        b.units[0].tile = IVec3::new(8, 9, 0); // west of wall tile (9,9)
+        b.units[0].tu = 0;
+        b.units[0].armor_front = 90;
+        b.units[0].armor_side = 90;
+        b.units[0].armor_rear = 90;
+        for i in 1..4 {
+            b.units[i].tile = IVec3::new(0, 20 + i as i32, 0);
+        }
+        b.units[4] = Unit::behemoth(4, "Behemoth", IVec3::new(11, 9, 0));
+        for i in 5..8 {
+            b.units[i].tile = IVec3::new(0, 24 + i as i32, 0);
+        }
+        assert!(!b.tiles.is_walkable(IVec3::new(9, 9, 0)), "the cover stands");
+        b.perform(Action::EndTurn).unwrap();
+        let events = crate::ai::run_demon_turn(&mut b);
+        let prey = b.unit(UnitId(0)).tile;
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::WallSmashed { at, .. } if (*at - prey).abs().max_element() <= 1
+            )),
+            "the Doorbreaker takes the prey's own cover down: {events:?}"
+        );
     }
 
     #[test]

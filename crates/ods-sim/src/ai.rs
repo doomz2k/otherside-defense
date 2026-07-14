@@ -737,8 +737,13 @@ fn breaker(battle: &Battle, me: &Unit, prey_tile: IVec3) -> Option<Action> {
         }
         return Some(Action::Move { unit: me.id, to: step });
     }
-    // Aim at the tile beside the prey nearest to us — wall or no wall.
-    let to = prey_tile + (me.tile - prey_tile).signum();
+    // Prefer the wall the prey is HIDING behind: bring down the cover
+    // and the corner fight with it. Otherwise the tile beside the prey.
+    let cover = (-1..=1)
+        .flat_map(|dy| (-1..=1).map(move |dx| prey_tile + IVec3::new(dx, dy, 0)))
+        .filter(|&t| t != prey_tile && !battle.tiles.is_walkable(t))
+        .min_by_key(|&t| (dist(me.tile, t), t.x, t.y));
+    let to = cover.unwrap_or_else(|| prey_tile + (me.tile - prey_tile).signum());
     if to == me.tile {
         return None;
     }

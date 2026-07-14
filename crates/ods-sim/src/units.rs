@@ -174,6 +174,28 @@ pub fn hellfire_lance() -> Weapon {
 /// Maximum range of arcing weapons, in tiles (Chebyshev).
 pub const ARC_RANGE_TILES: i32 = 8;
 
+/// What the magazines are pressed with. Blessed shot is the standard;
+/// cold iron bites deeper; salt rounds trade blood for trauma.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MagKind {
+    #[default]
+    Blessed,
+    /// +4 power: old iron, older grudges.
+    ColdIron,
+    /// -4 power, +6 stun on every hit: for taking them breathing.
+    Salt,
+}
+
+impl MagKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            MagKind::Blessed => "blessed",
+            MagKind::ColdIron => "cold iron",
+            MagKind::Salt => "salt",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Unit {
     pub id: UnitId,
@@ -269,6 +291,11 @@ pub struct Unit {
     pub ammo: i32,
     /// Spare magazines on the belt — they feed whatever is in hand.
     pub mags: u32,
+    /// What those magazines are pressed with.
+    pub mag_kind: MagKind,
+    /// Belt slots: the first few consumable uses come off the belt at no
+    /// extra cost; after that, everything is fetched from the pack.
+    pub belt: u32,
     /// A backup at the hip, drawn with [`crate::battle::Action::SwapWeapon`].
     pub sidearm: Option<Weapon>,
     pub sidearm_ammo: i32,
@@ -337,6 +364,8 @@ impl Unit {
             weapon: hellspit(),
             ammo: 0,
             mags: 0,
+            mag_kind: MagKind::Blessed,
+            belt: 0,
             sidearm: None,
             sidearm_ammo: 0,
             wounds: 0,
@@ -378,6 +407,7 @@ impl Unit {
         let mut u = Self {
             weapon: rifle(),
             mags: 2,
+            belt: 3,
             grenades: 2,
             heal_charges: 3,
             smoke_grenades: 1,

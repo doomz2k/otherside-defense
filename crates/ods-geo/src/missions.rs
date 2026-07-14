@@ -56,7 +56,7 @@ const MAX_AUTO_TURNS: u32 = 40;
 pub(crate) fn build_nest(
     seed: u64,
     squad: &[&Soldier],
-    kits: &[(u32, u32, u32)],
+    kits: &[(u32, u32, u32, ods_sim::units::MagKind)],
     demon_count: u32,
     strength: u32,
     research: &ResearchState,
@@ -67,7 +67,7 @@ pub(crate) fn build_nest(
 pub(crate) fn build_otherside(
     seed: u64,
     squad: &[&Soldier],
-    kits: &[(u32, u32, u32)],
+    kits: &[(u32, u32, u32, ods_sim::units::MagKind)],
     demon_count: u32,
     strength: u32,
     research: &ResearchState,
@@ -79,7 +79,7 @@ pub(crate) fn build_otherside(
 pub(crate) fn build_assault(
     seed: u64,
     squad: &[&Soldier],
-    kits: &[(u32, u32, u32)],
+    kits: &[(u32, u32, u32, ods_sim::units::MagKind)],
     demon_count: u32,
     strength: u32,
     civilians: u32,
@@ -105,7 +105,7 @@ pub(crate) fn build_assault(
 pub(crate) fn build_defense(
     seed: u64,
     squad: &[&Soldier],
-    kits: &[(u32, u32, u32)],
+    kits: &[(u32, u32, u32, ods_sim::units::MagKind)],
     demon_count: u32,
     research: &ResearchState,
     house: &crate::base::Chapterhouse,
@@ -153,7 +153,7 @@ pub(crate) fn build_defense(
 pub(crate) fn build_purge(
     seed: u64,
     squad: &[&Soldier],
-    kits: &[(u32, u32, u32)],
+    kits: &[(u32, u32, u32, ods_sim::units::MagKind)],
     demon_count: u32,
     research: &ResearchState,
 ) -> Battle {
@@ -294,7 +294,7 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
     }
 }
 
-fn make_units(squad: &[&Soldier], kits: &[(u32, u32, u32)], research: &ResearchState) -> Vec<Unit> {
+fn make_units(squad: &[&Soldier], kits: &[(u32, u32, u32, ods_sim::units::MagKind)], research: &ResearchState) -> Vec<Unit> {
     squad
         .iter()
         .zip(kits)
@@ -303,7 +303,12 @@ fn make_units(squad: &[&Soldier], kits: &[(u32, u32, u32)], research: &ResearchS
         .collect()
 }
 
-fn make_unit(id: u32, s: &Soldier, kit: (u32, u32, u32), research: &ResearchState) -> Unit {
+fn make_unit(
+    id: u32,
+    s: &Soldier,
+    kit: (u32, u32, u32, ods_sim::units::MagKind),
+    research: &ResearchState,
+) -> Unit {
     // Placeholder tile; the scenario builders assign the real deployment.
     // A callsign, if the soldier carries one, is worn into the name.
     let display_name = if s.callsign.trim().is_empty() {
@@ -438,10 +443,11 @@ fn make_unit(id: u32, s: &Soldier, kit: (u32, u32, u32), research: &ResearchStat
         Some(crate::campaign::Quirk::Butcher) => u.melee = (u.melee + 8).min(95),
         _ => {}
     }
-    let (grenades, dressings, mags) = kit;
+    let (grenades, dressings, mags, mag_kind) = kit;
     u.grenades = grenades;
     u.heal_charges = dressings;
     u.mags = mags;
+    u.mag_kind = mag_kind;
     // Every weapon rides in loaded, whatever the relic-smiths did to it.
     u.ammo = u.weapon.clip as i32;
     // The blade at the hip is a real sidearm now: drawable, not just a

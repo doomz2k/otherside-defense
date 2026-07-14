@@ -180,6 +180,10 @@ pub enum ManufactureItem {
     FieldDressings,
     /// +8 magazines of blessed shot for the clip-fed armoury.
     PressQuarrels,
+    /// +6 cold-iron magazines: old iron, older grudges.
+    PressColdIron,
+    /// +6 salt magazines: for taking them breathing.
+    PressSaltShot,
     /// Blessed arms for national reliquaries: sold on completion for 45k
     /// (costs 5 hellsteel). The tamed factory economy.
     TradeArms,
@@ -216,10 +220,12 @@ pub enum ManufactureItem {
 }
 
 impl ManufactureItem {
-    pub const ALL: [ManufactureItem; 16] = [
+    pub const ALL: [ManufactureItem; 18] = [
         ManufactureItem::HellfireCharges,
         ManufactureItem::FieldDressings,
         ManufactureItem::PressQuarrels,
+        ManufactureItem::PressColdIron,
+        ManufactureItem::PressSaltShot,
         ManufactureItem::TradeArms,
         ManufactureItem::ForgeLance,
         ManufactureItem::HellsteelLimb,
@@ -241,6 +247,8 @@ impl ManufactureItem {
             ManufactureItem::HellfireCharges => 40,
             ManufactureItem::FieldDressings => 30,
             ManufactureItem::PressQuarrels => 25,
+            ManufactureItem::PressColdIron => 30,
+            ManufactureItem::PressSaltShot => 30,
             ManufactureItem::TradeArms => 60,
             ManufactureItem::ForgeLance => 50,
             ManufactureItem::HellsteelLimb => 45,
@@ -263,6 +271,8 @@ impl ManufactureItem {
             ManufactureItem::HellfireCharges => (2, 0),
             ManufactureItem::FieldDressings => (0, 0),
             ManufactureItem::PressQuarrels => (1, 1),
+            ManufactureItem::PressColdIron => (0, 3),
+            ManufactureItem::PressSaltShot => (2, 1),
             ManufactureItem::TradeArms => (0, 5),
             ManufactureItem::ForgeLance => (2, 4),
             ManufactureItem::HellsteelLimb => (0, 6),
@@ -284,6 +294,8 @@ impl ManufactureItem {
             ManufactureItem::HellfireCharges => "Hellfire charges",
             ManufactureItem::FieldDressings => "Field dressings",
             ManufactureItem::PressQuarrels => "Press blessed magazines",
+            ManufactureItem::PressColdIron => "Press cold-iron magazines",
+            ManufactureItem::PressSaltShot => "Press salt magazines",
             ManufactureItem::TradeArms => "Trade arms",
             ManufactureItem::ForgeLance => "Forge a hellfire lance",
             ManufactureItem::HellsteelLimb => "Cast a hellsteel limb",

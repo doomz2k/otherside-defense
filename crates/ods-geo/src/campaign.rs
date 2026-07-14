@@ -372,6 +372,10 @@ pub struct Soldier {
     /// Spare magazines carried into battle (drawn from quarrel stock).
     #[serde(default = "d_mags")]
     pub mags_loadout: u32,
+    /// What this soldier asks the quartermaster to press their mags with
+    /// (falls back to blessed when the special stock runs dry).
+    #[serde(default)]
+    pub mag_pref: ods_sim::units::MagKind,
     pub dressings_loadout: u32,
     /// Carries a forged Hellfire Lance (from the armoury's lance stock).
     #[serde(default)]
@@ -905,6 +909,12 @@ pub struct Campaign {
     /// Magazines of blessed shot: the clip-fed armoury eats these.
     #[serde(default = "d_quarrels")]
     pub quarrel_stock: u32,
+    /// Cold-iron magazines: old iron, older grudges (+4 power).
+    #[serde(default)]
+    pub coldiron_stock: u32,
+    /// Salt magazines: for taking them breathing (-4 power, +6 stun).
+    #[serde(default)]
+    pub salt_stock: u32,
     /// Legacy single workshop job from older saves; migrated into `jobs`.
     #[serde(default)]
     manufacture: Option<(ManufactureItem, u32)>,
@@ -994,6 +1004,8 @@ pub struct Campaign {
     pub corrupted_patrons: std::collections::HashSet<Region>,
     /// What the drill yard drills.
     #[serde(default)]
+    /// Legacy: the Order-wide drill focus from before each house set its
+    /// own. Kept for save shape; the houses' own `focus` fields rule now.
     pub training_focus: Focus,
     /// The Prince that got away — and remembers.
     #[serde(default)]
@@ -1075,6 +1087,8 @@ impl Campaign {
             grenade_stock: 12,
             dressing_stock: 12,
             quarrel_stock: 24,
+            coldiron_stock: 0,
+            salt_stock: 0,
             manufacture: None,
             jobs: Vec::new(),
             prisoners: Prisoners::default(),
@@ -1252,6 +1266,7 @@ impl Campaign {
             kills: 0,
             grenades_loadout: 2,
             mags_loadout: 2,
+            mag_pref: ods_sim::units::MagKind::Blessed,
             dressings_loadout: 2,
             has_lance: false,
             home: 0,
@@ -1600,6 +1615,8 @@ impl Campaign {
             ManufactureItem::HellfireCharges => self.grenade_stock += 4,
             ManufactureItem::FieldDressings => self.dressing_stock += 4,
             ManufactureItem::PressQuarrels => self.quarrel_stock += 8,
+            ManufactureItem::PressColdIron => self.coldiron_stock += 6,
+            ManufactureItem::PressSaltShot => self.salt_stock += 6,
             ManufactureItem::TradeArms => self.funds += 45,
             ManufactureItem::ForgeLance => self.lance_stock += 1,
             ManufactureItem::HellsteelLimb => self.limb_stock += 1,
@@ -2292,16 +2309,33 @@ impl Campaign {
         }
 
         // Kit up from the armoury stores: loadouts draw down real stock.
-        let mut kits: Vec<(u32, u32, u32)> = Vec::new();
+        let mut kits: Vec<(u32, u32, u32, ods_sim::units::MagKind)> = Vec::new();
         for &i in &squad_idx {
             let s = &self.soldiers[i];
             let grenades = s.grenades_loadout.min(self.grenade_stock);
             let dressings = s.dressings_loadout.min(self.dressing_stock);
-            let mags = s.mags_loadout.min(self.quarrel_stock);
             self.grenade_stock -= grenades;
             self.dressing_stock -= dressings;
-            self.quarrel_stock -= mags;
-            kits.push((grenades, dressings, mags));
+            // The preferred pressing, while the stock holds; blessed after.
+            use ods_sim::units::MagKind;
+            let (mags, kind) = match s.mag_pref {
+                MagKind::ColdIron if self.coldiron_stock > 0 => {
+                    let m = s.mags_loadout.min(self.coldiron_stock);
+                    self.coldiron_stock -= m;
+                    (m, MagKind::ColdIron)
+                }
+                MagKind::Salt if self.salt_stock > 0 => {
+                    let m = s.mags_loadout.min(self.salt_stock);
+                    self.salt_stock -= m;
+                    (m, MagKind::Salt)
+                }
+                _ => {
+                    let m = s.mags_loadout.min(self.quarrel_stock);
+                    self.quarrel_stock -= m;
+                    (m, MagKind::Blessed)
+                }
+            };
+            kits.push((grenades, dressings, mags, kind));
         }
 
         let squad: Vec<&Soldier> = squad_idx.iter().map(|&i| &self.soldiers[i]).collect();
@@ -3057,14 +3091,18 @@ impl Campaign {
             }
         }
 
-        // The drill yards: idle hands run the chosen drills — at houses
-        // that have a yard to run them on. Twin yards drill harder.
-        let yards: Vec<usize> =
-            self.bases.iter().map(|b| b.count_active(Facility::TrainingGround)).collect();
+        // The drill yards: idle hands run the drills of their OWN house —
+        // each chapterhouse sets its doctrine. Twin yards drill harder.
+        let yards: Vec<(usize, Focus)> = self
+            .bases
+            .iter()
+            .map(|b| (b.count_active(Facility::TrainingGround), b.focus))
+            .collect();
         {
-            let focus = self.training_focus;
             for s in &mut self.soldiers {
-                let chance = match yards.get(s.home).copied().unwrap_or(0) {
+                let (count, focus) =
+                    yards.get(s.home).copied().unwrap_or((0, Focus::Marksmanship));
+                let chance = match count {
                     0 => 0,
                     1 => 15,
                     _ => 22,
@@ -5189,7 +5227,7 @@ mod tests {
         for _ in 0..Facility::TrainingGround.build_days() {
             c.advance_day();
         }
-        c.training_focus = Focus::Marksmanship;
+        c.bases[0].focus = Focus::Marksmanship;
         let before: i32 = c.soldiers.iter().map(|s| s.stats.accuracy).sum();
         for _ in 0..30 {
             c.advance_day();

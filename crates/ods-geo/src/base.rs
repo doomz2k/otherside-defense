@@ -128,6 +128,9 @@ struct Slot {
 pub struct Chapterhouse {
     pub region: Region,
     grid: [[Option<Slot>; GRID]; GRID],
+    /// What this house's drill yard drills (each house sets its own).
+    #[serde(default)]
+    pub focus: crate::campaign::Focus,
     /// Scholars posted to THIS house: they research only at its lecterns.
     #[serde(default)]
     pub occultists: u32,
@@ -142,6 +145,7 @@ impl Chapterhouse {
         let mut ch = Self {
             region,
             grid: Default::default(),
+            focus: crate::campaign::Focus::default(),
             occultists: 0,
             artificers: 0,
         };
