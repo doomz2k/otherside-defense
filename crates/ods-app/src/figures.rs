@@ -105,11 +105,6 @@ pub fn blueprint(species: Species) -> &'static [PartBox] {
                 pb(Head, (-1.9, -1.9, 9.0), (1.9, 1.9, 9.6), ARMOR_DARK),
                 pb(Head, (-1.3, 1.3, 10.0), (1.3, 1.8, 10.7), VISOR),
                 pb(Head, (-0.3, -1.8, 11.4), (0.3, 1.2, 12.2), ARMOR_DARK),
-                // Rifle: stock, body, barrel, muzzle.
-                pb(Weapon, (3.2, -2.2, 6.0), (4.4, -0.2, 7.2), CIVVY),
-                pb(Weapon, (3.2, -0.2, 6.2), (4.4, 3.4, 7.4), GUNMETAL),
-                pb(Weapon, (3.5, 3.4, 6.5), (4.1, 6.2, 7.1), GUNMETAL),
-                pb(Weapon, (3.4, 6.2, 6.4), (4.2, 6.8, 7.2), ARMOR_DARK),
             ];
             P
         }
@@ -343,6 +338,57 @@ pub fn blueprint(species: Species) -> &'static [PartBox] {
     }
 }
 
+/// What the hand holds, by weapon key: every arm reads at a glance.
+/// Boxes live in soldier figure space (right hand at x ~3.5, +Y forward).
+fn weapon_model(key: &str) -> &'static [PartBox] {
+    use BodyPart::Weapon;
+    if key.contains("arbalest") || key.contains("crossbow") {
+        const P: &[PartBox] = &[
+            pb(Weapon, (3.2, -2.4, 6.0), (4.4, 0.6, 7.2), CIVVY),
+            pb(Weapon, (3.4, 0.6, 6.3), (4.2, 4.6, 7.1), GUNMETAL),
+            pb(Weapon, (1.4, 3.4, 6.4), (6.2, 4.2, 7.0), CIVVY),
+            pb(Weapon, (3.6, 4.6, 6.5), (4.0, 5.8, 6.9), HORN),
+        ];
+        P
+    } else if key.contains("mortar") {
+        const P: &[PartBox] = &[
+            pb(Weapon, (2.9, -3.0, 7.4), (4.7, 3.8, 9.2), GUNMETAL),
+            pb(Weapon, (2.7, 3.8, 7.2), (4.9, 4.6, 9.4), ARMOR_DARK),
+            pb(Weapon, (3.2, -2.0, 6.0), (4.4, -0.8, 7.4), CIVVY),
+        ];
+        P
+    } else if key.contains("censer") {
+        const P: &[PartBox] = &[
+            pb(Weapon, (3.4, -0.4, 6.4), (4.2, 3.2, 7.0), GUNMETAL),
+            pb(Weapon, (3.5, 3.2, 5.2), (4.1, 3.8, 6.8), GOLD),
+            pb(Weapon, (3.0, 2.6, 3.6), (4.6, 4.4, 5.2), GOLD),
+        ];
+        P
+    } else if key.contains("lance") {
+        const P: &[PartBox] = &[
+            pb(Weapon, (3.5, -2.6, 5.9), (4.1, 7.4, 6.7), GUNMETAL),
+            pb(Weapon, (3.3, 7.4, 5.7), (4.3, 8.6, 6.9), [1.0, 0.45, 0.1, 1.0]),
+            pb(Weapon, (3.2, -0.6, 6.6), (4.4, 0.8, 7.6), ARMOR_DARK),
+        ];
+        P
+    } else if key.contains("hammer") {
+        const P: &[PartBox] = &[
+            pb(Weapon, (3.5, -1.0, 5.8), (4.1, 5.0, 6.6), CIVVY),
+            pb(Weapon, (2.8, 5.0, 5.2), (4.8, 7.0, 7.4), GUNMETAL),
+        ];
+        P
+    } else {
+        // The rifle: stock, body, barrel, muzzle.
+        const P: &[PartBox] = &[
+            pb(Weapon, (3.2, -2.2, 6.0), (4.4, -0.2, 7.2), CIVVY),
+            pb(Weapon, (3.2, -0.2, 6.2), (4.4, 3.4, 7.4), GUNMETAL),
+            pb(Weapon, (3.5, 3.4, 6.5), (4.1, 6.2, 7.1), GUNMETAL),
+            pb(Weapon, (3.4, 6.2, 6.4), (4.2, 6.8, 7.2), ARMOR_DARK),
+        ];
+        P
+    }
+}
+
 /// Per-unit animation state the battle screen tracks between frames.
 #[derive(Clone, Copy, Default)]
 pub struct AnimState {
@@ -544,7 +590,12 @@ fn push_unit(
     // old slabs, still animated per frame.
     let mut grid: std::collections::HashMap<(i16, i16, i16), ([f32; 4], BodyPart)> =
         std::collections::HashMap::new();
-    for part in blueprint(unit.species) {
+    let carried: &[PartBox] = if unit.species == Species::Soldier {
+        weapon_model(&unit.weapon.key)
+    } else {
+        &[]
+    };
+    for part in blueprint(unit.species).iter().chain(carried) {
         // Weapons fall from unconscious hands.
         if !unit.conscious && part.part == BodyPart::Weapon {
             continue;
@@ -607,6 +658,26 @@ fn push_unit(
         let (dy, dz) = (p.y, p.z - pivot);
         Vec3::new(p.x, dy * ca - dz * sa, pivot + dy * sa + dz * ca)
     };
+    // Physical damage: the hurt LOSE MATERIAL. Cells vanish from the
+    // carve as health falls, twice as readily from crippled parts —
+    // deterministic per cell, so wounds are stable pocks, not static.
+    if unit.alive && vitality < 0.98 {
+        let bite = (1.0 - vitality) * 0.20;
+        grid.retain(|&(x, y, z), &mut (_, part)| {
+            let mut h = (unit.id.0)
+                .wrapping_mul(747796405)
+                .wrapping_add(x as u32)
+                .wrapping_mul(374761393)
+                .wrapping_add(y as u32)
+                .wrapping_mul(668265263)
+                .wrapping_add(z as u32)
+                .wrapping_mul(2654435761);
+            h ^= h >> 15;
+            let roll = ((h >> 8) & 0xFFFF) as f32 / 65535.0;
+            let chance = if unit.injuries.contains(&part) { bite * 2.2 } else { bite };
+            roll >= chance
+        });
+    }
     emit_shell(vertices, indices, &grid, unit.id.0, &limb, &place, &turn_normal);
 }
 
@@ -832,7 +903,13 @@ mod tests {
     fn blueprints_match_the_declared_anatomy() {
         for species in ALL {
             let declared = species.body_parts();
-            let bp = blueprint(species);
+            // Soldiers draw their Weapon from the keyed armoury models.
+            let bp: Vec<PartBox> = if species == Species::Soldier {
+                blueprint(species).iter().chain(weapon_model("rifle")).copied().collect()
+            } else {
+                blueprint(species).to_vec()
+            };
+            let bp = &bp[..];
             assert!(!bp.is_empty());
             for part_box in bp {
                 assert!(

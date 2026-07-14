@@ -80,6 +80,8 @@ pub struct BattleScreen {
     /// The brightest transient light on the field (muzzle, blast):
     /// position and dying intensity, fed to the renderer every frame.
     pub muzzle: (Vec3, f32),
+    /// The last shot's line of fire: deaths topple along it.
+    last_shot: Option<(Vec3, Vec3)>,
     /// Tile under the cursor, plus a cached move preview to it.
     hover: Option<IVec3>,
     hover_path: Option<(Vec<IVec3>, i32)>,
@@ -184,6 +186,7 @@ impl BattleScreen {
             waypoints: HashMap::new(),
             litter: Vec::new(),
             muzzle: (Vec3::ZERO, 0.0),
+            last_shot: None,
             hover: None,
             hover_path: None,
             reachable: Vec::new(),
@@ -1005,8 +1008,90 @@ impl BattleScreen {
         self.spawn_fx(e, audio);
         // Deaths and knockouts topple the figure only once they're SEEN.
         match e {
+            Event::Fired { unit, target, .. } => {
+                self.last_shot =
+                    Some((self.unit_pos(*unit, 9.0), self.unit_pos(*target, 9.0)));
+            }
             Event::Died { unit } | Event::Gibbed { unit } => {
                 self.anim.entry(unit.0).or_default().fall_goal = 1.0;
+                // The body goes WITH the shot: chest to the shooter, a
+                // shove along the line, and blood where it comes to rest.
+                let vpos = self.unit_pos(*unit, 0.0);
+                if let Some((from, _)) = self.last_shot {
+                    let dir = (vpos - from) * Vec3::new(1.0, 1.0, 0.0);
+                    if dir.length_squared() > 0.5 {
+                        let d = dir.normalize();
+                        let toward = -d;
+                        self.anim.entry(unit.0).or_default().yaw =
+                            toward.y.atan2(toward.x);
+                        if let Some(v) = self.visual.get_mut(&unit.0) {
+                            *v += d * 5.0;
+                        }
+                    }
+                }
+                for k in 0..3 {
+                    let off = Vec3::new(
+                        ((unit.0 * 31 + k * 17) % 13) as f32 - 6.0,
+                        ((unit.0 * 47 + k * 29) % 13) as f32 - 6.0,
+                        0.0,
+                    );
+                    self.push_litter(
+                        vpos + off + Vec3::Z * 0.4,
+                        [0.34, 0.04, 0.04, 0.9],
+                    );
+                }
+            }
+            Event::TurnStarted { .. } => {
+                // Pools spread under the fallen while they lie there.
+                let spots: Vec<Vec3> = self
+                    .battle
+                    .units
+                    .iter()
+                    .filter(|u| !u.alive && u.is_corpse())
+                    .map(|u| Self::tile_feet(u.tile))
+                    .collect();
+                for (i, p) in spots.into_iter().enumerate() {
+                    let off = Vec3::new(
+                        ((self.battle.turn as usize * 7 + i * 13) % 15) as f32 - 7.0,
+                        ((self.battle.turn as usize * 11 + i * 5) % 15) as f32 - 7.0,
+                        0.4,
+                    );
+                    self.push_litter(p + off, [0.30, 0.03, 0.03, 0.85]);
+                }
+            }
+            Event::PartSevered { unit, part } => {
+                // The part comes OFF: a chunk in its own colors tumbles
+                // and stays where it lands.
+                let species = self.battle.unit(*unit).species;
+                let color = figures::blueprint(species)
+                    .iter()
+                    .find(|b| b.part == *part)
+                    .map(|b| b.color)
+                    .unwrap_or([0.4, 0.1, 0.1, 1.0]);
+                let p = self.unit_pos(*unit, 8.0);
+                self.spawn_debris(p, color, 6);
+                let ground = self.unit_pos(*unit, 0.4);
+                self.push_litter(ground + Vec3::new(4.0, 2.0, 0.0), color);
+                self.push_litter(ground + Vec3::new(-3.0, 5.0, 0.0), [0.34, 0.04, 0.04, 0.9]);
+            }
+            Event::Exploded { at, .. } | Event::WallSmashed { at, .. } => {
+                // Scorch rings and debris that remembers what it was.
+                let p = Self::tile_pos(*at, 4.0);
+                let probe = *at * TILE_VOXELS
+                    + IVec3::new(TILE_VOXELS / 2, TILE_VOXELS / 2, scenario::GROUND_TOP + 4);
+                let mat = mat_color(self.battle.world.voxel(probe));
+                self.spawn_debris(p + Vec3::Z * 8.0, mat, 10);
+                if matches!(e, Event::Exploded { .. }) {
+                    for k in 0..8 {
+                        let a = k as f32 * std::f32::consts::TAU / 8.0;
+                        let r = 8.0 + (k % 3) as f32 * 3.0;
+                        self.push_litter(
+                            p * Vec3::new(1.0, 1.0, 0.0)
+                                + Vec3::new(a.cos() * r, a.sin() * r, scenario::GROUND_TOP as f32 + 0.4),
+                            [0.09, 0.07, 0.06, 0.9],
+                        );
+                    }
+                }
             }
             Event::Subdued { unit } => {
                 self.anim.entry(unit.0).or_default().fall_goal = 0.92;
@@ -1331,7 +1416,17 @@ impl BattleScreen {
                     color[3] *= 0.8; // a miss burns a little dimmer
                 }
                 let from = self.unit_pos(*unit, 13.0);
-                let to = self.unit_pos(*target, 9.0);
+                let mut to = self.unit_pos(*target, 9.0);
+                if !hit {
+                    // A miss doesn't vanish: it flies past and strikes
+                    // whatever the world puts in its way.
+                    let dir = (to - from).normalize_or(Vec3::X);
+                    let past = to + dir * 2.0;
+                    to = match self.battle.world.raycast(past, dir, 220.0) {
+                        Some(h) => h.position,
+                        None => to + dir * 90.0,
+                    };
+                }
                 let dist = from.distance(to).max(1.0);
                 // The bolt takes real time to arrive; the playback queue
                 // holds the consequences until it does.
@@ -1343,6 +1438,18 @@ impl BattleScreen {
                     age: 0.0,
                     life: dist / speed,
                 });
+                if !hit {
+                    let life = dist / speed;
+                    self.fx.push(Fx {
+                        kind: FxKind::Flash,
+                        from: to,
+                        to,
+                        color: [0.7, 0.65, 0.55, 0.5],
+                        age: -life,
+                        life: 0.25,
+                    });
+                    self.push_litter(to, [0.1, 0.09, 0.08, 0.8]);
+                }
                 // The muzzle answers with light and a curl of smoke.
                 let p = self.unit_pos(*unit, 10.0);
                 self.muzzle = (p, if self.is_night() { 1.0 } else { 0.45 });
@@ -1453,6 +1560,21 @@ impl BattleScreen {
                     age: 0.0,
                     life: 0.7,
                 });
+                // The pieces are recognizably THEIRS: debris in the body's
+                // own part colors, and gore that stays.
+                let bp = figures::blueprint(self.battle.unit(*unit).species);
+                for (k, b) in bp.iter().step_by(3).take(4).enumerate() {
+                    self.spawn_debris(p + Vec3::Z * (4 + k as i32) as f32, b.color, 4);
+                }
+                let ground = self.unit_pos(*unit, 0.4);
+                for k in 0..5 {
+                    let off = Vec3::new(
+                        ((unit.0 * 13 + k * 37) % 17) as f32 - 8.0,
+                        ((unit.0 * 19 + k * 23) % 17) as f32 - 8.0,
+                        0.0,
+                    );
+                    self.push_litter(ground + off, [0.40, 0.05, 0.06, 0.9]);
+                }
                 self.spawn_debris(p + Vec3::Z * 6.0 * VS_F, [0.55, 0.05, 0.05, 0.95], 9);
                 self.shake += 4.0;
                 play(Sound::Death);
@@ -1800,6 +1922,9 @@ impl BattleScreen {
             push_flat_square(&mut verts, &mut indices, *p, 0.6 * VS_F, *c);
         }
         for fx in &self.fx {
+            if fx.age < 0.0 {
+                continue; // scheduled for when the bolt lands
+            }
             let t = (fx.age / fx.life).clamp(0.0, 1.0);
             let fade = 1.0 - t;
             let mut color = fx.color;
@@ -3058,6 +3183,20 @@ fn push_marker(
 }
 
 /// A slim console gauge: background groove plus a colored fill fraction.
+/// Roughly what a voxel material looks like, for debris that remembers
+/// what it was chipped from.
+fn mat_color(v: ods_voxel::Voxel) -> [f32; 4] {
+    match v.0 {
+        2 => [0.40, 0.24, 0.18, 0.95],  // brick
+        5 | 13 => [0.28, 0.19, 0.10, 0.95], // timber
+        10 => [0.62, 0.53, 0.33, 0.95], // sand
+        11 => [0.72, 0.76, 0.82, 0.95], // snow
+        25 => [0.38, 0.38, 0.35, 0.95], // fieldstone
+        8 => [0.42, 0.13, 0.24, 0.95],  // flesh
+        _ => [0.27, 0.25, 0.22, 0.95],  // rubble-grey
+    }
+}
+
 /// What flies when a weapon speaks: (speed voxels/s, arc height as a
 /// fraction of range, color, half-width in voxels).
 fn projectile(key: &str) -> (f32, f32, [f32; 4], f32) {
