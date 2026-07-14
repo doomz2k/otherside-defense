@@ -63,6 +63,12 @@ pub const TERRIFY_COST_PCT: i32 = 25;
 pub const TERRIFY_RANGE_TILES: i32 = 14;
 /// Full possession (Princes only).
 pub const POSSESS_COST_PCT: i32 = 40;
+/// Slapping a fresh magazine into a clip-fed weapon.
+pub const RELOAD_TU: i32 = 12;
+/// Quick-drawing the sidearm (or holstering back).
+pub const SWAP_TU: i32 = 6;
+/// Taking a weapon up off the ground.
+pub const SCAVENGE_TU: i32 = 8;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CloudKind {
@@ -110,6 +116,12 @@ pub enum Event {
     SetDown { unit: UnitId, carried: UnitId },
     /// Recovered a weapon from the fallen.
     Scavenged { unit: UnitId },
+    /// A fresh magazine goes home with a click heard too far.
+    Reloaded { unit: UnitId },
+    /// Weapon and sidearm trade places.
+    Swapped { unit: UnitId },
+    /// A weapon leaves someone's hands the hard way.
+    WeaponDropped { unit: UnitId, at: IVec3 },
     /// Something moved out there, unseen. Rough bearing only.
     NoiseInDark { near: IVec3 },
     /// The rift obelisk is demolished; the incursion collapses.
@@ -216,8 +228,12 @@ pub enum Action {
     PickUp { unit: UnitId, target: UnitId },
     /// Set the carried body down on an adjacent open tile.
     PutDown { unit: UnitId, at: IVec3 },
-    /// Take a weapon from a fallen soldier on or beside your tile (8 TU).
+    /// Take a weapon up off the ground, on or beside your tile (8 TU).
     Scavenge { unit: UnitId },
+    /// Feed the weapon in hand a fresh magazine (12 TU).
+    Reload { unit: UnitId },
+    /// Trade the weapon in hand for the sidearm at the hip (6 TU).
+    SwapWeapon { unit: UnitId },
     EndTurn,
 }
 
@@ -235,6 +251,8 @@ pub enum ActionError {
     OutOfRange,
     /// No grenades / heal charges left.
     NoCharges,
+    /// The chamber is empty: reload, swap, or run.
+    NoAmmo,
     NotAdjacent,
     /// The unit has no psionic talent.
     NoPsi,
@@ -371,6 +389,9 @@ pub struct Battle {
     pub evacuated: u32,
     /// Noise the squad made where no demon could see (they listen too).
     pub alarm: Vec<IVec3>,
+    /// Weapons lying in the dirt: (tile, weapon, rounds still loaded).
+    /// The fallen drop theirs; the living may take them up.
+    pub ground: Vec<(IVec3, crate::units::Weapon, i32)>,
     /// The squad's memory: where each demon was LAST seen. Kept when sight
     /// is lost (the HUD draws a ghost there), cleared by the demon's death.
     pub last_known: HashMap<UnitId, IVec3>,
@@ -421,6 +442,7 @@ impl Battle {
             casks: Vec::new(),
             pools: Vec::new(),
             last_noise: None,
+            ground: Vec::new(),
             summons: Vec::new(),
             wards: Vec::new(),
             flares: Vec::new(),
@@ -796,6 +818,8 @@ impl Battle {
             Action::PickUp { unit, target } => self.do_pick_up(unit, target),
             Action::PutDown { unit, at } => self.do_put_down(unit, at),
             Action::Scavenge { unit } => self.do_scavenge(unit),
+            Action::Reload { unit } => self.do_reload(unit),
+            Action::SwapWeapon { unit } => self.do_swap(unit),
             Action::EndTurn => Ok(self.end_turn()),
         }
     }
@@ -971,27 +995,70 @@ impl Battle {
 
     fn do_scavenge(&mut self, id: UnitId) -> Result<Vec<Event>, ActionError> {
         self.check_actor(id)?;
-        if self.unit(id).tu < 8 {
+        if self.unit(id).tu < SCAVENGE_TU {
             return Err(ActionError::NotEnoughTu);
         }
         let me = self.unit(id).tile;
-        let weapon = self
-            .units
+        // The best thing lying within reach: power first, loaded beats dry.
+        let idx = self
+            .ground
             .iter()
-            .find(|u| {
-                !u.alive
-                    && !u.civilian
-                    && u.species == Species::Soldier
-                    && cheb(u.tile, me) <= 1
-                    && u.weapon.power > self.unit(id).weapon.power
-            })
-            .map(|u| u.weapon.clone());
-        let Some(weapon) = weapon else {
+            .enumerate()
+            .filter(|(_, (t, _, _))| cheb(*t, me) <= 1)
+            .max_by_key(|(i, (_, w, a))| (w.power, *a, std::cmp::Reverse(*i)))
+            .map(|(i, _)| i);
+        let Some(idx) = idx else {
             return Err(ActionError::BadTarget);
         };
-        self.unit_mut(id).tu -= 8;
-        self.unit_mut(id).weapon = weapon;
+        let (_, weapon, ammo) = self.ground.remove(idx);
+        let u = self.unit_mut(id);
+        u.tu -= SCAVENGE_TU;
+        let old = std::mem::replace(&mut u.weapon, weapon);
+        let old_ammo = std::mem::replace(&mut u.ammo, ammo);
+        // What was in hand goes down where we stand — nothing vanishes.
+        if !old.natural {
+            self.ground.push((me, old, old_ammo));
+        }
         Ok(vec![Event::Scavenged { unit: id }])
+    }
+
+    /// A fresh magazine goes into whatever is in hand.
+    fn do_reload(&mut self, id: UnitId) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        let u = self.unit(id);
+        if u.weapon.clip == 0 || u.ammo >= u.weapon.clip as i32 {
+            return Err(ActionError::BadTarget);
+        }
+        if u.mags == 0 {
+            return Err(ActionError::NoCharges);
+        }
+        if u.tu < RELOAD_TU {
+            return Err(ActionError::NotEnoughTu);
+        }
+        let u = self.unit_mut(id);
+        u.tu -= RELOAD_TU;
+        u.mags -= 1;
+        u.ammo = u.weapon.clip as i32;
+        // The click carries.
+        self.last_noise = Some(self.unit(id).tile);
+        Ok(vec![Event::Reloaded { unit: id }])
+    }
+
+    /// Weapon and sidearm trade places, each keeping its own loaded rounds.
+    fn do_swap(&mut self, id: UnitId) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        if self.unit(id).sidearm.is_none() {
+            return Err(ActionError::BadTarget);
+        }
+        if self.unit(id).tu < SWAP_TU {
+            return Err(ActionError::NotEnoughTu);
+        }
+        let u = self.unit_mut(id);
+        u.tu -= SWAP_TU;
+        let drawn = u.sidearm.take().expect("checked above");
+        u.sidearm = Some(std::mem::replace(&mut u.weapon, drawn));
+        std::mem::swap(&mut u.ammo, &mut u.sidearm_ammo);
+        Ok(vec![Event::Swapped { unit: id }])
     }
 
     /// A demon feeds on a corpse: flesh knits, the body is spent.
@@ -1654,6 +1721,7 @@ impl Battle {
             .filter(|e| {
                 e.is_active()
                     && e.side == mover_side.enemy()
+                    && e.has_shot()
                     && e.fire_cost(FireMode::Snap).is_some_and(|c| e.tu >= c)
                     && e.reactions * e.tu / e.tu_max.max(1) > mover_initiative
                     // Melee reactions only trigger when you brush past claws.
@@ -1699,6 +1767,9 @@ impl Battle {
             return Err(ActionError::NotEnoughTu);
         }
         let shooter = self.unit(id);
+        if shooter.weapon.clip > 0 && shooter.ammo <= 0 {
+            return Err(ActionError::NoAmmo);
+        }
         let dist = cheb(shooter.tile, self.unit(target).tile);
         if shooter.weapon.melee {
             if dist > 1 {
@@ -1721,6 +1792,9 @@ impl Battle {
             {
                 let u = self.unit_mut(id);
                 u.tu -= cost;
+                if u.weapon.clip > 0 {
+                    u.ammo -= 1;
+                }
                 let d = to - from;
                 if d.x != 0 || d.y != 0 {
                     u.facing = IVec3::new(d.x.signum(), d.y.signum(), 0);
@@ -1769,6 +1843,9 @@ impl Battle {
     ) {
         let (cost, chance, rounds, power, breach, melee, silent, stun_power) = {
             let s = self.unit(shooter);
+            if !s.has_shot() {
+                return; // the chamber is empty; nothing leaves the barrel
+            }
             let (Some(cost), Some(chance)) = (s.fire_cost(mode), s.hit_chance(mode)) else {
                 return;
             };
@@ -1806,6 +1883,12 @@ impl Battle {
         for _ in 0..rounds {
             if !self.unit(target).is_active() || self.winner.is_some() {
                 break; // remaining rounds of the burst go wide, harmlessly
+            }
+            if self.unit(shooter).weapon.clip > 0 {
+                if self.unit(shooter).ammo <= 0 {
+                    break; // the burst clicks dry mid-squeeze
+                }
+                self.unit_mut(shooter).ammo -= 1;
             }
             self.xp[shooter.0 as usize].shots_fired += 1;
             let hit = (self.rng.roll(100) as i32) < chance;
@@ -2171,9 +2254,18 @@ impl Battle {
         events.push(Event::PartSevered { unit: target, part });
         self.spatter(tile, 5, MAT_GORE);
         // Losing the weapon arm's grip — or the weapon part itself — means
-        // fighting with what's left.
+        // fighting with what's left. The piece lands in the dirt.
         if part == BodyPart::Weapon {
-            self.unit_mut(target).weapon = crate::units::Weapon::from_data("bare hands", "bare_hands");
+            let u = self.unit_mut(target);
+            let dropped = std::mem::replace(
+                &mut u.weapon,
+                crate::units::Weapon::from_data("bare hands", "bare_hands"),
+            );
+            let rounds = std::mem::replace(&mut u.ammo, 0);
+            if !dropped.natural {
+                self.ground.push((tile, dropped, rounds));
+                events.push(Event::WeaponDropped { unit: target, at: tile });
+            }
         }
         // Squadmates watch it happen.
         let side = self.unit(target).side;
@@ -2253,6 +2345,18 @@ impl Battle {
             let t = self.unit(target);
             (t.side, t.species, t.tile)
         };
+        // Forged weapons tumble from dead hands; claws go wherever their
+        // owners go. The corpse keeps only its bare hands.
+        if !self.unit(target).weapon.natural {
+            let u = self.unit_mut(target);
+            let dropped = std::mem::replace(
+                &mut u.weapon,
+                crate::units::Weapon::from_data("bare hands", "bare_hands"),
+            );
+            let rounds = std::mem::replace(&mut u.ammo, 0);
+            self.ground.push((tile, dropped, rounds));
+            events.push(Event::WeaponDropped { unit: target, at: tile });
+        }
         self.unit_mut(target).alive = false;
         events.push(Event::Died { unit: target });
 
@@ -2741,6 +2845,116 @@ mod tests {
             Unit::soldier(0, "Vasquez", IVec3::new(1, 5, 0)),
             Unit::imp(1, "Imp", IVec3::new(10, 5, 0)),
         ]
+    }
+
+    #[test]
+    fn rounds_are_finite_and_the_reload_feeds_the_gun() {
+        let mut b = open_field(duelists(), 41);
+        b.units[0].tile = IVec3::new(4, 5, 0);
+        b.units[1].tile = IVec3::new(7, 5, 0);
+        let clip = b.units[0].weapon.clip as i32;
+        assert!(clip > 0, "the rifle feeds from a clip");
+        assert_eq!(b.units[0].ammo, clip, "it rides in loaded");
+
+        b.perform(Action::Fire { unit: UnitId(0), target: UnitId(1), mode: FireMode::Snap })
+            .unwrap();
+        assert_eq!(b.unit(UnitId(0)).ammo, clip - 1, "one squeeze, one round");
+
+        // Run the chamber dry: firing refuses before spending a single TU.
+        b.units[0].ammo = 0;
+        let tu = b.unit(UnitId(0)).tu;
+        let err = b.perform(Action::Fire { unit: UnitId(0), target: UnitId(1), mode: FireMode::Snap });
+        assert_eq!(err.unwrap_err(), ActionError::NoAmmo);
+        assert_eq!(b.unit(UnitId(0)).tu, tu, "a dry click is free");
+
+        // A fresh magazine fixes everything (and costs its 12 TU).
+        assert!(b.units[0].mags > 0);
+        let mags = b.units[0].mags;
+        b.perform(Action::Reload { unit: UnitId(0) }).unwrap();
+        assert_eq!(b.unit(UnitId(0)).ammo, clip);
+        assert_eq!(b.unit(UnitId(0)).mags, mags - 1);
+        assert_eq!(b.unit(UnitId(0)).tu, tu - RELOAD_TU);
+        // Topped off, the quartermaster refuses to waste another.
+        assert_eq!(
+            b.perform(Action::Reload { unit: UnitId(0) }).unwrap_err(),
+            ActionError::BadTarget
+        );
+        // An auto burst dies with the clip: one round left fires one round.
+        b.units[0].ammo = 1;
+        let fired = b
+            .perform(Action::Fire { unit: UnitId(0), target: UnitId(1), mode: FireMode::Auto })
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, Event::Fired { .. }))
+            .count();
+        assert_eq!(fired, 1, "the burst clicks dry mid-squeeze");
+        assert_eq!(b.unit(UnitId(0)).ammo, 0);
+    }
+
+    #[test]
+    fn dry_guns_do_not_react() {
+        // The imp walks straight across the soldier's face; the soldier has
+        // reactions to spare but an empty chamber and nothing happens.
+        let mut units = duelists();
+        units[0].reactions = 95;
+        units[0].facing = IVec3::new(1, 0, 0);
+        units[1].tile = IVec3::new(6, 5, 0);
+        let mut b = open_field(units, 42);
+        b.units[0].ammo = 0;
+        b.units[0].mags = 0;
+        b.perform(Action::EndTurn).unwrap();
+        let events = b
+            .perform(Action::Move { unit: UnitId(1), to: IVec3::new(6, 3, 0) })
+            .unwrap();
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Fired { reaction: true, .. })),
+            "an empty chamber watches in silence: {events:?}"
+        );
+    }
+
+    #[test]
+    fn the_sidearm_swap_keeps_both_loads() {
+        let mut b = open_field(duelists(), 43);
+        b.units[0].sidearm = Some(crate::units::Weapon::from_data("consecrated blade", "blade"));
+        b.units[0].ammo = 7;
+        let tu = b.units[0].tu;
+        b.perform(Action::SwapWeapon { unit: UnitId(0) }).unwrap();
+        let u = b.unit(UnitId(0));
+        assert!(u.weapon.melee, "the blade is in hand");
+        assert_eq!(u.tu, tu - SWAP_TU);
+        assert_eq!(u.sidearm_ammo, 7, "the rifle holsters with its rounds");
+        b.perform(Action::SwapWeapon { unit: UnitId(0) }).unwrap();
+        let u = b.unit(UnitId(0));
+        assert_eq!(u.weapon.key, "rifle");
+        assert_eq!(u.ammo, 7, "and comes back exactly as it left");
+    }
+
+    #[test]
+    fn the_fallen_drop_their_arms_and_the_living_take_them_up() {
+        let mut units = duelists();
+        units.push(Unit::soldier(2, "Ito", IVec3::new(2, 5, 0)));
+        let mut b = open_field(units, 44);
+        b.xp_push_for_test();
+        // Ito dies holding a loaded rifle.
+        b.units[2].ammo = 9;
+        let mut events = Vec::new();
+        b.kill_unit(UnitId(2), &mut events);
+        assert!(
+            events.iter().any(|e| matches!(e, Event::WeaponDropped { .. })),
+            "{events:?}"
+        );
+        assert_eq!(b.ground.len(), 1);
+        assert_eq!(b.ground[0].0, IVec3::new(2, 5, 0));
+        assert_eq!(b.ground[0].2, 9, "the rounds go down with it");
+        assert_eq!(b.unit(UnitId(2)).weapon.key, "bare_hands");
+
+        // Vasquez steps over and takes it up, leaving her own behind.
+        b.units[0].tile = IVec3::new(2, 4, 0);
+        b.units[0].ammo = 3;
+        b.perform(Action::Scavenge { unit: UnitId(0) }).unwrap();
+        assert_eq!(b.unit(UnitId(0)).ammo, 9, "the dead man's rounds come too");
+        assert_eq!(b.ground.len(), 1, "her own rifle lies where she stood");
+        assert_eq!(b.ground[0].2, 3);
     }
 
     #[test]

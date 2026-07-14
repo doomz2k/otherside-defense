@@ -843,8 +843,10 @@ impl Core {
                             }
                         }
                         ui.label(format!(
-                            "Heavy packs (>5 items) cost 4 TU. Lances in armoury: {}.",
-                            c.lance_stock
+                            "Heavy packs slow the hand (capacity 2 + Str/8; two magazines ride \
+                             as one item). Lances: {}. Blessed magazines: {}.",
+                            c.lance_stock,
+                            c.quarrel_stock
                         ));
                         ui.label("Click a fit soldier's @base tag to rotate their station.");
                     });
@@ -1251,6 +1253,26 @@ impl Core {
                         ui.separator();
                         stat_bars(ui, &c.soldiers[si]);
                         ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Magazines");
+                            if ui.small_button("-").clicked() && c.soldiers[si].mags_loadout > 0 {
+                                c.soldiers[si].mags_loadout -= 1;
+                            }
+                            ui.label(c.soldiers[si].mags_loadout.to_string());
+                            if ui.small_button("+").clicked() && c.soldiers[si].mags_loadout < 4 {
+                                c.soldiers[si].mags_loadout += 1;
+                            }
+                            ui.label(
+                                egui::RichText::new(format!("({} in stores)", c.quarrel_stock))
+                                    .weak()
+                                    .small(),
+                            )
+                            .on_hover_text(
+                                "spares carried into battle; drawn from the armoury's \
+                                 blessed magazines on launch",
+                            );
+                        });
+                        ui.separator();
                         paper_doll(ui, c, si, &mut self.log);
                     });
                 if !open {
@@ -1530,11 +1552,16 @@ fn report_line(what: &str, r: ods_geo::BattleReport) -> String {
     let captures = r.captured_grunts + r.captured_overseers;
     if r.victory {
         format!(
-            "{what}: VICTORY — {} demons slain{}, {} soldiers lost, {} turns",
+            "{what}: VICTORY — {} demons slain{}, {} soldiers lost, {} turns{}",
             r.demons_slain,
             if captures > 0 { format!(", {captures} bound") } else { String::new() },
             r.dead.len(),
-            r.turns
+            r.turns,
+            if r.recovered.is_empty() {
+                String::new()
+            } else {
+                format!(" — {} forged weapon(s) came home off the field", r.recovered.len())
+            }
         )
     } else {
         format!(
@@ -2047,7 +2074,7 @@ fn paper_doll(ui: &mut egui::Ui, c: &mut Campaign, si: usize, log: &mut Vec<Stri
     if slot(ui, top + 8.0, true, format!("⚔ {}", s.weapon_key.replace('_', " ")), "cycle issued weapon") {
         act = Some(0);
     }
-    if slot(ui, top + 44.0, true, format!("🗡 {}", if s.has_blade { "blade" } else { "—" }), "consecrated blade: ripostes melee") {
+    if slot(ui, top + 44.0, true, format!("🗡 {}", if s.has_blade { "blade" } else { "—" }), "consecrated blade: free riposte, and a drawable sidearm in the field [I]") {
         act = Some(1);
     }
 

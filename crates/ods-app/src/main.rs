@@ -791,6 +791,9 @@ impl Core {
                         for (what, key) in [
                             ("Fire modes", "1 / 2 / 3"),
                             ("Throw flare", "L"),
+                            ("Reload", "C"),
+                            ("Draw sidearm", "I"),
+                            ("Take up a fallen weapon", "J"),
                             ("Turn the field", "Q / E"),
                             ("Pan", "W A S D / screen edge"),
                             ("Orbit", "right-drag"),

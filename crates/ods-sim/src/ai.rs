@@ -275,6 +275,17 @@ fn pick_action(battle: &Battle, id: UnitId, side: Side) -> Option<Action> {
         }
     }
 
+    // The dry-weapon drill: a fresh magazine if there is one, the sidearm
+    // if there isn't, before any plan that involves the trigger.
+    if me.weapon.clip > 0 && me.ammo <= 0 {
+        if me.mags > 0 && me.tu >= crate::battle::RELOAD_TU {
+            return Some(Action::Reload { unit: id });
+        }
+        if me.sidearm.is_some() && me.tu >= crate::battle::SWAP_TU {
+            return Some(Action::SwapWeapon { unit: id });
+        }
+    }
+
     // Everything armed for the pack's fear map: civilians carry no guns.
     let guns: Vec<IVec3> = known
         .iter()
@@ -290,6 +301,7 @@ fn pick_action(battle: &Battle, id: UnitId, side: Side) -> Option<Action> {
         Role::Stalker => stalker(battle, me, side, &known, &guns, prey_id, prey_tile),
         Role::Warden => warden(battle, me, side, &guns, prey_tile),
         Role::Lord => lord(battle, me, side, &guns, prey_id, prey_tile),
+        Role::Skirmisher if me.weapon.melee => charger(battle, me, &guns, prey_id, prey_tile),
         Role::Skirmisher => skirmisher(battle, me, side, &guns, prey_tile),
     }
 }
@@ -306,6 +318,9 @@ fn skirmisher(
     guns: &[IVec3],
     prey_tile: IVec3,
 ) -> Option<Action> {
+    if !me.has_shot() {
+        return None; // dry, no spares, nothing at the hip: hold and hope
+    }
     let target = choose_target(battle, me, side);
     if let (Some(target), Some(snap)) = (target, me.fire_cost(FireMode::Snap)) {
         let hurt = me.health * 3 < me.health_max && me.bravery < 85;

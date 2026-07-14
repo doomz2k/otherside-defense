@@ -348,6 +348,18 @@ impl BattleScreen {
                     self.apply(renderer, audio, result);
                 }
             }
+            KeyCode::KeyC => {
+                if let Some(id) = self.selected {
+                    let result = self.battle.perform(Action::Reload { unit: id });
+                    self.apply(renderer, audio, result);
+                }
+            }
+            KeyCode::KeyI => {
+                if let Some(id) = self.selected {
+                    let result = self.battle.perform(Action::SwapWeapon { unit: id });
+                    self.apply(renderer, audio, result);
+                }
+            }
             KeyCode::KeyH => self.heal_selected(renderer, audio),
             KeyCode::KeyX => self.amputate_selected(renderer, audio),
             KeyCode::KeyR => {
@@ -519,6 +531,29 @@ impl BattleScreen {
                 }
                 if ui.button("✚ Dress wounds [H]").clicked() {
                     self.heal_selected(renderer, audio);
+                }
+                if let Some(id) = self.selected {
+                    let u = self.battle.unit(id);
+                    if u.weapon.clip > 0
+                        && ui
+                            .button(format!("⟳ Reload [C] ({})", u.mags))
+                            .on_hover_text("12 TU — a fresh magazine for the weapon in hand")
+                            .clicked()
+                    {
+                        let result = self.battle.perform(Action::Reload { unit: id });
+                        self.apply(renderer, audio, result);
+                    }
+                    if let Some(side) = &self.battle.unit(id).sidearm {
+                        let label = format!("⇄ {} [I]", side.name);
+                        if ui
+                            .button(label)
+                            .on_hover_text("6 TU — trade the weapon in hand for the one at the hip")
+                            .clicked()
+                        {
+                            let result = self.battle.perform(Action::SwapWeapon { unit: id });
+                            self.apply(renderer, audio, result);
+                        }
+                    }
                 }
                 let officer = self.selected.is_some_and(|id| {
                     let u = self.battle.unit(id);
@@ -956,6 +991,29 @@ impl BattleScreen {
                             }
                         }
                         ui.label(egui::RichText::new(plate).small().weak());
+                        if u.weapon.clip > 0 {
+                            let ammo_line = format!(
+                                "ammo {}/{} · {} mag(s){}",
+                                u.ammo,
+                                u.weapon.clip,
+                                u.mags,
+                                if u.ammo == 0 { " — DRY" } else { "" }
+                            );
+                            ui.label(if u.ammo == 0 {
+                                egui::RichText::new(ammo_line)
+                                    .small()
+                                    .color(egui::Color32::from_rgb(230, 90, 70))
+                            } else {
+                                egui::RichText::new(ammo_line).small().weak()
+                            });
+                        }
+                        if let Some(side) = &u.sidearm {
+                            ui.label(
+                                egui::RichText::new(format!("at the hip: {} [I]", side.name))
+                                    .small()
+                                    .weak(),
+                            );
+                        }
                         ui.horizontal(|ui| {
                             use crate::icons::{self, Icon};
                             ui.spacing_mut().item_spacing.x = 3.0;
@@ -2295,6 +2353,15 @@ impl BattleScreen {
                 _ => {}
             }
         }
+        // Fallen weapons glint where they lie: a low steel cross wherever
+        // the squad can see the floor.
+        for (tile, _, _) in &self.battle.ground {
+            if visible.contains(tile) {
+                let base = (*tile * TILE_VOXELS).as_vec3()
+                    + Vec3::new(HALF_TILE, HALF_TILE, scenario::GROUND_TOP as f32 + 2.0);
+                push_marker(&mut verts, &mut indices, base, 1.2 * VS_F, [0.8, 0.85, 0.92, 0.8]);
+            }
+        }
         // The hovered tile wears the classic wireframe cursor: red over
         // enemies, arming-orange with a charge out, white over open ground.
         if let Some(tile) = self.hover {
@@ -2621,6 +2688,13 @@ fn describe(event: &Event, battle: &Battle) -> String {
             format!("{} lays {} down", name(unit), name(carried))
         }
         Event::Scavenged { unit } => format!("{} takes up a fallen weapon", name(unit)),
+        Event::Reloaded { unit } => format!("{} slaps a fresh magazine home", name(unit)),
+        Event::Swapped { unit } => {
+            format!("{} draws what was at the hip", name(unit))
+        }
+        Event::WeaponDropped { unit, .. } => {
+            format!("{}'s weapon falls to the ground", name(unit))
+        }
         Event::NoiseInDark { near } => {
             format!("something shrieks in the dark, out in {}...", place(near))
         }

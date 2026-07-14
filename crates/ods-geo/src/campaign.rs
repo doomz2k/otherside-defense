@@ -295,6 +295,9 @@ pub struct Soldier {
     pub kills: u32,
     /// Loadout: hellfire charges and dressings carried (drawn from stock).
     pub grenades_loadout: u32,
+    /// Spare magazines carried into battle (drawn from quarrel stock).
+    #[serde(default = "d_mags")]
+    pub mags_loadout: u32,
     pub dressings_loadout: u32,
     /// Carries a forged Hellfire Lance (from the armoury's lance stock).
     #[serde(default)]
@@ -722,6 +725,14 @@ fn default_steel_price() -> i64 {
     5
 }
 
+fn d_quarrels() -> u32 {
+    24
+}
+
+fn d_mags() -> u32 {
+    2
+}
+
 const RECRUIT_NAMES: [&str; 16] = [
     "Adeyemi", "Brandt", "Castillo", "Dubois", "Eriksen", "Farah", "Grigorescu", "Hale",
     "Iwata", "Jansen", "Karimi", "Lindqvist", "Mbeki", "Novak", "Oyelaran", "Petrov",
@@ -766,6 +777,9 @@ pub struct Campaign {
     /// Armoury stores that loadouts draw from.
     pub grenade_stock: u32,
     pub dressing_stock: u32,
+    /// Magazines of blessed shot: the clip-fed armoury eats these.
+    #[serde(default = "d_quarrels")]
+    pub quarrel_stock: u32,
     /// Legacy single workshop job from older saves; migrated into `jobs`.
     #[serde(default)]
     manufacture: Option<(ManufactureItem, u32)>,
@@ -909,6 +923,7 @@ impl Campaign {
             hellsteel: 0,
             grenade_stock: 12,
             dressing_stock: 12,
+            quarrel_stock: 24,
             manufacture: None,
             jobs: Vec::new(),
             prisoners: Prisoners::default(),
@@ -1063,6 +1078,7 @@ impl Campaign {
             missions: 0,
             kills: 0,
             grenades_loadout: 2,
+            mags_loadout: 2,
             dressings_loadout: 2,
             has_lance: false,
             home: 0,
@@ -1338,11 +1354,26 @@ impl Campaign {
         Ok(())
     }
 
+    /// Weapons walked off a held field go back on the racks.
+    fn take_salvage(&mut self, recovered: &[String]) {
+        for key in recovered {
+            match key.as_str() {
+                "blade" => self.blade_stock += 1,
+                "hellfire_lance" => self.lance_stock += 1,
+                "arbalest" | "censer" | "ram_hammer" | "salt_mortar" => {
+                    *self.weapon_stock.entry(key.clone()).or_insert(0) += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Put a finished job's goods on the shelves.
     fn take_delivery(&mut self, done: ManufactureItem) {
         match done {
             ManufactureItem::HellfireCharges => self.grenade_stock += 4,
             ManufactureItem::FieldDressings => self.dressing_stock += 4,
+            ManufactureItem::PressQuarrels => self.quarrel_stock += 8,
             ManufactureItem::TradeArms => self.funds += 45,
             ManufactureItem::ForgeLance => self.lance_stock += 1,
             ManufactureItem::HellsteelLimb => self.limb_stock += 1,
@@ -1969,14 +2000,16 @@ impl Campaign {
         }
 
         // Kit up from the armoury stores: loadouts draw down real stock.
-        let mut kits: Vec<(u32, u32)> = Vec::new();
+        let mut kits: Vec<(u32, u32, u32)> = Vec::new();
         for &i in &squad_idx {
             let s = &self.soldiers[i];
             let grenades = s.grenades_loadout.min(self.grenade_stock);
             let dressings = s.dressings_loadout.min(self.dressing_stock);
+            let mags = s.mags_loadout.min(self.quarrel_stock);
             self.grenade_stock -= grenades;
             self.dressing_stock -= dressings;
-            kits.push((grenades, dressings));
+            self.quarrel_stock -= mags;
+            kits.push((grenades, dressings, mags));
         }
 
         let squad: Vec<&Soldier> = squad_idx.iter().map(|&i| &self.soldiers[i]).collect();
@@ -2196,6 +2229,9 @@ impl Campaign {
         battle: &ods_sim::battle::Battle,
     ) -> BattleReport {
         let report = missions::report_from(battle, token.squad_idx.len());
+
+        // The quartermaster walks a held field: forged weapons come home.
+        self.take_salvage(&report.recovered);
 
         // Shared fields forge bonds: two seasoned, unbonded survivors of a
         // held field sometimes stop pretending they aren't a pair. This must
@@ -4336,6 +4372,43 @@ mod tests {
     }
 
     #[test]
+    fn quarrels_arm_the_squad_and_the_held_field_gives_back() {
+        let mut c = Campaign::new(57);
+        let stock = c.quarrel_stock;
+        let id = detected_rift(&mut c, RiftKind::Scouting, Region::Europe);
+        let _ = c.assault_rift(id);
+        assert!(
+            c.quarrel_stock < stock,
+            "the squad drew magazines from the stores: {} -> {}",
+            stock,
+            c.quarrel_stock
+        );
+
+        // The press refills what the war eats.
+        c.start_build(0, Facility::Workshop, 1, 2).unwrap();
+        for _ in 0..Facility::Workshop.build_days() {
+            c.advance_day();
+        }
+        c.brimstone += 10;
+        c.hellsteel += 10;
+        let before = c.quarrel_stock;
+        c.start_manufacture(0, ManufactureItem::PressQuarrels).unwrap();
+        let mut days = 0;
+        while !c.jobs.is_empty() && days < 60 {
+            c.advance_day();
+            days += 1;
+        }
+        assert_eq!(c.quarrel_stock, before + 8);
+
+        // And the quartermaster restocks straight off a held field.
+        let blades = c.blade_stock;
+        let arbs = c.weapon_stock.get("arbalest").copied().unwrap_or(0);
+        c.take_salvage(&["blade".to_string(), "arbalest".to_string(), "rifle".to_string()]);
+        assert_eq!(c.blade_stock, blades + 1);
+        assert_eq!(c.weapon_stock.get("arbalest").copied().unwrap_or(0), arbs + 1);
+    }
+
+    #[test]
     fn old_saves_fold_staff_into_the_founding_house() {
         let c = Campaign::new(56);
         let mut v: serde_json::Value = serde_json::from_str(&c.save_to_string()).unwrap();
@@ -4664,6 +4737,7 @@ mod tests {
             species_slain: vec![],
             horrors: vec![],
             atrocities_found: 0,
+            recovered: vec![],
         };
         let squad_idx: Vec<usize> = (0..c.soldiers.len().min(6)).collect();
         c.apply_to_roster(&squad_idx, &report, "a test");

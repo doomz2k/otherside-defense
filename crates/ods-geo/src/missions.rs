@@ -34,6 +34,9 @@ pub struct BattleReport {
     pub civilians_dead: u32,
     /// Breeds encountered / dragged home bound — feeds the codex.
     pub species_seen: Vec<ods_sim::units::Species>,
+    /// Forged weapons picked off a held field (balance-table keys): the
+    /// fallen's arms come home when the field is won.
+    pub recovered: Vec<String>,
     pub species_captured: Vec<ods_sim::units::Species>,
     /// Horrors witnessed per survivor (squad index, count) — sanity damage.
     pub horrors: Vec<(usize, u32)>,
@@ -49,7 +52,7 @@ const MAX_AUTO_TURNS: u32 = 40;
 pub(crate) fn build_nest(
     seed: u64,
     squad: &[&Soldier],
-    kits: &[(u32, u32)],
+    kits: &[(u32, u32, u32)],
     demon_count: u32,
     strength: u32,
     research: &ResearchState,
@@ -60,7 +63,7 @@ pub(crate) fn build_nest(
 pub(crate) fn build_otherside(
     seed: u64,
     squad: &[&Soldier],
-    kits: &[(u32, u32)],
+    kits: &[(u32, u32, u32)],
     demon_count: u32,
     strength: u32,
     research: &ResearchState,
@@ -72,7 +75,7 @@ pub(crate) fn build_otherside(
 pub(crate) fn build_assault(
     seed: u64,
     squad: &[&Soldier],
-    kits: &[(u32, u32)],
+    kits: &[(u32, u32, u32)],
     demon_count: u32,
     strength: u32,
     civilians: u32,
@@ -98,7 +101,7 @@ pub(crate) fn build_assault(
 pub(crate) fn build_defense(
     seed: u64,
     squad: &[&Soldier],
-    kits: &[(u32, u32)],
+    kits: &[(u32, u32, u32)],
     demon_count: u32,
     research: &ResearchState,
     house: &crate::base::Chapterhouse,
@@ -146,7 +149,7 @@ pub(crate) fn build_defense(
 pub(crate) fn build_purge(
     seed: u64,
     squad: &[&Soldier],
-    kits: &[(u32, u32)],
+    kits: &[(u32, u32, u32)],
     demon_count: u32,
     research: &ResearchState,
 ) -> Battle {
@@ -249,6 +252,19 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
         }
     }
 
+    // A held field gives back what fell on it: every forged weapon lying
+    // in the dirt (standard rifles are plentiful and not worth the ledger).
+    let recovered: Vec<String> = if victory {
+        battle
+            .ground
+            .iter()
+            .filter(|(_, w, _)| !w.natural && w.key != "rifle" && w.key != "bare_hands")
+            .map(|(_, w, _)| w.key.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     BattleReport {
         victory,
         turns: battle.turn,
@@ -256,6 +272,7 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
         survivors,
         injuries,
         severed,
+        recovered,
         demons_slain: demons_total.saturating_sub(battle.living(Side::Demons).count() as u32),
         captured_grunts,
         captured_overseers,
@@ -269,7 +286,7 @@ pub(crate) fn report_from(battle: &Battle, squad_len: usize) -> BattleReport {
     }
 }
 
-fn make_units(squad: &[&Soldier], kits: &[(u32, u32)], research: &ResearchState) -> Vec<Unit> {
+fn make_units(squad: &[&Soldier], kits: &[(u32, u32, u32)], research: &ResearchState) -> Vec<Unit> {
     squad
         .iter()
         .zip(kits)
@@ -278,7 +295,7 @@ fn make_units(squad: &[&Soldier], kits: &[(u32, u32)], research: &ResearchState)
         .collect()
 }
 
-fn make_unit(id: u32, s: &Soldier, kit: (u32, u32), research: &ResearchState) -> Unit {
+fn make_unit(id: u32, s: &Soldier, kit: (u32, u32, u32), research: &ResearchState) -> Unit {
     // Placeholder tile; the scenario builders assign the real deployment.
     // A callsign, if the soldier carries one, is worn into the name.
     let display_name = if s.callsign.trim().is_empty() {
@@ -386,13 +403,23 @@ fn make_unit(id: u32, s: &Soldier, kit: (u32, u32), research: &ResearchState) ->
         Some(crate::campaign::Quirk::Butcher) => u.melee = (u.melee + 8).min(95),
         _ => {}
     }
-    let (grenades, dressings) = kit;
+    let (grenades, dressings, mags) = kit;
     u.grenades = grenades;
     u.heal_charges = dressings;
+    u.mags = mags;
+    // Every weapon rides in loaded, whatever the relic-smiths did to it.
+    u.ammo = u.weapon.clip as i32;
+    // The blade at the hip is a real sidearm now: drawable, not just a
+    // riposte charm.
+    if s.has_blade {
+        u.sidearm = Some(ods_sim::units::Weapon::from_data("consecrated blade", "blade"));
+    }
     // An overloaded pack slows the hand — the back decides where "over"
-    // begins (unless born to haul).
+    // begins (unless born to haul). Two magazines ride as one item.
     let capacity = 2 + u.strength as u32 / 8;
-    if grenades + dressings > capacity && s.quirk != Some(crate::campaign::Quirk::PackMule) {
+    if grenades + dressings + mags / 2 > capacity
+        && s.quirk != Some(crate::campaign::Quirk::PackMule)
+    {
         u.tu_max -= 4;
     }
     u.tu = u.tu_max;

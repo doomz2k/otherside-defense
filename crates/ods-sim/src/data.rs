@@ -33,6 +33,12 @@ pub struct WeaponDef {
     pub fire_cone: bool,
     #[serde(default)]
     pub stun_power: i32,
+    /// Rounds per magazine; 0 = self-powered (claws, hellspit, blades).
+    #[serde(default)]
+    pub clip: u32,
+    /// Part of the creature that wields it: never dropped, never salvaged.
+    #[serde(default)]
+    pub natural: bool,
 }
 
 #[derive(Clone, Copy, Debug, serde::Deserialize)]

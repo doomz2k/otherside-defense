@@ -98,6 +98,8 @@ pub struct AutoFire {
 #[derive(Clone, Debug)]
 pub struct Weapon {
     pub name: &'static str,
+    /// The balance-table key it was built from (for salvage bookkeeping).
+    pub key: String,
     /// Base damage; actual damage rolls 0–200% of this (X-COM style).
     pub power: i32,
     /// TU costs as a percentage of the shooter's max TUs.
@@ -119,6 +121,10 @@ pub struct Weapon {
     pub fire_cone: bool,
     /// Deals stun instead of blood (the salt-shot mortar); 0 = normal.
     pub stun_power: i32,
+    /// Rounds per magazine; 0 = self-powered (claws, hellspit, blades).
+    pub clip: u32,
+    /// Part of the creature that wields it: never dropped, never salvaged.
+    pub natural: bool,
 }
 
 impl Weapon {
@@ -130,6 +136,7 @@ impl Weapon {
             .unwrap_or_else(|| panic!("weapons.ron is missing \"{key}\""));
         Self {
             name,
+            key: key.to_string(),
             power: d.power,
             snap_cost_pct: d.snap_cost_pct,
             aimed_cost_pct: d.aimed_cost_pct,
@@ -142,6 +149,8 @@ impl Weapon {
             silent: d.silent,
             fire_cone: d.fire_cone,
             stun_power: d.stun_power,
+            clip: d.clip,
+            natural: d.natural,
         }
     }
 }
@@ -251,6 +260,13 @@ pub struct Unit {
     /// Unconscious ally being hauled (their tile follows the carrier).
     pub carrying: Option<UnitId>,
     pub weapon: Weapon,
+    /// Rounds loaded in the weapon (meaningful only when its clip > 0).
+    pub ammo: i32,
+    /// Spare magazines on the belt — they feed whatever is in hand.
+    pub mags: u32,
+    /// A backup at the hip, drawn with [`crate::battle::Action::SwapWeapon`].
+    pub sidearm: Option<Weapon>,
+    pub sidearm_ammo: i32,
     /// Open fatal wounds; each bleeds 1 health at the unit's turn start.
     pub wounds: i32,
     /// Hellfire charges carried (thrown explosives).
@@ -312,6 +328,10 @@ impl Unit {
             smasher: false,
             carrying: None,
             weapon: hellspit(),
+            ammo: 0,
+            mags: 0,
+            sidearm: None,
+            sidearm_ammo: 0,
             wounds: 0,
             grenades: 0,
             heal_charges: 0,
@@ -348,8 +368,9 @@ impl Unit {
     }
 
     pub fn soldier(id: u32, name: &str, tile: IVec3) -> Self {
-        Self {
+        let mut u = Self {
             weapon: rifle(),
+            mags: 2,
             grenades: 2,
             heal_charges: 3,
             smoke_grenades: 1,
@@ -358,7 +379,9 @@ impl Unit {
             facing: IVec3::new(1, 0, 0),
             ..Self::base(id, Side::Order, Species::Soldier, name, tile)
         }
-        .stats("soldier")
+        .stats("soldier");
+        u.ammo = u.weapon.clip as i32;
+        u
     }
 
     /// An unarmed townsperson caught in the massacre.
@@ -444,6 +467,11 @@ impl Unit {
     }
 
     /// TU cost for a fire mode; None when the weapon lacks the mode.
+    /// A clip-fed weapon with an empty chamber has nothing to say.
+    pub fn has_shot(&self) -> bool {
+        self.weapon.clip == 0 || self.ammo > 0
+    }
+
     pub fn fire_cost(&self, mode: FireMode) -> Option<i32> {
         let pct = match mode {
             FireMode::Snap => self.weapon.snap_cost_pct,
