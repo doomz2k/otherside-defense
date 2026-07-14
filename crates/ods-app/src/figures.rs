@@ -345,6 +345,23 @@ pub struct AnimState {
     pub recoil: f32,
     /// The shared clock, for idle breathing.
     pub breath: f32,
+    /// Eased vertical pose (kneels sink, deaths crumple); 0 = unset.
+    pub pose: f32,
+}
+
+/// The z-scale a unit's state calls for — the tween's destination.
+pub fn pose_target(unit: &Unit) -> f32 {
+    if !unit.alive {
+        0.12
+    } else if !unit.conscious {
+        0.22
+    } else if unit.kneeling {
+        0.72
+    } else if unit.morale < 35 {
+        0.9
+    } else {
+        1.0
+    }
 }
 
 /// Build the mesh for every visible unit on the field. `visual` overrides
@@ -458,19 +475,9 @@ fn push_unit(
     let kick = if unit.is_active() { anim.recoil.max(0.0) } else { 0.0 };
     let body_offset = face * (-kick * 9.0 * vs);
 
-    // Pose: kneeling compresses; the subdued lie in a heap; the dead
-    // flatter still.
-    let z_scale = if !unit.alive {
-        0.12
-    } else if !unit.conscious {
-        0.22
-    } else if unit.kneeling {
-        0.72
-    } else if unit.morale < 35 {
-        0.9 // the shoulders go first
-    } else {
-        1.0
-    };
+    // Pose: kneeling compresses, the subdued heap, the dead crumple —
+    // eased by the anim state where the battle screen provides one.
+    let z_scale = if anim.pose > 0.0 { anim.pose } else { pose_target(unit) };
 
     for part in blueprint(unit.species) {
         // Weapons fall from unconscious hands.

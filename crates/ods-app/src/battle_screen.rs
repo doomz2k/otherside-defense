@@ -98,6 +98,8 @@ pub struct BattleScreen {
     flash: f32,
     /// The end-turn guard is asking about unspent TU.
     confirm_end: bool,
+    /// Time scale: the end of a battle lands in slow motion.
+    time_scale: f32,
     /// The field's standing soundscape, chosen once from the ground.
     pub ambient: crate::audio::Ambient,
     /// How hot the field is right now (0 quiet .. 1 open contact).
@@ -138,6 +140,7 @@ impl BattleScreen {
             last_click: (0.0, None),
             flash: 0.0,
             confirm_end: false,
+            time_scale: 1.0,
             ambient: crate::audio::Ambient::Temperate,
             contact: 0.0,
             log: vec!["The squad deploys.".to_string()],
@@ -875,6 +878,12 @@ impl BattleScreen {
                             ui.horizontal(|ui| {
                                 use crate::icons::{self, Icon};
                                 ui.spacing_mut().item_spacing.x = 2.0;
+                                crate::portraits::draw(
+                                    ui,
+                                    crate::portraits::seed_of(&u.name),
+                                    16.0,
+                                    u.injuries.len() + u.severed.len(),
+                                );
                                 ui.label(egui::RichText::new(short).small());
                                 if u.kneeling {
                                     icons::draw(ui, Icon::Kneel, 11.0).on_hover_text("kneeling");
@@ -1362,6 +1371,7 @@ impl BattleScreen {
                 let center = ((bmin + bmax).as_vec3() / 2.0) * TILE_VOXELS as f32;
                 self.look_target = Some(Vec3::new(center.x, center.y, 0.0));
                 self.zoom_target = (self.zoom_target * 1.35).min(3200.0);
+                self.time_scale = 0.3;
                 let (text, sound) = match winner {
                     Side::Order => ("THE FIELD IS OURS", Sound::Victory),
                     Side::Demons => ("THE LINE BREAKS", Sound::Defeat),
@@ -1542,6 +1552,12 @@ impl BattleScreen {
         width: f32,
         height: f32,
     ) {
+        // The end of a battle lands in slow motion, then time recovers.
+        if self.time_scale < 1.0 {
+            self.time_scale = (self.time_scale + dt * 0.4).min(1.0);
+        }
+        let dt = dt * self.time_scale;
+
         // The entry sweep: hold on the gondola, then glide out over the
         // field (the briefing card pauses it; a click skips it).
         if self.briefing.is_none() && self.intro > 0.0 {
@@ -1624,6 +1640,15 @@ impl BattleScreen {
             let delta = target - *entry;
             let state = self.anim.entry(u.id.0).or_default();
             state.breath = self.fx_clock;
+            // Pose eases toward what the state calls for: kneels sink,
+            // deaths crumple instead of popping.
+            let want = figures::pose_target(u);
+            if state.pose <= 0.0 {
+                state.pose = want;
+            } else {
+                let rate = if want < state.pose { 6.0 } else { 9.0 };
+                state.pose += (want - state.pose) * (dt * rate).min(1.0);
+            }
             if state.recoil > 0.0 {
                 state.recoil = (state.recoil - dt).max(0.0);
                 moved = true;
@@ -1809,6 +1834,35 @@ impl BattleScreen {
                         p + Vec3::new(0.0, 0.0, -len),
                     ],
                     color,
+                );
+            }
+        }
+
+        // Blob shadows: every standing figure claims its patch of ground.
+        {
+            let visible = self.battle.visible_tiles(Side::Order);
+            for u in &self.battle.units {
+                if !u.is_active() {
+                    continue;
+                }
+                if u.side == Side::Demons && !visible.contains(&u.tile) {
+                    continue;
+                }
+                let feet = self.visual.get(&u.id.0).copied().unwrap_or_else(|| {
+                    (u.tile * TILE_VOXELS).as_vec3()
+                        + Vec3::new(HALF_TILE, HALF_TILE, scenario::GROUND_TOP as f32)
+                });
+                let big = matches!(
+                    u.species,
+                    ods_sim::units::Species::Behemoth | ods_sim::units::Species::Prince
+                );
+                let r = if big { 8.0 } else { 5.0 } * VS_F;
+                push_flat_square(
+                    &mut verts,
+                    &mut indices,
+                    Vec3::new(feet.x, feet.y, feet.z + 0.2),
+                    r,
+                    [0.0, 0.0, 0.0, 0.30],
                 );
             }
         }

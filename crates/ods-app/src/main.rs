@@ -19,6 +19,7 @@ mod geoscape;
 mod globe;
 mod icons;
 mod pixfont;
+mod portraits;
 mod theme;
 
 use std::sync::Arc;

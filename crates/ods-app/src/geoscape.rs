@@ -1222,6 +1222,14 @@ impl Core {
                     .default_width(300.0)
                     .resizable(false)
                     .show(ctx, |ui| {
+                        ui.vertical_centered(|ui| {
+                            crate::portraits::draw(
+                                ui,
+                                crate::portraits::seed_of(&c.soldiers[si].name),
+                                48.0,
+                                c.soldiers[si].scars.len(),
+                            );
+                        });
                         ui.horizontal(|ui| {
                             ui.label("Name");
                             ui.text_edit_singleline(&mut c.soldiers[si].name);
