@@ -407,6 +407,20 @@ pub fn incursion_mission(
         MAT_RUBBLE,
     );
 
+    // The masonry gets dressed (plinth, studs, lintels, window reliefs),
+    // roofless buildings that still have families get roofs, and the
+    // rooms keep the furniture of interrupted lives.
+    dress_walls(&mut world, seed);
+    match seed % 3 {
+        0 => furnish_rooms(&mut world, seed, IVec3::new(10, 9, 0), IVec3::new(13, 14, 0)),
+        1 => {
+            furnish_rooms(&mut world, seed, IVec3::new(8, 5, 0), IVec3::new(9, 7, 0));
+            furnish_rooms(&mut world, seed, IVec3::new(11, 15, 0), IVec3::new(12, 17, 0));
+            roof_over(&mut world, IVec3::new(10, 14, 0), IVec3::new(13, 18, 0));
+        }
+        _ => {}
+    }
+
     // The rift obelisk, deep in demon territory (clear of spawn tiles).
     let obelisk_min = IVec3::new(22 * TILE_VOXELS, 11 * TILE_VOXELS, GROUND_TOP);
     let obelisk_max = IVec3::new(23 * TILE_VOXELS, 13 * TILE_VOXELS, 24 * VS);
@@ -1734,6 +1748,162 @@ fn carve_runes(world: &mut VoxelWorld, min: IVec3, max: IVec3) {
         }
         z += 5 * VS;
     }
+}
+
+/// Dress raw masonry so buildings read BUILT, not extruded: a stone
+/// plinth at the boot, timber studs up the face, a lintel band under the
+/// eave, and dark window reliefs recessed into the long runs. Purely a
+/// recolor of solid voxels — walkability, sight, and cover never move.
+fn dress_walls(world: &mut VoxelWorld, seed: u64) {
+    let span = IVec3::new(MAP_TILES.x * TILE_VOXELS, MAP_TILES.y * TILE_VOXELS, 0);
+    let hash = |x: i32, y: i32, k: u32| -> u32 {
+        let mut h = (seed as u32)
+            .wrapping_mul(747796405)
+            .wrapping_add(x as u32)
+            .wrapping_mul(2654435761)
+            .wrapping_add(y as u32)
+            .wrapping_mul(1274126177)
+            .wrapping_add(k);
+        h ^= h >> 15;
+        h.wrapping_mul(2246822519) >> 8
+    };
+    let mid = GROUND_TOP + 6;
+    for y in 0..span.y {
+        for x in 0..span.x {
+            if world.voxel(IVec3::new(x, y, mid)) != MAT_WALL {
+                continue;
+            }
+            let exposed = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dy)| {
+                world.voxel(IVec3::new(x + dx, y + dy, mid)) == Voxel::EMPTY
+            });
+            if !exposed {
+                continue;
+            }
+            // The boot: three courses of field stone.
+            for z in GROUND_TOP..(GROUND_TOP + 3) {
+                world.set_voxel(IVec3::new(x, y, z), MAT_STONE);
+            }
+            // Studs: a timber upright every eighth course of the face.
+            if x.rem_euclid(8) == 0 || y.rem_euclid(8) == 0 {
+                for z in (GROUND_TOP + 3)..WALL_TOP {
+                    world.set_voxel(IVec3::new(x, y, z), MAT_TIMBER);
+                }
+                continue;
+            }
+            // The lintel band riding under the eave.
+            for z in (WALL_TOP - 3)..(WALL_TOP - 1) {
+                world.set_voxel(IVec3::new(x, y, z), MAT_TIMBER);
+            }
+            // Windows: some eight-voxel bays get a dark shuttered relief
+            // with a timber sill. Solid voxels still — the eye falls in,
+            // the quarrel doesn't.
+            let (bx, by) = (x.div_euclid(8), y.div_euclid(8));
+            if hash(bx, by, 71) % 3 == 0 {
+                let along = x.rem_euclid(8) >= 2 && x.rem_euclid(8) <= 5;
+                let across = y.rem_euclid(8) >= 2 && y.rem_euclid(8) <= 5;
+                if along || across {
+                    world.set_voxel(IVec3::new(x, y, GROUND_TOP + 5), MAT_TIMBER);
+                    for z in (GROUND_TOP + 6)..(GROUND_TOP + 13) {
+                        world.set_voxel(IVec3::new(x, y, z), MAT_OBSIDIAN);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A low stepped roof over a rectangle of tiles: rises from the eaves to
+/// a ridge, shallow enough that the deck above stays walkable ground for
+/// whoever climbs there.
+fn roof_over(world: &mut VoxelWorld, t0: IVec3, t1: IVec3) {
+    let (v0, v1) = (t0 * TILE_VOXELS, (t1 + IVec3::new(1, 1, 0)) * TILE_VOXELS);
+    for y in v0.y..v1.y {
+        for x in v0.x..v1.x {
+            let edge = (x - v0.x).min(v1.x - 1 - x).min(y - v0.y).min(v1.y - 1 - y);
+            let h = TILE_VOXELS + 1 + (edge / 2).min(7);
+            // Over the walls the roof meets the eave; over the rooms it
+            // starts above head height, so the interior stays open under
+            // its own ceiling.
+            let base = if world.voxel(IVec3::new(x, y, WALL_TOP - 2)).is_solid() {
+                WALL_TOP
+            } else {
+                TILE_VOXELS
+            };
+            for z in base..h {
+                world.set_voxel(IVec3::new(x, y, z), MAT_DOOR);
+            }
+        }
+    }
+}
+
+/// Scatter interrupted lives through a building's rooms: beds, boards,
+/// and a cold hearth. Everything stands below head height, so no tile
+/// blocks — soldiers step past the furniture the family left.
+fn furnish_rooms(world: &mut VoxelWorld, seed: u64, t0: IVec3, t1: IVec3) {
+    let mut k = seed as u32 | 1;
+    let mut roll = |n: u32| -> u32 {
+        k = k.wrapping_mul(747796405).wrapping_add(2891336453);
+        (k >> 16) % n.max(1)
+    };
+    for ty in t0.y..=t1.y {
+        for tx in t0.x..=t1.x {
+            let o = IVec3::new(tx, ty, 0) * TILE_VOXELS;
+            // Only furnish clear interior floor.
+            if world.voxel(o + IVec3::new(TILE_VOXELS / 2, TILE_VOXELS / 2, mid_z())) != Voxel::EMPTY
+            {
+                continue;
+            }
+            match roll(4) {
+                0 => {
+                    // A bedframe with a pale blanket, shoved to the wall.
+                    world.fill_box(
+                        o + IVec3::new(3, 4, GROUND_TOP),
+                        o + IVec3::new(17, 12, GROUND_TOP + 3),
+                        MAT_TIMBER,
+                    );
+                    world.fill_box(
+                        o + IVec3::new(4, 5, GROUND_TOP + 3),
+                        o + IVec3::new(16, 11, GROUND_TOP + 5),
+                        MAT_SNOW,
+                    );
+                }
+                1 => {
+                    // The table, still set: a board on four legs.
+                    for (lx, ly) in [(10, 10), (10, 20), (20, 10), (20, 20)] {
+                        world.fill_box(
+                            o + IVec3::new(lx, ly, GROUND_TOP),
+                            o + IVec3::new(lx + 2, ly + 2, GROUND_TOP + 5),
+                            MAT_TIMBER,
+                        );
+                    }
+                    world.fill_box(
+                        o + IVec3::new(8, 8, GROUND_TOP + 5),
+                        o + IVec3::new(24, 24, GROUND_TOP + 7),
+                        MAT_TIMBER,
+                    );
+                }
+                2 => {
+                    // A cold hearth against the wall, embers not quite out.
+                    world.fill_box(
+                        o + IVec3::new(2, 12, GROUND_TOP),
+                        o + IVec3::new(8, 20, GROUND_TOP + 7),
+                        MAT_STONE,
+                    );
+                    world.fill_box(
+                        o + IVec3::new(4, 14, GROUND_TOP),
+                        o + IVec3::new(6, 18, GROUND_TOP + 2),
+                        MAT_POOL,
+                    );
+                }
+                _ => {} // bare boards
+            }
+        }
+    }
+}
+
+/// Eye height for the interior-clearance probe.
+fn mid_z() -> i32 {
+    GROUND_TOP + 6
 }
 
 /// Fill a tile's footprint with wall from the ground to `WALL_TOP`.
