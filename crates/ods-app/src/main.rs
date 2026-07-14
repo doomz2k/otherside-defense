@@ -149,6 +149,14 @@ pub enum Screen {
     /// The chapterhouse diorama: build, hire, research, forge.
     Base,
     Battle,
+    /// The bestiary, full screen.
+    Codex,
+    /// Every house's workshop, full screen.
+    Forge,
+    /// Muster rolls and armoury assignments, full screen.
+    Roster,
+    /// One soldier before the glass, full screen.
+    Equip,
 }
 
 struct App {
@@ -700,7 +708,11 @@ impl Core {
                     self.renderer.set_camera(vp, sun, self.clock);
                 }
             }
-            Screen::Geoscape => {
+            Screen::Geoscape
+            | Screen::Codex
+            | Screen::Forge
+            | Screen::Roster
+            | Screen::Equip => {
                 if let Some(a) = self.audio.as_mut() {
                     a.music(Some(audio::MusicTrack::Vigil));
                     a.ambient(Some(audio::Ambient::HighWind));
@@ -921,6 +933,10 @@ impl Core {
     fn ui(&mut self, ctx: &egui::Context) {
         match self.screen {
             Screen::Menu => self.menu_ui(ctx),
+            Screen::Codex => self.codex_screen(ctx),
+            Screen::Forge => self.forge_screen(ctx),
+            Screen::Roster => self.roster_screen(ctx),
+            Screen::Equip => self.equip_screen(ctx),
             Screen::Geoscape => match self.geoscape_ui(ctx) {
                 GeoAction::LeadMission(kind) => self.launch_mission(kind),
                 GeoAction::EnterBase => self.enter_base(),

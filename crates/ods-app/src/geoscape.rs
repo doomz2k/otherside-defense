@@ -263,6 +263,642 @@ impl Core {
         });
     }
 
+    // ------------------------------------------------------------------
+    // The desk unfolds: what used to crowd the war room gets a full
+    // screen each — muster rolls, the forge, the bestiary, the mirror.
+
+    fn desk_top(&mut self, ctx: &egui::Context, title: &str, back: Screen) {
+        egui::TopBottomPanel::top("desk-screen-top").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("← Back").clicked() {
+                    self.screen = back;
+                }
+                ui.heading(title);
+            });
+        });
+    }
+
+    pub fn codex_screen(&mut self, ctx: &egui::Context) {
+        self.desk_top(ctx, "Bestiary of the Otherside", Screen::Geoscape);
+        egui::CentralPanel::default().frame(desk_fill()).show(ctx, |ui| {
+            let Some(c) = &mut self.campaign else { return };
+            ui.label(
+                "Field reports describe what the squads have met. Take a specimen \
+                 alive and the occultists open it up — anatomy and all.",
+            );
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.set_max_width(640.0);
+                for species in ods_sim::units::Species::DEMONS {
+                            let seen = c.codex_seen.contains(&species);
+                            let captured = c.codex_captured.contains(&species);
+                            if !seen {
+                                ui.label(
+                                    egui::RichText::new("??? — unencountered")
+                                        .weak()
+                                        .italics(),
+                                );
+                                ui.separator();
+                                continue;
+                            }
+                            let slain = c.codex_slain.contains(&species);
+                            ui.horizontal(|ui| {
+                                ui.strong(species.name());
+                                if slain {
+                                    ui.colored_label(egui::Color32::from_rgb(200, 90, 70), "☠ necropsied");
+                                }
+                                if captured {
+                                    ui.colored_label(egui::Color32::GOLD, "⛓ dissected");
+                                }
+                            });
+                            ui.label(bestiary_lore(species));
+                            if slain {
+                                let key = species.name().to_lowercase().replace(' ', "_");
+                                if let Some(d) = ods_sim::data::species().get(&key) {
+                                    ui.label(format!(
+                                        "Necropsy: {} TU · {} HP · armor {}/{}/{}",
+                                        d.tu, d.health, d.armor.0, d.armor.1, d.armor.2
+                                    ));
+                                }
+                            }
+                            if captured {
+                                let parts: Vec<&str> = species
+                                    .body_parts()
+                                    .iter()
+                                    .map(|p| p.name())
+                                    .collect();
+                                ui.label(format!("Anatomy: {}", parts.join(", ")));
+                            } else {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Bind one alive to learn its anatomy.",
+                                    )
+                                    .weak(),
+                                );
+                            }
+                            ui.separator();
+                        }
+            });
+        });
+    }
+
+    pub fn roster_screen(&mut self, ctx: &egui::Context) {
+        self.desk_top(ctx, "Muster rolls & armoury", Screen::Geoscape);
+        egui::CentralPanel::default().frame(desk_fill()).show(ctx, |ui| {
+            egui::ScrollArea::both().show(ui, |ui| {
+                let Some(c) = &mut self.campaign else { return };
+                ui.add_space(6.0);
+                egui::CollapsingHeader::new("Roster & loadouts")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        let lance_ok = c.research.is_complete(Project::HellfireLance);
+                        let mut lance_toggle: Option<(usize, bool)> = None;
+                        let mut transfer: Option<usize> = None;
+                        let mut squad_rotate: Option<usize> = None;
+                        // Sorting and density are the commander's choice.
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.roster_compact, "compact")
+                                .on_hover_text("vitals only: hide kit and skill columns");
+                            if ui
+                                .small_button("issue standard kit")
+                                .on_hover_text(
+                                    "2 charges, 2 dressings, 2 blessed magazines, all hands",
+                                )
+                                .clicked()
+                            {
+                                for s in c.soldiers.iter_mut() {
+                                    s.grenades_loadout = 2;
+                                    s.dressings_loadout = 2;
+                                    s.mags_loadout = 2;
+                                    s.mag_pref = ods_sim::units::MagKind::Blessed;
+                                }
+                                self.log.push(
+                                    "The quartermaster issues the standard kit to all hands."
+                                        .to_string(),
+                                );
+                            }
+                            if self.roster_sort.is_some() && ui.small_button("muster order").clicked()
+                            {
+                                self.roster_sort = None;
+                            }
+                        });
+                        let compact = self.roster_compact;
+                        // Display order: click a sortable header to reorder.
+                        let mut order: Vec<usize> = (0..c.soldiers.len()).collect();
+                        if let Some((col, asc)) = self.roster_sort {
+                            order.sort_by_key(|&i| {
+                                let s = &c.soldiers[i];
+                                match col {
+                                    0 => s.sanity as i64,
+                                    1 => s.stats.tu as i64,
+                                    2 => s.stats.health as i64,
+                                    3 => s.stats.accuracy as i64,
+                                    4 => s.kills as i64,
+                                    _ => s.missions as i64,
+                                }
+                            });
+                            if !asc {
+                                order.reverse();
+                            }
+                        }
+                        let sort_state = &mut self.roster_sort;
+                        // The full table is wider than the desk: scroll it
+                        // sideways rather than let it shove the panel open.
+                        egui::ScrollArea::horizontal().id_salt("roster-h").show(ui, |ui| {
+                        egui::Grid::new("roster").striped(true).show(ui, |ui| {
+                            let mut header =
+                                |ui: &mut egui::Ui, label: &str, col: Option<usize>| {
+                                    let arrow = match (col, *sort_state) {
+                                        (Some(c1), Some((c2, true))) if c1 == c2 => " ▲",
+                                        (Some(c1), Some((c2, false))) if c1 == c2 => " ▼",
+                                        _ => "",
+                                    };
+                                    let resp = ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!("{label}{arrow}"))
+                                                .strong(),
+                                        )
+                                        .sense(egui::Sense::click()),
+                                    );
+                                    if let Some(c1) = col
+                                        && resp
+                                            .on_hover_text("click to sort")
+                                            .clicked()
+                                    {
+                                        *sort_state = match *sort_state {
+                                            Some((c2, true)) if c2 == c1 => Some((c1, false)),
+                                            Some((c2, false)) if c2 == c1 => None,
+                                            _ => Some((c1, true)),
+                                        };
+                                    }
+                                };
+                            header(ui, "Name", None);
+                            header(ui, "Rank", Some(5));
+                            if !compact {
+                                header(ui, "Quirk", None);
+                                header(ui, "Squad", None);
+                            }
+                            header(ui, "Mind", Some(0));
+                            header(ui, "TU", Some(1));
+                            if !compact {
+                                header(ui, "Sta", None);
+                            }
+                            header(ui, "HP", Some(2));
+                            header(ui, "Fir", Some(3));
+                            if !compact {
+                                header(ui, "Thr", None);
+                                header(ui, "Mel", None);
+                                header(ui, "Str", None);
+                            }
+                            header(ui, "K", Some(4));
+                            if !compact {
+                                header(ui, "🧨", None);
+                                header(ui, "✚", None);
+                                header(ui, "Lance", None);
+                            }
+                            header(ui, "Status", None);
+                            ui.end_row();
+                            for si in order {
+                                let s = &mut c.soldiers[si];
+                                let mut tag = String::new();
+                                if !s.scars.is_empty() {
+                                    tag.push('*');
+                                }
+                                if !s.lost_parts.is_empty() {
+                                    tag.push('†');
+                                }
+                                if tag.is_empty() {
+                                    ui.label(&s.name);
+                                } else {
+                                    let lost: Vec<&str> =
+                                        s.lost_parts.iter().map(|p| p.name()).collect();
+                                    let mut hover =
+                                        format!("{} lasting scar(s)", s.scars.len());
+                                    if !lost.is_empty() {
+                                        hover.push_str(&format!("; lost: {}", lost.join(", ")));
+                                    }
+                                    ui.label(format!("{}{tag}", s.name)).on_hover_text(hover);
+                                }
+                                {
+                                    let rank = ui.label(s.rank());
+                                    if let Some(calling) = ods_geo::calling_from(&s.deeds) {
+                                        rank.on_hover_text(format!(
+                                            "called {} — {}",
+                                            calling.name(),
+                                            calling.blurb()
+                                        ));
+                                    }
+                                }
+                                if !compact {
+                                    ui.label(s.quirk.map_or("–", |q| q.name()));
+                                    let tag = ods_geo::SQUAD_NAMES[s.squad as usize];
+                                    let short: String = tag.chars().take(4).collect();
+                                    if ui
+                                        .small_button(short)
+                                        .on_hover_text(format!(
+                                            "standing squad: {tag} (click to rotate)"
+                                        ))
+                                        .clicked()
+                                    {
+                                        squad_rotate = Some(si);
+                                    }
+                                }
+                                let mind_color = match (s.sanity, self.colorblind) {
+                                    (0..=20, false) => egui::Color32::from_rgb(220, 60, 60),
+                                    (0..=20, true) => egui::Color32::from_rgb(235, 140, 30),
+                                    (21..=50, _) => egui::Color32::from_rgb(230, 180, 70),
+                                    (_, false) => egui::Color32::from_rgb(140, 200, 140),
+                                    (_, true) => egui::Color32::from_rgb(120, 170, 235),
+                                };
+                                let mind = ui.colored_label(mind_color, s.sanity.to_string());
+                                if let Some(phobia) = s.phobia {
+                                    mind.on_hover_text(format!("phobia: {}", phobia.name()));
+                                }
+                                ui.label(s.stats.tu.to_string());
+                                if !compact {
+                                    ui.label(s.stats.stamina.to_string());
+                                }
+                                ui.label(s.stats.health.to_string());
+                                ui.label(s.stats.accuracy.to_string())
+                                    .on_hover_text("firing accuracy");
+                                if !compact {
+                                    ui.label(s.stats.throwing.to_string())
+                                        .on_hover_text("throwing accuracy");
+                                    ui.label(s.stats.melee.to_string())
+                                        .on_hover_text("melee accuracy");
+                                    ui.label(s.stats.strength.to_string());
+                                }
+                                ui.label(s.kills.to_string());
+                                if !compact {
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("-").clicked()
+                                            && s.grenades_loadout > 0
+                                        {
+                                            s.grenades_loadout -= 1;
+                                        }
+                                        ui.label(s.grenades_loadout.to_string());
+                                        if ui.small_button("+").clicked()
+                                            && s.grenades_loadout < 4
+                                        {
+                                            s.grenades_loadout += 1;
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("-").clicked()
+                                            && s.dressings_loadout > 0
+                                        {
+                                            s.dressings_loadout -= 1;
+                                        }
+                                        ui.label(s.dressings_loadout.to_string());
+                                        if ui.small_button("+").clicked()
+                                            && s.dressings_loadout < 4
+                                        {
+                                            s.dressings_loadout += 1;
+                                        }
+                                    });
+                                    if lance_ok {
+                                        let label = if s.has_lance { "🔥" } else { "–" };
+                                        if ui.small_button(label).clicked() {
+                                            lance_toggle = Some((si, !s.has_lance));
+                                        }
+                                    } else {
+                                        ui.label("–");
+                                    }
+                                }
+                                if s.is_broken() {
+                                    ui.colored_label(egui::Color32::from_rgb(220, 60, 60), "broken")
+                                        .on_hover_text(
+                                            "sanity gone: unfit until it climbs past 20 \
+                                             (a Chapel mends minds three times as fast)",
+                                        );
+                                } else if s.warding.is_some() {
+                                    ui.colored_label(egui::Color32::YELLOW, "warding");
+                                } else if s.aboard.is_some() {
+                                    ui.colored_label(egui::Color32::LIGHT_BLUE, "aboard");
+                                } else if s.is_fit() {
+                                    if ui.small_button(format!("fit @{}", s.home)).clicked() {
+                                        transfer = Some(si);
+                                    }
+                                } else {
+                                    ui.colored_label(
+                                        egui::Color32::LIGHT_RED,
+                                        format!("{}d", s.recovery_days),
+                                    );
+                                }
+                                ui.end_row();
+                            }
+                        });
+                        });
+                        if let Some(si) = squad_rotate {
+                            c.soldiers[si].squad =
+                                (c.soldiers[si].squad + 1) % ods_geo::SQUAD_NAMES.len() as u8;
+                        }
+                        if let Some((si, take)) = lance_toggle
+                            && let Err(e) = c.assign_lance(si, take)
+                        {
+                            self.log.push(format!("cannot assign lance: {e:?}"));
+                        }
+                        if let Some(si) = transfer {
+                            let next = (c.soldiers[si].home + 1) % c.bases.len();
+                            if next != c.soldiers[si].home {
+                                match c.transfer_soldier(si, next) {
+                                    Ok(()) => self.log.push(format!(
+                                        "{} takes the road to {}.",
+                                        c.soldiers[si].name,
+                                        c.bases[next].region.name()
+                                    )),
+                                    Err(e) => self.log.push(format!("cannot transfer: {e:?}")),
+                                }
+                            }
+                        }
+                        ui.label(format!(
+                            "Heavy packs slow the hand (capacity 2 + Str/8; two magazines ride \
+                             as one item). Lances: {}. Blessed magazines: {}.",
+                            c.lance_stock,
+                            c.quarrel_stock
+                        ));
+                        ui.label("Click a fit soldier's @base tag to rotate their station.");
+                    });
+
+                egui::CollapsingHeader::new("Armoury assignments").show(ui, |ui| {
+                    ui.label(format!(
+                        "stock — arbalest {} · censer {} · hammer {} · mortar {} | \
+                         blades {} · circlets {} | plate {} · aegis {}",
+                        c.weapon_stock.get("arbalest").copied().unwrap_or(0),
+                        c.weapon_stock.get("censer").copied().unwrap_or(0),
+                        c.weapon_stock.get("ram_hammer").copied().unwrap_or(0),
+                        c.weapon_stock.get("salt_mortar").copied().unwrap_or(0),
+                        c.blade_stock,
+                        c.circlet_stock,
+                        c.plate_stock,
+                        c.aegis_stock,
+                    ));
+                    let mut act: Option<(usize, u8)> = None;
+                    egui::ScrollArea::horizontal().id_salt("armoury-h").show(ui, |ui| {
+                    egui::Grid::new("armoury").striped(true).show(ui, |ui| {
+                        for h in ["Name", "Weapon", "Blade", "Circlet", "Armor", "Relic"] {
+                            ui.strong(h);
+                        }
+                        ui.end_row();
+                        for (si, s) in c.soldiers.iter().enumerate() {
+                            if ui
+                                .small_button(&s.name)
+                                .on_hover_text("open the armoury mirror: paper doll, identity")
+                                .clicked()
+                            {
+                                self.equip_for = Some(si);
+                                self.screen = Screen::Equip;
+                            }
+                            if ui.small_button(s.weapon_key.replace('_', " ")).clicked() {
+                                act = Some((si, 0));
+                            }
+                            if ui.small_button(if s.has_blade { "🗡" } else { "–" }).clicked() {
+                                act = Some((si, 1));
+                            }
+                            if ui.small_button(if s.has_circlet { "◎" } else { "–" }).clicked() {
+                                act = Some((si, 2));
+                            }
+                            if ui.small_button(s.armor.name()).clicked() {
+                                act = Some((si, 3));
+                            }
+                            match &s.relic {
+                                Some(r) => {
+                                    if ui
+                                        .small_button(&r.name)
+                                        .on_hover_text(r.affix.describe())
+                                        .clicked()
+                                    {
+                                        act = Some((si, 4)); // return it
+                                    }
+                                }
+                                None => {
+                                    ui.menu_button("–", |ui| {
+                                        for (ri, r) in c.relic_pool.iter().enumerate() {
+                                            if ui
+                                                .button(format!(
+                                                    "{} ({})",
+                                                    r.name,
+                                                    r.affix.describe()
+                                                ))
+                                                .clicked()
+                                            {
+                                                act = Some((si, 10 + ri as u8));
+                                                ui.close();
+                                            }
+                                        }
+                                        if c.relic_pool.is_empty() {
+                                            ui.label("the reliquary is bare");
+                                        }
+                                    });
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+                    });
+                    if let Some((si, what)) = act {
+                        let outcome = match what {
+                            0 => c.cycle_weapon(si).map(|_| ()),
+                            1 => c.toggle_blade(si),
+                            2 => c.toggle_circlet(si),
+                            3 => c.cycle_armor(si).map(|_| ()),
+                            4 => c.assign_relic(si, None),
+                            n => c.assign_relic(si, Some((n - 10) as usize)),
+                        };
+                        if let Err(e) = outcome {
+                            self.log.push(format!("cannot issue: {e:?}"));
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    pub fn forge_screen(&mut self, ctx: &egui::Context) {
+        self.desk_top(ctx, "The Forge", Screen::Geoscape);
+        egui::CentralPanel::default().frame(desk_fill()).show(ctx, |ui| {
+            let Some(c) = &mut self.campaign else { return };
+            ui.label(format!(
+                "Stores: {} brimstone · {} hellsteel | quarrels {} · cold iron {} · salt {}",
+                c.brimstone, c.hellsteel, c.quarrel_stock, c.coldiron_stock, c.salt_stock,
+            ));
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.set_max_width(720.0);
+                for bi in 0..c.bases.len() {
+                    ui.heading(format!("{} — workshop", c.bases[bi].region.name()));
+                    match c.jobs.iter().find(|j| j.base == bi) {
+                        Some(j) => {
+                            let done = j.item.cost().saturating_sub(j.left) as f32;
+                            ui.add(
+                                egui::ProgressBar::new(done / j.item.cost() as f32)
+                                    .text(format!("{} — {} left", j.item.name(), j.left)),
+                            );
+                        }
+                        None => {
+                            ui.label(if c.bases[bi].workshop_capacity() == 0 {
+                                "No workshop in this house."
+                            } else if c.bases[bi].artificers == 0 {
+                                "Benches stand ready; no smiths posted here."
+                            } else {
+                                "The benches are idle."
+                            });
+                        }
+                    }
+                    if c.bases[bi].workshop_capacity() > 0 {
+                        for item in ManufactureItem::ALL {
+                            // Unresearched patterns don't exist here either.
+                            if item
+                                .required_research()
+                                .is_some_and(|p| !c.research.is_complete(p))
+                            {
+                                continue;
+                            }
+                            let (brim, steel) = item.materials();
+                            ui.horizontal(|ui| {
+                                if ui.button("Make").clicked()
+                                    && let Err(e) = c.start_manufacture(bi, item)
+                                {
+                                    self.log.push(format!("cannot make: {e:?}"));
+                                }
+                                ui.label(format!(
+                                    "{} ({}pts, {brim}🜏 {steel}⛓)",
+                                    item.name(),
+                                    item.cost()
+                                ))
+                                .on_hover_text(item_lore(item.name()));
+                            });
+                        }
+                    }
+                    ui.add_space(8.0);
+                    ui.separator();
+                }
+            });
+        });
+    }
+
+    pub fn equip_screen(&mut self, ctx: &egui::Context) {
+        self.desk_top(ctx, "The Armoury Mirror", Screen::Roster);
+        let Some(si) = self.equip_for else {
+            self.screen = Screen::Roster;
+            return;
+        };
+        if self.campaign.as_ref().is_none_or(|c| si >= c.soldiers.len()) {
+            self.equip_for = None;
+            self.screen = Screen::Roster;
+            return;
+        }
+        egui::CentralPanel::default().frame(desk_fill()).show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.set_max_width(420.0);
+                self.mirror_body(ui, si);
+            });
+        });
+    }
+
+    /// One soldier before the glass: identity, stats, kit, paper doll.
+    fn mirror_body(&mut self, ui: &mut egui::Ui, si: usize) {
+        let Some(c) = &mut self.campaign else { return };
+        ui.vertical_centered(|ui| {
+                            crate::portraits::draw(
+                                ui,
+                                crate::portraits::seed_of(&c.soldiers[si].name),
+                                48.0,
+                                c.soldiers[si].scars.len(),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Name");
+                            ui.text_edit_singleline(&mut c.soldiers[si].name);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Callsign");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut c.soldiers[si].callsign)
+                                    .hint_text("what the squad shouts"),
+                            );
+                        });
+                        ui.separator();
+                        stat_bars(ui, &c.soldiers[si]);
+                        ui.separator();
+                        inventory_grid(
+                            ui,
+                            c,
+                            si,
+                            &mut self.presets,
+                            &mut self.preset_name,
+                        );
+                        ui.horizontal(|ui| {
+                            use ods_sim::units::MagKind;
+                            ui.label("Pressed with");
+                            let pref = &mut c.soldiers[si].mag_pref;
+                            for (kind, hint) in [
+                                (MagKind::Blessed, "the standard: consecrated shot"),
+                                (
+                                    MagKind::ColdIron,
+                                    "+4 power — old iron, older grudges",
+                                ),
+                                (
+                                    MagKind::Salt,
+                                    "-4 power, +6 stun a hit — for taking them breathing",
+                                ),
+                            ] {
+                                if ui
+                                    .selectable_label(*pref == kind, kind.name())
+                                    .on_hover_text(hint)
+                                    .clicked()
+                                {
+                                    *pref = kind;
+                                }
+                            }
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "(iron {}, salt {})",
+                                    c.coldiron_stock, c.salt_stock
+                                ))
+                                .weak()
+                                .small(),
+                            );
+                        });
+                        if let Some(calling) =
+                            ods_geo::calling_from(&c.soldiers[si].deeds)
+                        {
+                            ui.label(
+                                egui::RichText::new(format!("☩ {}", calling.name()))
+                                    .color(egui::Color32::from_rgb(230, 200, 120)),
+                            )
+                            .on_hover_text(calling.blurb());
+                        }
+                        if c.soldiers[si].confessor {
+                            ui.label(
+                                egui::RichText::new("🕯 Confessor")
+                                    .color(egui::Color32::from_rgb(190, 160, 230)),
+                            )
+                            .on_hover_text(
+                                "anointed under the Rites: Steady and Dread in the field, \
+                                 and the channel burns its keeper",
+                            );
+                        } else if c.research.is_complete(ods_geo::Project::RitesOfConfession)
+                            && ui
+                                .small_button("Anoint Confessor")
+                                .on_hover_text(
+                                    "requires a Sanctum at their house and a whole mind \
+                                     (sanity 60+)",
+                                )
+                                .clicked()
+                        {
+                            match c.anoint_confessor(si) {
+                                Ok(()) => self.log.push(format!(
+                                    "{} kneels in the Sanctum and rises a Confessor.",
+                                    c.soldiers[si].name
+                                )),
+                                Err(e) => self.log.push(format!("cannot anoint: {e:?}")),
+                            }
+                        }
+                        ui.separator();
+                        paper_doll(ui, c, si, &mut self.log);
+    }
+
     pub fn geoscape_ui(&mut self, ctx: &egui::Context) -> GeoAction {
         let mut action = GeoAction::None;
         let Some(c) = &mut self.campaign else {
@@ -432,11 +1068,21 @@ impl Core {
             if ui.add_sized(wide, egui::Button::new("🏰 Chapterhouses")).clicked() {
                 action = GeoAction::EnterBase;
             }
-            if ui
-                .add_sized(wide, egui::Button::selectable(self.show_codex, "📖 Bestiary"))
-                .clicked()
-            {
-                self.show_codex = !self.show_codex;
+            let mut goto = None;
+            if ui.add_sized(wide, egui::Button::new("🛡 Muster rolls")).clicked() {
+                goto = Some(Screen::Roster);
+            }
+            if ui.add_sized(wide, egui::Button::new("⚒ The Forge")).clicked() {
+                goto = Some(Screen::Forge);
+            }
+            if ui.add_sized(wide, egui::Button::new("📖 Bestiary")).clicked() {
+                goto = Some(Screen::Codex);
+            }
+            if let Some(screen) = goto {
+                // The desk screens hold the clock while they're open.
+                self.geo_speed = 0;
+                self.run_to_event = false;
+                self.screen = screen;
             }
             if ui
                 .add_sized(wide, egui::Button::selectable(self.show_stats, "📜 Ledger"))
@@ -847,367 +1493,11 @@ impl Core {
                 });
 
                 ui.add_space(6.0);
-                egui::CollapsingHeader::new("Roster & loadouts")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        let lance_ok = c.research.is_complete(Project::HellfireLance);
-                        let mut lance_toggle: Option<(usize, bool)> = None;
-                        let mut transfer: Option<usize> = None;
-                        let mut squad_rotate: Option<usize> = None;
-                        // Sorting and density are the commander's choice.
-                        ui.horizontal(|ui| {
-                            ui.checkbox(&mut self.roster_compact, "compact")
-                                .on_hover_text("vitals only: hide kit and skill columns");
-                            if ui
-                                .small_button("issue standard kit")
-                                .on_hover_text(
-                                    "2 charges, 2 dressings, 2 blessed magazines, all hands",
-                                )
-                                .clicked()
-                            {
-                                for s in c.soldiers.iter_mut() {
-                                    s.grenades_loadout = 2;
-                                    s.dressings_loadout = 2;
-                                    s.mags_loadout = 2;
-                                    s.mag_pref = ods_sim::units::MagKind::Blessed;
-                                }
-                                self.log.push(
-                                    "The quartermaster issues the standard kit to all hands."
-                                        .to_string(),
-                                );
-                            }
-                            if self.roster_sort.is_some() && ui.small_button("muster order").clicked()
-                            {
-                                self.roster_sort = None;
-                            }
-                        });
-                        let compact = self.roster_compact;
-                        // Display order: click a sortable header to reorder.
-                        let mut order: Vec<usize> = (0..c.soldiers.len()).collect();
-                        if let Some((col, asc)) = self.roster_sort {
-                            order.sort_by_key(|&i| {
-                                let s = &c.soldiers[i];
-                                match col {
-                                    0 => s.sanity as i64,
-                                    1 => s.stats.tu as i64,
-                                    2 => s.stats.health as i64,
-                                    3 => s.stats.accuracy as i64,
-                                    4 => s.kills as i64,
-                                    _ => s.missions as i64,
-                                }
-                            });
-                            if !asc {
-                                order.reverse();
-                            }
-                        }
-                        let sort_state = &mut self.roster_sort;
-                        // The full table is wider than the desk: scroll it
-                        // sideways rather than let it shove the panel open.
-                        egui::ScrollArea::horizontal().id_salt("roster-h").show(ui, |ui| {
-                        egui::Grid::new("roster").striped(true).show(ui, |ui| {
-                            let mut header =
-                                |ui: &mut egui::Ui, label: &str, col: Option<usize>| {
-                                    let arrow = match (col, *sort_state) {
-                                        (Some(c1), Some((c2, true))) if c1 == c2 => " ▲",
-                                        (Some(c1), Some((c2, false))) if c1 == c2 => " ▼",
-                                        _ => "",
-                                    };
-                                    let resp = ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(format!("{label}{arrow}"))
-                                                .strong(),
-                                        )
-                                        .sense(egui::Sense::click()),
-                                    );
-                                    if let Some(c1) = col
-                                        && resp
-                                            .on_hover_text("click to sort")
-                                            .clicked()
-                                    {
-                                        *sort_state = match *sort_state {
-                                            Some((c2, true)) if c2 == c1 => Some((c1, false)),
-                                            Some((c2, false)) if c2 == c1 => None,
-                                            _ => Some((c1, true)),
-                                        };
-                                    }
-                                };
-                            header(ui, "Name", None);
-                            header(ui, "Rank", Some(5));
-                            if !compact {
-                                header(ui, "Quirk", None);
-                                header(ui, "Squad", None);
-                            }
-                            header(ui, "Mind", Some(0));
-                            header(ui, "TU", Some(1));
-                            if !compact {
-                                header(ui, "Sta", None);
-                            }
-                            header(ui, "HP", Some(2));
-                            header(ui, "Fir", Some(3));
-                            if !compact {
-                                header(ui, "Thr", None);
-                                header(ui, "Mel", None);
-                                header(ui, "Str", None);
-                            }
-                            header(ui, "K", Some(4));
-                            if !compact {
-                                header(ui, "🧨", None);
-                                header(ui, "✚", None);
-                                header(ui, "Lance", None);
-                            }
-                            header(ui, "Status", None);
-                            ui.end_row();
-                            for si in order {
-                                let s = &mut c.soldiers[si];
-                                let mut tag = String::new();
-                                if !s.scars.is_empty() {
-                                    tag.push('*');
-                                }
-                                if !s.lost_parts.is_empty() {
-                                    tag.push('†');
-                                }
-                                if tag.is_empty() {
-                                    ui.label(&s.name);
-                                } else {
-                                    let lost: Vec<&str> =
-                                        s.lost_parts.iter().map(|p| p.name()).collect();
-                                    let mut hover =
-                                        format!("{} lasting scar(s)", s.scars.len());
-                                    if !lost.is_empty() {
-                                        hover.push_str(&format!("; lost: {}", lost.join(", ")));
-                                    }
-                                    ui.label(format!("{}{tag}", s.name)).on_hover_text(hover);
-                                }
-                                {
-                                    let rank = ui.label(s.rank());
-                                    if let Some(calling) = ods_geo::calling_from(&s.deeds) {
-                                        rank.on_hover_text(format!(
-                                            "called {} — {}",
-                                            calling.name(),
-                                            calling.blurb()
-                                        ));
-                                    }
-                                }
-                                if !compact {
-                                    ui.label(s.quirk.map_or("–", |q| q.name()));
-                                    let tag = ods_geo::SQUAD_NAMES[s.squad as usize];
-                                    let short: String = tag.chars().take(4).collect();
-                                    if ui
-                                        .small_button(short)
-                                        .on_hover_text(format!(
-                                            "standing squad: {tag} (click to rotate)"
-                                        ))
-                                        .clicked()
-                                    {
-                                        squad_rotate = Some(si);
-                                    }
-                                }
-                                let mind_color = match (s.sanity, self.colorblind) {
-                                    (0..=20, false) => egui::Color32::from_rgb(220, 60, 60),
-                                    (0..=20, true) => egui::Color32::from_rgb(235, 140, 30),
-                                    (21..=50, _) => egui::Color32::from_rgb(230, 180, 70),
-                                    (_, false) => egui::Color32::from_rgb(140, 200, 140),
-                                    (_, true) => egui::Color32::from_rgb(120, 170, 235),
-                                };
-                                let mind = ui.colored_label(mind_color, s.sanity.to_string());
-                                if let Some(phobia) = s.phobia {
-                                    mind.on_hover_text(format!("phobia: {}", phobia.name()));
-                                }
-                                ui.label(s.stats.tu.to_string());
-                                if !compact {
-                                    ui.label(s.stats.stamina.to_string());
-                                }
-                                ui.label(s.stats.health.to_string());
-                                ui.label(s.stats.accuracy.to_string())
-                                    .on_hover_text("firing accuracy");
-                                if !compact {
-                                    ui.label(s.stats.throwing.to_string())
-                                        .on_hover_text("throwing accuracy");
-                                    ui.label(s.stats.melee.to_string())
-                                        .on_hover_text("melee accuracy");
-                                    ui.label(s.stats.strength.to_string());
-                                }
-                                ui.label(s.kills.to_string());
-                                if !compact {
-                                    ui.horizontal(|ui| {
-                                        if ui.small_button("-").clicked()
-                                            && s.grenades_loadout > 0
-                                        {
-                                            s.grenades_loadout -= 1;
-                                        }
-                                        ui.label(s.grenades_loadout.to_string());
-                                        if ui.small_button("+").clicked()
-                                            && s.grenades_loadout < 4
-                                        {
-                                            s.grenades_loadout += 1;
-                                        }
-                                    });
-                                    ui.horizontal(|ui| {
-                                        if ui.small_button("-").clicked()
-                                            && s.dressings_loadout > 0
-                                        {
-                                            s.dressings_loadout -= 1;
-                                        }
-                                        ui.label(s.dressings_loadout.to_string());
-                                        if ui.small_button("+").clicked()
-                                            && s.dressings_loadout < 4
-                                        {
-                                            s.dressings_loadout += 1;
-                                        }
-                                    });
-                                    if lance_ok {
-                                        let label = if s.has_lance { "🔥" } else { "–" };
-                                        if ui.small_button(label).clicked() {
-                                            lance_toggle = Some((si, !s.has_lance));
-                                        }
-                                    } else {
-                                        ui.label("–");
-                                    }
-                                }
-                                if s.is_broken() {
-                                    ui.colored_label(egui::Color32::from_rgb(220, 60, 60), "broken")
-                                        .on_hover_text(
-                                            "sanity gone: unfit until it climbs past 20 \
-                                             (a Chapel mends minds three times as fast)",
-                                        );
-                                } else if s.warding.is_some() {
-                                    ui.colored_label(egui::Color32::YELLOW, "warding");
-                                } else if s.aboard.is_some() {
-                                    ui.colored_label(egui::Color32::LIGHT_BLUE, "aboard");
-                                } else if s.is_fit() {
-                                    if ui.small_button(format!("fit @{}", s.home)).clicked() {
-                                        transfer = Some(si);
-                                    }
-                                } else {
-                                    ui.colored_label(
-                                        egui::Color32::LIGHT_RED,
-                                        format!("{}d", s.recovery_days),
-                                    );
-                                }
-                                ui.end_row();
-                            }
-                        });
-                        });
-                        if let Some(si) = squad_rotate {
-                            c.soldiers[si].squad =
-                                (c.soldiers[si].squad + 1) % ods_geo::SQUAD_NAMES.len() as u8;
-                        }
-                        if let Some((si, take)) = lance_toggle
-                            && let Err(e) = c.assign_lance(si, take)
-                        {
-                            self.log.push(format!("cannot assign lance: {e:?}"));
-                        }
-                        if let Some(si) = transfer {
-                            let next = (c.soldiers[si].home + 1) % c.bases.len();
-                            if next != c.soldiers[si].home {
-                                match c.transfer_soldier(si, next) {
-                                    Ok(()) => self.log.push(format!(
-                                        "{} takes the road to {}.",
-                                        c.soldiers[si].name,
-                                        c.bases[next].region.name()
-                                    )),
-                                    Err(e) => self.log.push(format!("cannot transfer: {e:?}")),
-                                }
-                            }
-                        }
-                        ui.label(format!(
-                            "Heavy packs slow the hand (capacity 2 + Str/8; two magazines ride \
-                             as one item). Lances: {}. Blessed magazines: {}.",
-                            c.lance_stock,
-                            c.quarrel_stock
-                        ));
-                        ui.label("Click a fit soldier's @base tag to rotate their station.");
-                    });
-
-                egui::CollapsingHeader::new("Armoury assignments").show(ui, |ui| {
-                    ui.label(format!(
-                        "stock — arbalest {} · censer {} · hammer {} · mortar {} | \
-                         blades {} · circlets {} | plate {} · aegis {}",
-                        c.weapon_stock.get("arbalest").copied().unwrap_or(0),
-                        c.weapon_stock.get("censer").copied().unwrap_or(0),
-                        c.weapon_stock.get("ram_hammer").copied().unwrap_or(0),
-                        c.weapon_stock.get("salt_mortar").copied().unwrap_or(0),
-                        c.blade_stock,
-                        c.circlet_stock,
-                        c.plate_stock,
-                        c.aegis_stock,
-                    ));
-                    let mut act: Option<(usize, u8)> = None;
-                    egui::ScrollArea::horizontal().id_salt("armoury-h").show(ui, |ui| {
-                    egui::Grid::new("armoury").striped(true).show(ui, |ui| {
-                        for h in ["Name", "Weapon", "Blade", "Circlet", "Armor", "Relic"] {
-                            ui.strong(h);
-                        }
-                        ui.end_row();
-                        for (si, s) in c.soldiers.iter().enumerate() {
-                            if ui
-                                .small_button(&s.name)
-                                .on_hover_text("open the armoury mirror: paper doll, identity")
-                                .clicked()
-                            {
-                                self.equip_for = Some(si);
-                            }
-                            if ui.small_button(s.weapon_key.replace('_', " ")).clicked() {
-                                act = Some((si, 0));
-                            }
-                            if ui.small_button(if s.has_blade { "🗡" } else { "–" }).clicked() {
-                                act = Some((si, 1));
-                            }
-                            if ui.small_button(if s.has_circlet { "◎" } else { "–" }).clicked() {
-                                act = Some((si, 2));
-                            }
-                            if ui.small_button(s.armor.name()).clicked() {
-                                act = Some((si, 3));
-                            }
-                            match &s.relic {
-                                Some(r) => {
-                                    if ui
-                                        .small_button(&r.name)
-                                        .on_hover_text(r.affix.describe())
-                                        .clicked()
-                                    {
-                                        act = Some((si, 4)); // return it
-                                    }
-                                }
-                                None => {
-                                    ui.menu_button("–", |ui| {
-                                        for (ri, r) in c.relic_pool.iter().enumerate() {
-                                            if ui
-                                                .button(format!(
-                                                    "{} ({})",
-                                                    r.name,
-                                                    r.affix.describe()
-                                                ))
-                                                .clicked()
-                                            {
-                                                act = Some((si, 10 + ri as u8));
-                                                ui.close();
-                                            }
-                                        }
-                                        if c.relic_pool.is_empty() {
-                                            ui.label("the reliquary is bare");
-                                        }
-                                    });
-                                }
-                            }
-                            ui.end_row();
-                        }
-                    });
-                    });
-                    if let Some((si, what)) = act {
-                        let outcome = match what {
-                            0 => c.cycle_weapon(si).map(|_| ()),
-                            1 => c.toggle_blade(si),
-                            2 => c.toggle_circlet(si),
-                            3 => c.cycle_armor(si).map(|_| ()),
-                            4 => c.assign_relic(si, None),
-                            n => c.assign_relic(si, Some((n - 10) as usize)),
-                        };
-                        if let Err(e) = outcome {
-                            self.log.push(format!("cannot issue: {e:?}"));
-                        }
-                    }
-                });
+                if ui.button("🛡 Muster rolls & armoury").clicked() {
+                    self.geo_speed = 0;
+                    self.run_to_event = false;
+                    self.screen = Screen::Roster;
+                }
 
                 let maimed: Vec<usize> = c
                     .soldiers
@@ -1636,73 +1926,6 @@ impl Core {
                 });
         }
 
-        // ------------------------------------------------ bestiary codex
-        if self.show_codex {
-            let mut open = true;
-            egui::Window::new("Bestiary of the Otherside")
-                .open(&mut open)
-                .default_width(420.0)
-                .show(ctx, |ui| {
-                    ui.label(
-                        "Field reports describe what the squads have met. Take a specimen \
-                         alive and the occultists open it up — anatomy and all.",
-                    );
-                    ui.separator();
-                    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                        for species in ods_sim::units::Species::DEMONS {
-                            let seen = c.codex_seen.contains(&species);
-                            let captured = c.codex_captured.contains(&species);
-                            if !seen {
-                                ui.label(
-                                    egui::RichText::new("??? — unencountered")
-                                        .weak()
-                                        .italics(),
-                                );
-                                ui.separator();
-                                continue;
-                            }
-                            let slain = c.codex_slain.contains(&species);
-                            ui.horizontal(|ui| {
-                                ui.strong(species.name());
-                                if slain {
-                                    ui.colored_label(egui::Color32::from_rgb(200, 90, 70), "☠ necropsied");
-                                }
-                                if captured {
-                                    ui.colored_label(egui::Color32::GOLD, "⛓ dissected");
-                                }
-                            });
-                            ui.label(bestiary_lore(species));
-                            if slain {
-                                let key = species.name().to_lowercase().replace(' ', "_");
-                                if let Some(d) = ods_sim::data::species().get(&key) {
-                                    ui.label(format!(
-                                        "Necropsy: {} TU · {} HP · armor {}/{}/{}",
-                                        d.tu, d.health, d.armor.0, d.armor.1, d.armor.2
-                                    ));
-                                }
-                            }
-                            if captured {
-                                let parts: Vec<&str> = species
-                                    .body_parts()
-                                    .iter()
-                                    .map(|p| p.name())
-                                    .collect();
-                                ui.label(format!("Anatomy: {}", parts.join(", ")));
-                            } else {
-                                ui.label(
-                                    egui::RichText::new(
-                                        "Bind one alive to learn its anatomy.",
-                                    )
-                                    .weak(),
-                                );
-                            }
-                            ui.separator();
-                        }
-                    });
-                });
-            self.show_codex = open;
-        }
-
         // ------------------------------------------------ campaign ledger
         if self.show_stats {
             let mut open = true;
@@ -1750,124 +1973,6 @@ impl Core {
                     });
                 });
             self.show_stats = open;
-        }
-
-        // ------------------------------------------- the armoury mirror
-        // A soldier stands before the glass: identity above, the paper
-        // doll below, every slot clickable.
-        if let Some(si) = self.equip_for {
-            if si >= c.soldiers.len() {
-                self.equip_for = None;
-            } else {
-                let mut open = true;
-                egui::Window::new("The Armoury Mirror")
-                    .open(&mut open)
-                    .default_width(300.0)
-                    .resizable(false)
-                    .show(ctx, |ui| {
-                        ui.vertical_centered(|ui| {
-                            crate::portraits::draw(
-                                ui,
-                                crate::portraits::seed_of(&c.soldiers[si].name),
-                                48.0,
-                                c.soldiers[si].scars.len(),
-                            );
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Name");
-                            ui.text_edit_singleline(&mut c.soldiers[si].name);
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Callsign");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut c.soldiers[si].callsign)
-                                    .hint_text("what the squad shouts"),
-                            );
-                        });
-                        ui.separator();
-                        stat_bars(ui, &c.soldiers[si]);
-                        ui.separator();
-                        inventory_grid(
-                            ui,
-                            c,
-                            si,
-                            &mut self.presets,
-                            &mut self.preset_name,
-                        );
-                        ui.horizontal(|ui| {
-                            use ods_sim::units::MagKind;
-                            ui.label("Pressed with");
-                            let pref = &mut c.soldiers[si].mag_pref;
-                            for (kind, hint) in [
-                                (MagKind::Blessed, "the standard: consecrated shot"),
-                                (
-                                    MagKind::ColdIron,
-                                    "+4 power — old iron, older grudges",
-                                ),
-                                (
-                                    MagKind::Salt,
-                                    "-4 power, +6 stun a hit — for taking them breathing",
-                                ),
-                            ] {
-                                if ui
-                                    .selectable_label(*pref == kind, kind.name())
-                                    .on_hover_text(hint)
-                                    .clicked()
-                                {
-                                    *pref = kind;
-                                }
-                            }
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "(iron {}, salt {})",
-                                    c.coldiron_stock, c.salt_stock
-                                ))
-                                .weak()
-                                .small(),
-                            );
-                        });
-                        if let Some(calling) =
-                            ods_geo::calling_from(&c.soldiers[si].deeds)
-                        {
-                            ui.label(
-                                egui::RichText::new(format!("☩ {}", calling.name()))
-                                    .color(egui::Color32::from_rgb(230, 200, 120)),
-                            )
-                            .on_hover_text(calling.blurb());
-                        }
-                        if c.soldiers[si].confessor {
-                            ui.label(
-                                egui::RichText::new("🕯 Confessor")
-                                    .color(egui::Color32::from_rgb(190, 160, 230)),
-                            )
-                            .on_hover_text(
-                                "anointed under the Rites: Steady and Dread in the field, \
-                                 and the channel burns its keeper",
-                            );
-                        } else if c.research.is_complete(ods_geo::Project::RitesOfConfession)
-                            && ui
-                                .small_button("Anoint Confessor")
-                                .on_hover_text(
-                                    "requires a Sanctum at their house and a whole mind \
-                                     (sanity 60+)",
-                                )
-                                .clicked()
-                        {
-                            match c.anoint_confessor(si) {
-                                Ok(()) => self.log.push(format!(
-                                    "{} kneels in the Sanctum and rises a Confessor.",
-                                    c.soldiers[si].name
-                                )),
-                                Err(e) => self.log.push(format!("cannot anoint: {e:?}")),
-                            }
-                        }
-                        ui.separator();
-                        paper_doll(ui, c, si, &mut self.log);
-                    });
-                if !open {
-                    self.equip_for = None;
-                }
-            }
         }
 
         // -------------------------------------------- after-action debrief
@@ -3158,4 +3263,11 @@ fn item_lore(name: &str) -> &'static str {
         "Forge Salt Mortar" => "Salt-shot that stuns instead of kills: for the ones wanted alive.",
         _ => "The benches know their business.",
     }
+}
+
+/// The opaque desk background every full screen sits on.
+fn desk_fill() -> egui::Frame {
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(15, 12, 11))
+        .inner_margin(egui::Margin::same(16))
 }
