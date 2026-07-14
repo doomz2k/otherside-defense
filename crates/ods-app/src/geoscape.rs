@@ -714,7 +714,7 @@ impl Core {
                         let mut transfer: Option<usize> = None;
                         let mut squad_rotate: Option<usize> = None;
                         egui::Grid::new("roster").striped(true).show(ui, |ui| {
-                            for h in ["Name", "Rank", "Quirk", "Squad", "Mind", "TU", "HP", "Acc", "K", "🧨", "✚", "Lance", "Status"] {
+                            for h in ["Name", "Rank", "Quirk", "Squad", "Mind", "TU", "Sta", "HP", "Fir", "Thr", "Mel", "Str", "K", "🧨", "✚", "Lance", "Status"] {
                                 ui.strong(h);
                             }
                             ui.end_row();
@@ -761,8 +761,15 @@ impl Core {
                                     mind.on_hover_text(format!("phobia: {}", phobia.name()));
                                 }
                                 ui.label(s.stats.tu.to_string());
+                                ui.label(s.stats.stamina.to_string());
                                 ui.label(s.stats.health.to_string());
-                                ui.label(s.stats.accuracy.to_string());
+                                ui.label(s.stats.accuracy.to_string())
+                                    .on_hover_text("firing accuracy");
+                                ui.label(s.stats.throwing.to_string())
+                                    .on_hover_text("throwing accuracy");
+                                ui.label(s.stats.melee.to_string())
+                                    .on_hover_text("melee accuracy");
+                                ui.label(s.stats.strength.to_string());
                                 ui.label(s.kills.to_string());
                                 ui.horizontal(|ui| {
                                     if ui.small_button("-").clicked() && s.grenades_loadout > 0 {
@@ -1241,6 +1248,8 @@ impl Core {
                                     .hint_text("what the squad shouts"),
                             );
                         });
+                        ui.separator();
+                        stat_bars(ui, &c.soldiers[si]);
                         ui.separator();
                         paper_doll(ui, c, si, &mut self.log);
                     });
@@ -1757,6 +1766,45 @@ fn snapshot(c: &Campaign, bi: usize) -> (usize, usize) {
     let bi = bi.min(c.bases.len() - 1);
     let cells = c.bases[bi].occupied_cells().len();
     (c.bases.len(), cells)
+}
+
+/// The Apocalypse sheet: ten labelled bars, one soldier. Bars are scaled
+/// against the highest value the campaign can ever grow a stat to, so a
+/// full bar means "this cannot get better".
+fn stat_bars(ui: &mut egui::Ui, s: &ods_geo::Soldier) {
+    let rows: [(&str, i32, i32, egui::Color32); 10] = [
+        ("Time Units", s.stats.tu, 65, egui::Color32::from_rgb(212, 178, 90)),
+        ("Stamina", s.stats.stamina, 80, egui::Color32::from_rgb(225, 220, 130)),
+        ("Health", s.stats.health, 40, egui::Color32::from_rgb(205, 75, 65)),
+        ("Bravery", s.stats.bravery, 95, egui::Color32::from_rgb(190, 125, 215)),
+        ("Reactions", s.stats.reactions, 90, egui::Color32::from_rgb(120, 195, 220)),
+        ("Firing Accuracy", s.stats.accuracy, 95, egui::Color32::from_rgb(125, 200, 125)),
+        ("Throwing Accuracy", s.stats.throwing, 90, egui::Color32::from_rgb(105, 175, 105)),
+        ("Melee Accuracy", s.stats.melee, 90, egui::Color32::from_rgb(90, 155, 95)),
+        ("Strength", s.stats.strength, 60, egui::Color32::from_rgb(220, 150, 85)),
+        ("Sanity", s.sanity, 100, egui::Color32::from_rgb(160, 165, 230)),
+    ];
+    for (label, value, max, color) in rows {
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [118.0, 12.0],
+                egui::Label::new(egui::RichText::new(label).small()),
+            );
+            ui.add_sized(
+                [22.0, 12.0],
+                egui::Label::new(egui::RichText::new(value.to_string()).small().strong()),
+            );
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(110.0, 7.0), egui::Sense::hover());
+            let paint = ui.painter_at(rect);
+            paint.rect_filled(rect, 1.0, egui::Color32::from_gray(38));
+            let frac = (value.max(0) as f32 / max as f32).min(1.0);
+            if frac > 0.0 {
+                let mut fill = rect;
+                fill.set_width(rect.width() * frac);
+                paint.rect_filled(fill, 1.0, color);
+            }
+        });
+    }
 }
 
 /// The paper doll: a painted silhouette wearing what the soldier wears,

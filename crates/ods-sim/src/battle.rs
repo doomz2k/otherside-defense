@@ -287,6 +287,12 @@ pub struct Experience {
     pub kills: u32,
     /// Times the unit broke (panic or berserk) and lived through it.
     pub dread_survived: u32,
+    /// Thrown charges that landed where they were aimed.
+    pub throws_true: u32,
+    /// Melee strikes and ripostes that connected.
+    pub blade_hits: u32,
+    /// Tiles walked this battle — the legs remember.
+    pub tiles_moved: u32,
 }
 
 /// What this battle is FOR, beyond killing: some fields are won by the
@@ -1517,14 +1523,20 @@ impl Battle {
                 }
             }
             {
+                let climb = (next.z > here.z) as i32;
                 let u = self.unit_mut(id);
                 u.tu -= cost;
+                // The body pays too: a point per step, two going up.
+                if !u.flies {
+                    u.stamina = (u.stamina - 1 - climb).max(0);
+                }
                 let step = next - here;
                 if step.x != 0 || step.y != 0 {
                     u.facing = IVec3::new(step.x.signum(), step.y.signum(), 0);
                 }
                 u.tile = next;
             }
+            self.xp[id.0 as usize].tiles_moved += 1;
             // The carried ride along.
             if let Some(carried) = self.unit(id).carrying {
                 self.unit_mut(carried).tile = next;
@@ -1797,6 +1809,9 @@ impl Battle {
 
             if hit {
                 self.xp[shooter.0 as usize].shots_hit += 1;
+                if melee {
+                    self.xp[shooter.0 as usize].blade_hits += 1;
+                }
                 if stun_power > 0 {
                     // Salt-shot: trauma without blood, splashing the tile.
                     let center = self.unit(target).tile;
@@ -1855,11 +1870,12 @@ impl Battle {
             && self.unit(shooter).is_active()
             && cheb(self.unit(shooter).tile, self.unit(target).tile) <= 1
         {
-            let chance = (self.unit(target).accuracy * 85 / 100).clamp(5, 95);
+            let chance = (self.unit(target).melee * 85 / 100).clamp(5, 95);
             let hit = (self.rng.roll(100) as i32) < chance;
             events.push(Event::Riposte { unit: target, target: shooter, hit });
             if hit {
                 self.xp[target.0 as usize].shots_hit += 1;
+                self.xp[target.0 as usize].blade_hits += 1;
                 let damage = BLADE_POWER * self.rng.roll(201) as i32 / 100;
                 self.apply_damage(shooter, damage, Some(target), events);
             }
@@ -1876,7 +1892,8 @@ impl Battle {
         if u.tu < cost {
             return Err(ActionError::NotEnoughTu);
         }
-        if cheb(u.tile, at) > GRENADE_RANGE_TILES {
+        // The arm sets the range: strength carries the charge.
+        if cheb(u.tile, at) > 6 + u.strength / 6 {
             return Err(ActionError::OutOfRange);
         }
 
@@ -1885,9 +1902,10 @@ impl Battle {
             u.tu -= cost;
             u.grenades -= 1;
         }
-        // A bad throw scatters: the charge lands where fate says, not you.
-        let throw_acc = (50 + self.unit(id).accuracy / 2).clamp(30, 90);
+        // A bad throw scatters: the throwing arm decides, not the eye.
+        let throw_acc = (50 + self.unit(id).throwing / 2).clamp(30, 90);
         let at = if (self.rng.roll(100) as i32) < throw_acc {
+            self.xp[id.0 as usize].throws_true += 1;
             at
         } else {
             const RING: [(i32, i32); 8] =
@@ -2477,6 +2495,12 @@ impl Battle {
             }
         }
 
+        // Breath comes back to the side about to move: a third per turn.
+        let side = self.side_to_move;
+        for u in self.units.iter_mut().filter(|u| u.side == side && u.is_active()) {
+            u.stamina = (u.stamina + u.stamina_max / 3).min(u.stamina_max);
+        }
+
         // Smoke thins; fire gutters, burns, and spreads. Rain drowns it.
         let rain = self.weather == Weather::Rain;
         for c in &mut self.clouds {
@@ -2986,11 +3010,17 @@ mod tests {
         );
         assert_eq!(b.unit(UnitId(0)).grenades, 1);
 
-        // Range and supply limits.
+        // Range and supply limits: the arm sets the reach (6 + strength/6).
         b.units[0].tile = IVec3::new(0, 0, 0); // corner-to-corner is 11 tiles
+        b.units[0].strength = 24; // reach 10: one tile short
         assert_eq!(
             b.perform(Action::Throw { unit: UnitId(0), at: IVec3::new(11, 11, 0) }),
             Err(ActionError::OutOfRange)
+        );
+        b.units[0].strength = 36; // reach 12: the same throw carries
+        assert!(
+            b.perform(Action::Throw { unit: UnitId(0), at: IVec3::new(11, 11, 0) }).is_ok(),
+            "a stronger arm carries the corner-to-corner throw"
         );
         b.units[0].grenades = 0;
         assert_eq!(
@@ -4141,6 +4171,57 @@ mod tests {
             before,
             count_foliage(&b)
         );
+    }
+
+    #[test]
+    fn stamina_drains_regens_and_empty_lungs_hobble() {
+        let mut b = open_field(duelists(), 70);
+        let start = b.unit(UnitId(0)).stamina;
+        b.perform(Action::Move { unit: UnitId(0), to: IVec3::new(6, 5, 0) }).unwrap();
+        assert_eq!(
+            b.unit(UnitId(0)).stamina,
+            start - 5,
+            "five tiles cost five breath"
+        );
+        assert_eq!(
+            b.xp[0].tiles_moved, 5,
+            "the legs remember the distance"
+        );
+
+        // Empty lungs double the step.
+        assert_eq!(b.unit(UnitId(0)).move_cost_mult(), 1);
+        b.units[0].stamina = 0;
+        assert_eq!(b.unit(UnitId(0)).move_cost_mult(), 2, "winded walkers pay double");
+
+        // A full round returns a third of the tank.
+        b.perform(Action::EndTurn).unwrap(); // Order -> Demons (demons breathe)
+        b.perform(Action::EndTurn).unwrap(); // Demons -> Order (we breathe)
+        assert_eq!(
+            b.unit(UnitId(0)).stamina,
+            b.unit(UnitId(0)).stamina_max / 3,
+            "rest refills a third"
+        );
+    }
+
+    #[test]
+    fn melee_skill_not_firing_skill_drives_the_blade() {
+        let mut b = open_field(duelists(), 71);
+        // Give the imp fangs: a melee weapon. Its firing accuracy
+        // becomes irrelevant; its melee skill decides.
+        b.units[1].weapon = crate::units::Weapon::from_data("fangs", "fangs");
+        b.units[1].accuracy = 5;
+        b.units[1].melee = 90;
+        let fanged = b.unit(UnitId(1)).hit_chance(FireMode::Snap).unwrap();
+        b.units[1].melee = 20;
+        let clumsy = b.unit(UnitId(1)).hit_chance(FireMode::Snap).unwrap();
+        assert!(
+            fanged > clumsy && fanged > 50,
+            "melee weapons roll on melee skill: {fanged} vs {clumsy}"
+        );
+        // The rifle still answers to firing accuracy.
+        b.units[0].melee = 5;
+        b.units[0].accuracy = 80;
+        assert!(b.unit(UnitId(0)).hit_chance(FireMode::Snap).unwrap() > 20);
     }
 
     #[test]

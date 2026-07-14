@@ -183,8 +183,19 @@ pub struct Unit {
     /// 0..=100; low morale risks panic or berserk at turn start.
     pub morale: i32,
     pub reactions: i32,
+    /// Firing accuracy: the base of every ranged to-hit roll.
     pub accuracy: i32,
     pub bravery: i32,
+    /// The body's battery: moving spends it, resting turns refill a third.
+    /// Empty lungs make every step cost more.
+    pub stamina_max: i32,
+    pub stamina: i32,
+    /// Carry capacity, throw range, and melee weight.
+    pub strength: i32,
+    /// Throwing accuracy: how honestly a lobbed charge lands.
+    pub throwing: i32,
+    /// Melee accuracy: blade-work, fangs, ripostes.
+    pub melee: i32,
     /// Kneeling: +15% accuracy until the unit moves.
     pub kneeling: bool,
     /// Reserve enough TUs for a snap shot when moving.
@@ -269,6 +280,11 @@ impl Unit {
             reactions: 40,
             accuracy: 45,
             bravery: 50,
+            stamina_max: 50,
+            stamina: 50,
+            strength: 30,
+            throwing: 45,
+            melee: 40,
             kneeling: false,
             reserve_snap: false,
             psi: false,
@@ -319,6 +335,10 @@ impl Unit {
         self.armor_front = d.armor.0;
         self.armor_side = d.armor.1;
         self.armor_rear = d.armor.2;
+        // Demons fight with what they are: their table accuracy serves as
+        // throwing and melee skill alike, so balance is unchanged.
+        self.throwing = d.accuracy;
+        self.melee = d.accuracy;
         self
     }
 
@@ -441,7 +461,9 @@ impl Unit {
             FireMode::Aimed => self.weapon.aimed_acc,
             FireMode::Auto => self.weapon.auto.as_ref()?.acc,
         };
-        let mut chance = self.accuracy * mode_acc / 100;
+        // Blades and fangs are melee-skill work; triggers are firing work.
+        let skill = if self.weapon.melee { self.melee } else { self.accuracy };
+        let mut chance = skill * mode_acc / 100;
         if self.kneeling {
             chance = chance * 115 / 100;
         }
@@ -481,7 +503,9 @@ impl Unit {
     /// Movement cost multiplier from leg damage: crippled legs hobble,
     /// severed legs reduce a soldier to a crawl.
     pub fn move_cost_mult(&self) -> i32 {
-        if self
+        // Spent lungs: an exhausted walker pays double for every step.
+        let winded = if self.stamina <= 0 && !self.flies { 1 } else { 0 };
+        winded + if self
             .severed
             .iter()
             .any(|p| matches!(p, BodyPart::LeftLeg | BodyPart::RightLeg))

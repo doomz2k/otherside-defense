@@ -480,13 +480,20 @@ impl BattleScreen {
                     Some(id) => {
                         let u = self.battle.unit(id);
                         ui.label(format!(
-                            "{} | TU {}/{} | HP {}/{} | morale {}{}",
+                            "{} | TU {}/{} | HP {}/{} | sta {}/{} | morale {}{}{}",
                             u.name,
                             u.tu,
                             u.tu_max,
                             u.health,
                             u.health_max,
+                            u.stamina,
+                            u.stamina_max,
                             u.morale,
+                            if u.stamina <= 0 && !u.flies {
+                                " | WINDED"
+                            } else {
+                                ""
+                            },
                             if u.wounds > 0 {
                                 format!(" | BLEEDING x{}", u.wounds)
                             } else {
@@ -907,6 +914,11 @@ impl BattleScreen {
                                 ui,
                                 u.tu as f32 / u.tu_max.max(1) as f32,
                                 egui::Color32::from_rgb(200, 170, 60),
+                            );
+                            mini_bar(
+                                ui,
+                                u.stamina as f32 / u.stamina_max.max(1) as f32,
+                                egui::Color32::from_rgb(210, 205, 120),
                             );
                             mini_bar(
                                 ui,

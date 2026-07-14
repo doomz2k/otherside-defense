@@ -272,6 +272,12 @@ fn make_unit(id: u32, s: &Soldier, kit: (u32, u32), research: &ResearchState) ->
     if research.is_complete(Project::HellsteelPlate) {
         u.health_max += 8;
     }
+    // The new sheet rides into battle whole.
+    u.stamina_max = s.stats.stamina;
+    u.stamina = s.stats.stamina;
+    u.strength = s.stats.strength;
+    u.throwing = s.stats.throwing;
+    u.melee = s.stats.melee;
     u.health = u.health_max;
     if s.has_lance && research.is_complete(Project::HellfireLance) {
         // A forged lance replaces everything else outright.
@@ -314,6 +320,12 @@ fn make_unit(id: u32, s: &Soldier, kit: (u32, u32), research: &ResearchState) ->
             u.tu_max -= 6;
         }
     }
+    // The new sheet rides into battle whole.
+    u.stamina_max = s.stats.stamina;
+    u.stamina = s.stats.stamina;
+    u.strength = s.stats.strength;
+    u.throwing = s.stats.throwing;
+    u.melee = s.stats.melee;
     u.health = u.health_max;
     if let Some(relic) = &s.relic {
         match relic.affix {
@@ -345,13 +357,17 @@ fn make_unit(id: u32, s: &Soldier, kit: (u32, u32), research: &ResearchState) ->
         }
         Some(crate::campaign::Quirk::IronNerves) => u.bravery = (u.bravery + 15).min(95),
         Some(crate::campaign::Quirk::Swift) => u.tu_max += 5,
+        Some(crate::campaign::Quirk::StrongBack) => u.strength += 8,
+        Some(crate::campaign::Quirk::Butcher) => u.melee = (u.melee + 8).min(95),
         _ => {}
     }
     let (grenades, dressings) = kit;
     u.grenades = grenades;
     u.heal_charges = dressings;
-    // An overloaded pack slows the hand (unless born to haul).
-    if grenades + dressings > 5 && s.quirk != Some(crate::campaign::Quirk::PackMule) {
+    // An overloaded pack slows the hand — the back decides where "over"
+    // begins (unless born to haul).
+    let capacity = 2 + u.strength as u32 / 8;
+    if grenades + dressings > capacity && s.quirk != Some(crate::campaign::Quirk::PackMule) {
         u.tu_max -= 4;
     }
     u.tu = u.tu_max;

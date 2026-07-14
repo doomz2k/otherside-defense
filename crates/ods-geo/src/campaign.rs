@@ -94,6 +94,10 @@ pub enum Quirk {
     Swift,
     /// -8 bravery: some people are not built for viscera.
     Squeamish,
+    /// +8 strength.
+    StrongBack,
+    /// +8 melee accuracy.
+    Butcher,
 }
 
 impl Quirk {
@@ -105,6 +109,8 @@ impl Quirk {
             Quirk::PackMule => "Pack Mule",
             Quirk::Swift => "Swift",
             Quirk::Squeamish => "Squeamish",
+            Quirk::StrongBack => "Strong Back",
+            Quirk::Butcher => "Butcher",
         }
     }
 }
@@ -139,6 +145,9 @@ fn apply_loss(stats: &mut SoldierStats, part: ods_sim::body::BodyPart) {
         P::LeftLeg | P::RightLeg => stats.tu = (stats.tu - 8).max(30),
         _ => stats.health = (stats.health - 5).max(12),
     }
+    if matches!(part, ods_sim::body::BodyPart::LeftLeg | ods_sim::body::BodyPart::RightLeg) {
+        stats.stamina = (stats.stamina - 8).max(25);
+    }
 }
 
 /// A lasting scar's permanent cost.
@@ -149,6 +158,9 @@ fn apply_scar(stats: &mut SoldierStats, part: ods_sim::body::BodyPart) {
         P::LeftLeg | P::RightLeg => stats.tu = (stats.tu - 5).max(35),
         P::Head => stats.bravery = (stats.bravery - 6).max(5),
         _ => stats.health = (stats.health - 3).max(15),
+    }
+    if matches!(part, P::LeftLeg | P::RightLeg) {
+        stats.stamina = (stats.stamina - 5).max(30);
     }
 }
 
@@ -239,8 +251,34 @@ pub struct SoldierStats {
     pub tu: i32,
     pub health: i32,
     pub reactions: i32,
+    /// Firing accuracy.
     pub accuracy: i32,
     pub bravery: i32,
+    /// The body's battery: per-battle breath (old saves get a mid roll).
+    #[serde(default = "d_stamina")]
+    pub stamina: i32,
+    /// Carry, throw range, melee weight.
+    #[serde(default = "d_strength")]
+    pub strength: i32,
+    /// Throwing accuracy.
+    #[serde(default = "d_throwing")]
+    pub throwing: i32,
+    /// Melee accuracy.
+    #[serde(default = "d_melee")]
+    pub melee: i32,
+}
+
+fn d_stamina() -> i32 {
+    60
+}
+fn d_strength() -> i32 {
+    35
+}
+fn d_throwing() -> i32 {
+    50
+}
+fn d_melee() -> i32 {
+    40
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -356,6 +394,15 @@ fn apply_growth(stats: &mut SoldierStats, xp: ods_sim::battle::Experience) {
     }
     if xp.kills >= 2 {
         stats.health = (stats.health + 1).min(40);
+    }
+    stats.throwing = (stats.throwing + (xp.throws_true as i32 / 2).min(2)).min(90);
+    stats.melee = (stats.melee + (xp.blade_hits as i32 / 2).min(3)).min(90);
+    if xp.tiles_moved >= 25 {
+        stats.stamina = (stats.stamina + 1).min(80);
+    }
+    // The back grows under real weight: long marches on fighting days.
+    if xp.tiles_moved >= 30 && xp.kills >= 1 {
+        stats.strength = (stats.strength + 1).min(60);
     }
 }
 
@@ -565,17 +612,29 @@ pub enum Focus {
     Marksmanship,
     Conditioning,
     Nerve,
+    /// The blade yard: melee accuracy, capped low — real work is in the field.
+    BladeWork,
+    /// Running the walls: stamina.
+    Athletics,
 }
 
 impl Focus {
-    pub const ALL: [Focus; 3] = [Focus::Marksmanship, Focus::Conditioning, Focus::Nerve];
+    pub const ALL: [Focus; 5] = [
+        Focus::Marksmanship,
+        Focus::Conditioning,
+        Focus::Nerve,
+        Focus::BladeWork,
+        Focus::Athletics,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Focus::Marksmanship => "Marksmanship",
             Focus::Conditioning => "Conditioning",
             Focus::Nerve => "Nerve",
-        }
+                    Focus::BladeWork => "Blade-work",
+            Focus::Athletics => "Athletics",
+}
     }
 }
 
@@ -937,6 +996,10 @@ impl Campaign {
                 reactions: 40 + self.rng.roll(21) as i32,
                 accuracy: 50 + self.rng.roll(21) as i32,
                 bravery: 20 + self.rng.roll(41) as i32,
+                stamina: 50 + self.rng.roll(21) as i32,
+                strength: 25 + self.rng.roll(21) as i32,
+                throwing: 40 + self.rng.roll(26) as i32,
+                melee: 30 + self.rng.roll(26) as i32,
             },
             recovery_days: 0,
             missions: 0,
@@ -958,13 +1021,15 @@ impl Campaign {
             relic: None,
             squad: 0,
             bond: None,
-            quirk: match self.rng.roll(10) {
+            quirk: match self.rng.roll(13) {
                 0 => Some(Quirk::Marksman),
                 1 => Some(Quirk::Jumpy),
                 2 => Some(Quirk::IronNerves),
                 3 => Some(Quirk::PackMule),
                 4 => Some(Quirk::Swift),
                 5 => Some(Quirk::Squeamish),
+                6 => Some(Quirk::StrongBack),
+                7 => Some(Quirk::Butcher),
                 _ => None,
             },
         }
@@ -2443,6 +2508,8 @@ impl Campaign {
                         }
                         Focus::Conditioning => s.stats.tu = (s.stats.tu + 1).min(60),
                         Focus::Nerve => s.stats.bravery = (s.stats.bravery + 1).min(70),
+                        Focus::BladeWork => s.stats.melee = (s.stats.melee + 1).min(65),
+                        Focus::Athletics => s.stats.stamina = (s.stats.stamina + 1).min(75),
                     }
                 }
             }
@@ -2915,6 +2982,41 @@ mod tests {
         assert!(c.quarters_capacity() >= 10);
         // Different recruits get different stats from the seeded roll.
         assert_ne!(c.soldiers[0].stats, c.soldiers[1].stats);
+    }
+
+    #[test]
+    fn growth_reaches_the_new_stats() {
+        let mut stats = SoldierStats {
+            tu: 50,
+            health: 30,
+            reactions: 45,
+            accuracy: 55,
+            bravery: 40,
+            stamina: 55,
+            strength: 30,
+            throwing: 45,
+            melee: 35,
+        };
+        let xp = ods_sim::battle::Experience {
+            kills: 1,
+            throws_true: 4,
+            blade_hits: 6,
+            tiles_moved: 32,
+            ..Default::default()
+        };
+        apply_growth(&mut stats, xp);
+        assert_eq!(stats.throwing, 47);
+        assert_eq!(stats.melee, 38);
+        assert_eq!(stats.stamina, 56);
+        assert_eq!(stats.strength, 31);
+        // Caps hold: a maxed veteran stops growing.
+        let mut vet = stats;
+        vet.throwing = 90;
+        vet.melee = 90;
+        vet.stamina = 80;
+        vet.strength = 60;
+        apply_growth(&mut vet, xp);
+        assert_eq!((vet.throwing, vet.melee, vet.stamina, vet.strength), (90, 90, 80, 60));
     }
 
     #[test]
