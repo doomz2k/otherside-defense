@@ -631,6 +631,64 @@ impl BattleScreen {
                             self.apply(renderer, audio, result);
                         }
                     }
+                    // The anointed carry two whispers: one for their own,
+                    // one for the enemy. Each burns the mind that channels.
+                    if self.battle.unit(id).psi {
+                        ui.separator();
+                        let me = self.battle.unit(id).tile;
+                        let range = ods_sim::battle::TERRIFY_RANGE_TILES;
+                        let ally = self
+                            .battle
+                            .units
+                            .iter()
+                            .filter(|a| {
+                                a.is_active()
+                                    && a.side == Side::Order
+                                    && !a.civilian
+                                    && a.id != id
+                                    && a.morale < 70
+                                    && (a.tile - me).abs().max_element() <= range
+                            })
+                            .min_by_key(|a| a.morale)
+                            .map(|a| a.id);
+                        if let Some(target) = ally
+                            && ui
+                                .button("🕯 Steady")
+                                .on_hover_text(
+                                    "steady the most shaken ally in reach — the channel \
+                                     burns its keeper (+1 horror)",
+                                )
+                                .clicked()
+                        {
+                            let result =
+                                self.battle.perform(Action::Steady { unit: id, target });
+                            self.apply(renderer, audio, result);
+                        }
+                        let foe = self
+                            .battle
+                            .units
+                            .iter()
+                            .filter(|f| {
+                                f.is_active()
+                                    && f.side == Side::Demons
+                                    && (f.tile - me).abs().max_element() <= range
+                            })
+                            .min_by_key(|f| f.morale + f.bravery / 2)
+                            .map(|f| f.id);
+                        if let Some(target) = foe
+                            && ui
+                                .button("😱 Dread")
+                                .on_hover_text(
+                                    "batter the shakiest demon's mind in reach — the \
+                                     channel burns its keeper (+1 horror)",
+                                )
+                                .clicked()
+                        {
+                            let result =
+                                self.battle.perform(Action::Terrify { unit: id, target });
+                            self.apply(renderer, audio, result);
+                        }
+                    }
                 }
                 let officer = self.selected.is_some_and(|id| {
                     let u = self.battle.unit(id);
@@ -2819,6 +2877,9 @@ fn describe(event: &Event, battle: &Battle) -> String {
         }
         Event::Lashed { unit } => {
             format!("a Prince's will falls across {} — it turns back", name(unit))
+        }
+        Event::Steadied { unit, target } => {
+            format!("{} whispers {} steady again", name(unit), name(target))
         }
         Event::NoiseInDark { near } => {
             format!("something shrieks in the dark, out in {}...", place(near))

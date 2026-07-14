@@ -136,6 +136,8 @@ pub enum Event {
     Escaped { unit: UnitId },
     /// A Prince's will falls across the runners: they turn back.
     Lashed { unit: UnitId },
+    /// A Confessor's whisper knits a battered mind back together.
+    Steadied { unit: UnitId, target: UnitId },
     /// Something moved out there, unseen. Rough bearing only.
     NoiseInDark { near: IVec3 },
     /// The rift obelisk is demolished; the incursion collapses.
@@ -217,6 +219,8 @@ pub enum Action {
     Bind { unit: UnitId, target: UnitId },
     /// Psi assault (Overseers and worse): batters morale through walls.
     Terrify { unit: UnitId, target: UnitId },
+    /// The Confessor's other hand: steady an ally's mind through walls.
+    Steady { unit: UnitId, target: UnitId },
     /// Demons only: feed on an adjacent corpse to heal.
     Devour { unit: UnitId, corpse: UnitId },
     /// Takers only: raise an adjacent soldier corpse as a Husk.
@@ -845,6 +849,7 @@ impl Battle {
             Action::Execute { unit, target } => self.do_execute(unit, target),
             Action::Bind { unit, target } => self.do_bind(unit, target),
             Action::Terrify { unit, target } => self.do_terrify(unit, target),
+            Action::Steady { unit, target } => self.do_steady(unit, target),
             Action::Turn { unit, toward } => self.do_turn(unit, toward),
             Action::DropCharge { unit, timer } => self.do_drop_charge(unit, timer),
             Action::ThrowSmoke { unit, at } => self.do_throw_smoke(unit, at),
@@ -1574,6 +1579,33 @@ impl Battle {
         Ok(events)
     }
 
+    /// The Confessor's whisper runs the other way: a battered ally's mind
+    /// is steadied through any wall. The channel burns the one who holds
+    /// it open — a point of horror per working.
+    fn do_steady(&mut self, id: UnitId, target: UnitId) -> Result<Vec<Event>, ActionError> {
+        self.check_actor(id)?;
+        if !self.unit(id).psi {
+            return Err(ActionError::NoPsi);
+        }
+        let t = self.unit(target);
+        if !t.is_active() || t.side != self.unit(id).side || t.id == id || t.civilian {
+            return Err(ActionError::BadTarget);
+        }
+        if cheb(self.unit(id).tile, t.tile) > TERRIFY_RANGE_TILES {
+            return Err(ActionError::OutOfRange);
+        }
+        let cost = self.unit(id).tu_max * TERRIFY_COST_PCT / 100;
+        if self.unit(id).tu < cost {
+            return Err(ActionError::NotEnoughTu);
+        }
+        self.unit_mut(id).tu -= cost;
+        self.unit_mut(id).horror += 1;
+        let t = self.unit_mut(target);
+        t.morale = (t.morale + 30).min(100);
+        t.suppression = 0;
+        Ok(vec![Event::Steadied { unit: id, target }])
+    }
+
     fn do_terrify(&mut self, id: UnitId, target: UnitId) -> Result<Vec<Event>, ActionError> {
         self.check_actor(id)?;
         if !self.unit(id).psi {
@@ -1591,6 +1623,10 @@ impl Battle {
             return Err(ActionError::NotEnoughTu);
         }
         self.unit_mut(id).tu -= cost;
+        // A mortal mind holding the channel open pays for it.
+        if self.unit(id).side == Side::Order {
+            self.unit_mut(id).horror += 1;
+        }
 
         // A warded circlet takes the blow — once.
         if self.unit(target).circlet {
@@ -3295,6 +3331,31 @@ mod tests {
             }
         }
         assert!(destroyed > 0, "stray shots must scar the battlefield");
+    }
+
+    #[test]
+    fn the_confessors_whisper_steadies_and_burns() {
+        let mut units = duelists();
+        units.push(Unit::soldier(2, "Shaken", IVec3::new(3, 5, 0)));
+        units[0].psi = true; // anointed
+        units[2].morale = 30;
+        units[2].suppression = 3;
+        let mut b = open_field(units, 50);
+        b.xp_push_for_test();
+        b.perform(Action::Steady { unit: UnitId(0), target: UnitId(2) }).unwrap();
+        assert_eq!(b.unit(UnitId(2)).morale, 60, "the mind knits");
+        assert_eq!(b.unit(UnitId(2)).suppression, 0, "the flinch lifts");
+        assert_eq!(b.unit(UnitId(0)).horror, 1, "and the channel burns its keeper");
+        // The whisper does not run toward the enemy...
+        assert_eq!(
+            b.perform(Action::Steady { unit: UnitId(0), target: UnitId(1) }).unwrap_err(),
+            ActionError::BadTarget
+        );
+        // ...and the unanointed have no whisper at all.
+        assert_eq!(
+            b.perform(Action::Steady { unit: UnitId(2), target: UnitId(0) }).unwrap_err(),
+            ActionError::NoPsi
+        );
     }
 
     #[test]

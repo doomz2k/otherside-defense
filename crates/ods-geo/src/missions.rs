@@ -353,6 +353,21 @@ fn make_unit(id: u32, s: &Soldier, kit: (u32, u32, u32), research: &ResearchStat
     }
     u.blade = s.has_blade;
     u.circlet = s.has_circlet;
+    // Anointed: a mortal mind that pushes back (Terrify and Steady both).
+    u.psi = s.confessor;
+    // The calling's small edge — the name was earned doing exactly this.
+    match crate::campaign::calling_from(&s.deeds) {
+        Some(crate::campaign::Calling::Deadeye) => u.accuracy += 3,
+        Some(crate::campaign::Calling::Bladesworn) => u.melee += 5,
+        Some(crate::campaign::Calling::Grenadier) => u.throwing += 5,
+        Some(crate::campaign::Calling::Sentinel) => u.reactions += 5,
+        Some(crate::campaign::Calling::Pathfinder) => {
+            u.stamina_max += 5;
+            u.stamina += 5;
+        }
+        Some(crate::campaign::Calling::Unbroken) => u.bravery = (u.bravery + 10).min(95),
+        None => {}
+    }
     match s.armor {
         crate::campaign::ArmorTier::Vestments => {}
         crate::campaign::ArmorTier::Plate => {

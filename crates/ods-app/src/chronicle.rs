@@ -143,6 +143,12 @@ pub fn narrate(c: &Campaign, event: &GeoEvent) -> String {
         E::StoresOverflow { brimstone, hellsteel, funds } => format!(
             "{stamp} the undercrofts ran over: {brimstone} brimstone and {hellsteel} hellsteel sold to the reliquaries at a cut ({funds}k)"
         ),
+        E::CallingEarned { name, calling } => format!(
+            "{stamp} the deed runs deep enough to be a NAME: {name} is called {calling}"
+        ),
+        E::InquisitionCalled { fine } => format!(
+            "{stamp} the council stops whispering: the INQUISITION arrives — {fine}k in fines and a colder ledger"
+        ),
         E::RelicFound { name } => {
             format!("{stamp} in the rubble, something old and holy: {name}")
         }

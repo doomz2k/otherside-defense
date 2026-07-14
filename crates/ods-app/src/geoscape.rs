@@ -738,7 +738,16 @@ impl Core {
                                     }
                                     ui.label(format!("{}{tag}", s.name)).on_hover_text(hover);
                                 }
-                                ui.label(s.rank());
+                                {
+                                    let rank = ui.label(s.rank());
+                                    if let Some(calling) = ods_geo::calling_from(&s.deeds) {
+                                        rank.on_hover_text(format!(
+                                            "called {} — {}",
+                                            calling.name(),
+                                            calling.blurb()
+                                        ));
+                                    }
+                                }
                                 ui.label(s.quirk.map_or("–", |q| q.name()));
                                 {
                                     let tag = ods_geo::SQUAD_NAMES[s.squad as usize];
@@ -1272,6 +1281,41 @@ impl Core {
                                  blessed magazines on launch",
                             );
                         });
+                        if let Some(calling) =
+                            ods_geo::calling_from(&c.soldiers[si].deeds)
+                        {
+                            ui.label(
+                                egui::RichText::new(format!("☩ {}", calling.name()))
+                                    .color(egui::Color32::from_rgb(230, 200, 120)),
+                            )
+                            .on_hover_text(calling.blurb());
+                        }
+                        if c.soldiers[si].confessor {
+                            ui.label(
+                                egui::RichText::new("🕯 Confessor")
+                                    .color(egui::Color32::from_rgb(190, 160, 230)),
+                            )
+                            .on_hover_text(
+                                "anointed under the Rites: Steady and Dread in the field, \
+                                 and the channel burns its keeper",
+                            );
+                        } else if c.research.is_complete(ods_geo::Project::RitesOfConfession)
+                            && ui
+                                .small_button("Anoint Confessor")
+                                .on_hover_text(
+                                    "requires a Sanctum at their house and a whole mind \
+                                     (sanity 60+)",
+                                )
+                                .clicked()
+                        {
+                            match c.anoint_confessor(si) {
+                                Ok(()) => self.log.push(format!(
+                                    "{} kneels in the Sanctum and rises a Confessor.",
+                                    c.soldiers[si].name
+                                )),
+                                Err(e) => self.log.push(format!("cannot anoint: {e:?}")),
+                            }
+                        }
                         ui.separator();
                         paper_doll(ui, c, si, &mut self.log);
                     });
@@ -1914,6 +1958,67 @@ fn chapterhouse_panel(
                             .on_hover_text(item_lore(item.name()));
                     });
                 }
+    ui.add_space(6.0);
+    ui.heading("The Shadow Broker");
+    let heresy_color = match c.heresy {
+        0..=9 => egui::Color32::GRAY,
+        10..=24 => egui::Color32::from_rgb(230, 180, 70),
+        _ => egui::Color32::from_rgb(220, 60, 60),
+    };
+    ui.colored_label(heresy_color, format!("Heresy: {} — the council reads its ledger", c.heresy))
+        .on_hover_text(
+            "grafts, dark bargains, and prisoners fed to the Codex all leave marks. \
+             Each ten marks tithes 5% of funding (to 20%); past twenty-five the \
+             Inquisition arrives. One mark of penance clears each month.",
+        );
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(c.brimstone >= 10, egui::Button::new("Sell 10 🜏 (dark)"))
+            .on_hover_text("half again the reliquary price; +2 heresy")
+            .clicked()
+        {
+            match c.dark_sell_brimstone(10) {
+                Ok(gained) => log.push(format!(
+                    "Ten crates leave by the night road. +{gained}k, and a mark in a ledger."
+                )),
+                Err(e) => log.push(format!("no deal: {e:?}")),
+            }
+        }
+        if ui
+            .add_enabled(c.prisoners.grunts > 0, egui::Button::new("Sell a bound grunt (60k)"))
+            .on_hover_text("alive, to people who should not have one; +3 heresy")
+            .clicked()
+        {
+            match c.dark_sell_prisoner(false) {
+                Ok(_) => log.push("A crate that scratches leaves by the night road.".into()),
+                Err(e) => log.push(format!("no deal: {e:?}")),
+            }
+        }
+        if ui
+            .add_enabled(
+                c.prisoners.overseers > 0,
+                egui::Button::new("Sell a bound overseer (140k)"),
+            )
+            .on_hover_text("it will remember every face it saw; +3 heresy")
+            .clicked()
+        {
+            match c.dark_sell_prisoner(true) {
+                Ok(_) => log.push("A crate that whispers leaves by the night road.".into()),
+                Err(e) => log.push(format!("no deal: {e:?}")),
+            }
+        }
+        if ui
+            .add_enabled(!c.relic_pool.is_empty(), egui::Button::new("Sell a relic (120k)"))
+            .on_hover_text("something old and holy, gone quietly abroad; +2 heresy")
+            .clicked()
+        {
+            match c.dark_sell_relic() {
+                Ok(_) => log.push("A reliquary case leaves by the night road.".into()),
+                Err(e) => log.push(format!("no deal: {e:?}")),
+            }
+        }
+    });
+
     // Anything that changed the halls redraws the diorama.
     if before.0 != *selected_base || before.1 != snapshot(c, *selected_base) {
         *base_dirty = true;

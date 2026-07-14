@@ -24,13 +24,16 @@ pub enum Project {
     /// Stitching what hell is made of onto what we are: prosthetics from
     /// hellsteel, grafts from captured flesh. The price is paid in sleep.
     FleshGrafting,
+    /// What the Overseer whispered under the salt: how a mortal mind can
+    /// push back. Opens the Confessor anointing (Sanctum required).
+    RitesOfConfession,
     /// Armored gondolas and blessing-etched envelopes: sorties fight
     /// through gargoyle sky-hunts instead of bleeding for them.
     EscortGondola,
 }
 
 impl Project {
-    pub const ALL: [Project; 9] = [
+    pub const ALL: [Project; 10] = [
         Project::BlessedArms,
         Project::HellsteelPlate,
         Project::RiftAugury,
@@ -39,6 +42,7 @@ impl Project {
         Project::HeraldsConfession,
         Project::NameOfTheEnemy,
         Project::FleshGrafting,
+        Project::RitesOfConfession,
         Project::EscortGondola,
     ];
 
@@ -53,6 +57,7 @@ impl Project {
             Project::HeraldsConfession => 150,
             Project::NameOfTheEnemy => 250,
             Project::FleshGrafting => 140,
+            Project::RitesOfConfession => 160,
             Project::EscortGondola => 120,
         }
     }
@@ -73,6 +78,7 @@ impl Project {
         match self {
             Project::Interrogation => (1, 0),
             Project::HeraldsConfession => (0, 1),
+            Project::RitesOfConfession => (0, 1),
             Project::NameOfTheEnemy => (0, 2),
             Project::FleshGrafting => (1, 0),
         _ => (0, 0),
@@ -86,6 +92,7 @@ impl Project {
             Project::HeraldsConfession => Some(Project::Interrogation),
             Project::NameOfTheEnemy => Some(Project::HeraldsConfession),
             Project::FleshGrafting => Some(Project::Interrogation),
+            Project::RitesOfConfession => Some(Project::Interrogation),
             _ => None,
         }
     }
@@ -100,6 +107,7 @@ impl Project {
             Project::HeraldsConfession => "The Herald's Confession",
             Project::NameOfTheEnemy => "The Name of the Enemy",
             Project::FleshGrafting => "Flesh Grafting",
+            Project::RitesOfConfession => "Rites of Confession",
             Project::EscortGondola => "Escort Gondola",
         }
     }

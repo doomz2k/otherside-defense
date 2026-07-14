@@ -79,6 +79,77 @@ pub struct Prisoners {
     pub overseers: u32,
 }
 
+/// A soldier's lifetime of recorded deeds: biography is the build, and
+/// past enough of it, biography is a NAME.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Deeds {
+    pub shots_hit: u32,
+    pub blade_hits: u32,
+    pub throws_true: u32,
+    pub reaction_shots: u32,
+    pub tiles_moved: u32,
+    pub dread_survived: u32,
+}
+
+/// Callings: titles earned by doing, each carrying a small edge in the
+/// field. A soldier bears one — whichever deed runs deepest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Calling {
+    /// 40 shots told: +3 firing accuracy.
+    Deadeye,
+    /// 15 blades landed: +5 melee accuracy.
+    Bladesworn,
+    /// 12 true throws: +5 throwing accuracy.
+    Grenadier,
+    /// 15 reaction shots: +5 reactions.
+    Sentinel,
+    /// 400 tiles walked under fire: +5 stamina.
+    Pathfinder,
+    /// Broke five times and came back five times: +10 bravery.
+    Unbroken,
+}
+
+impl Calling {
+    pub fn name(self) -> &'static str {
+        match self {
+            Calling::Deadeye => "Deadeye",
+            Calling::Bladesworn => "Bladesworn",
+            Calling::Grenadier => "Grenadier",
+            Calling::Sentinel => "Sentinel",
+            Calling::Pathfinder => "Pathfinder",
+            Calling::Unbroken => "Unbroken",
+        }
+    }
+
+    pub fn blurb(self) -> &'static str {
+        match self {
+            Calling::Deadeye => "forty shots told: +3 firing accuracy",
+            Calling::Bladesworn => "fifteen blades landed: +5 melee accuracy",
+            Calling::Grenadier => "twelve true throws: +5 throwing accuracy",
+            Calling::Sentinel => "fifteen shots answered: +5 reactions",
+            Calling::Pathfinder => "four hundred tiles under fire: +5 stamina",
+            Calling::Unbroken => "broke five times, came back five: +10 bravery",
+        }
+    }
+}
+
+/// The deed that runs deepest, measured against its own threshold.
+pub fn calling_from(d: &Deeds) -> Option<Calling> {
+    let scored = [
+        (Calling::Deadeye, d.shots_hit * 100 / 40),
+        (Calling::Bladesworn, d.blade_hits * 100 / 15),
+        (Calling::Grenadier, d.throws_true * 100 / 12),
+        (Calling::Sentinel, d.reaction_shots * 100 / 15),
+        (Calling::Pathfinder, d.tiles_moved * 100 / 400),
+        (Calling::Unbroken, d.dread_survived * 100 / 5),
+    ];
+    scored
+        .into_iter()
+        .filter(|&(_, pct)| pct >= 100)
+        .max_by_key(|&(_, pct)| pct)
+        .map(|(c, _)| c)
+}
+
 /// Born tendencies: every recruit is somebody.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Quirk {
@@ -331,6 +402,12 @@ pub struct Soldier {
     /// Sidearm blade / warded circlet, drawn from the armoury stocks.
     #[serde(default)]
     pub has_blade: bool,
+    /// Anointed under the Rites of Confession: a mortal psi talent.
+    #[serde(default)]
+    pub confessor: bool,
+    /// The lifetime ledger the callings are read from.
+    #[serde(default)]
+    pub deeds: Deeds,
     #[serde(default)]
     pub has_circlet: bool,
     /// Fitted armor tier.
@@ -472,6 +549,10 @@ pub enum GeoEvent {
     SalvageLooted { brimstone: u32, hellsteel: u32 },
     /// The vaults ran over; the surplus went to the reliquaries at a cut.
     StoresOverflow { brimstone: u32, hellsteel: u32, funds: i64 },
+    /// A deed run deep enough became a name the roster will use.
+    CallingEarned { name: String, calling: &'static str },
+    /// The council stopped whispering: a fine, and a colder ledger.
+    InquisitionCalled { fine: i64 },
     /// A Prince walked off the field alive. It has a name now.
     NemesisRises { name: String },
     /// It slipped the squads again, and grew by it.
@@ -891,6 +972,11 @@ pub struct Campaign {
     pending_events: Vec<GeoEvent>,
     /// Rises with every banishment; at 5+, hell schedules a Reckoning.
     reckoning_heat: u32,
+    /// The council's ledger of what the Order does with hell's leavings:
+    /// grafts, dark bargains, prisoners fed to the codex. It buys power
+    /// now; it is answered for later.
+    #[serde(default)]
+    pub heresy: u32,
     reckoning_day: Option<u32>,
     month_plan: Vec<PlannedRift>,
     region_score: HashMap<Region, i64>,
@@ -965,6 +1051,7 @@ impl Campaign {
             bad_months: 0,
             over: None,
             reckoning_heat: 0,
+            heresy: 0,
             reckoning_day: None,
             month_plan: director::plan_month(&mut rng, 1, difficulty.plan_bonus()),
             region_score: HashMap::new(),
@@ -1090,6 +1177,8 @@ impl Campaign {
             phobia: None,
             weapon_key: default_weapon_key(),
             has_blade: false,
+            confessor: false,
+            deeds: Deeds::default(),
             has_circlet: false,
             armor: ArmorTier::Vestments,
             relic: None,
@@ -1253,6 +1342,26 @@ impl Campaign {
         Ok((facility, refund))
     }
 
+    /// Anoint a soldier under the Rites of Confession: a mortal psi
+    /// talent, trained in the Sanctum of their own house. The mind must
+    /// be whole to hold the channel.
+    pub fn anoint_confessor(&mut self, soldier: usize) -> Result<(), GeoError> {
+        self.guard_over()?;
+        if !self.research.is_complete(Project::RitesOfConfession) {
+            return Err(GeoError::PrerequisiteMissing);
+        }
+        let s = self.soldiers.get(soldier).ok_or(GeoError::BadAssignment)?;
+        if s.confessor || s.sanity < 60 {
+            return Err(GeoError::BadAssignment);
+        }
+        let home = s.home.min(self.bases.len() - 1);
+        if self.bases[home].count_active(Facility::Sanctum) == 0 {
+            return Err(GeoError::PrerequisiteMissing);
+        }
+        self.soldiers[soldier].confessor = true;
+        Ok(())
+    }
+
     /// Repost a scholar or smith from one house to another.
     pub fn move_staff(&mut self, from: usize, to: usize, artificer: bool) -> Result<(), GeoError> {
         self.guard_over()?;
@@ -1377,7 +1486,11 @@ impl Campaign {
             ManufactureItem::TradeArms => self.funds += 45,
             ManufactureItem::ForgeLance => self.lance_stock += 1,
             ManufactureItem::HellsteelLimb => self.limb_stock += 1,
-            ManufactureItem::FleshGraft => self.graft_stock += 1,
+            ManufactureItem::FleshGraft => {
+                self.graft_stock += 1;
+                // Stitching hell onto men. The council will hear of it.
+                self.heresy += 3;
+            }
             ManufactureItem::MountTrophy => self.trophies += 1,
             ManufactureItem::ForgeArbalest => {
                 *self.weapon_stock.entry("arbalest".into()).or_insert(0) += 1
@@ -1423,8 +1536,54 @@ impl Campaign {
         self.hellsteel -= steel;
         self.prisoners.grunts -= grunts;
         self.prisoners.overseers -= overseers;
+        // Every bound demon fed to the codex is a question the council
+        // would rather not know was asked.
+        self.heresy += 2 * (grunts + overseers);
         self.research.active = Some((project, project.cost()));
         Ok(())
+    }
+
+    /// The shadow broker pays half again the reliquary price, asks no
+    /// questions, and writes everything down anyway.
+    pub fn dark_sell_brimstone(&mut self, amount: u32) -> Result<i64, GeoError> {
+        self.guard_over()?;
+        if self.brimstone < amount || amount == 0 {
+            return Err(GeoError::NoMaterials);
+        }
+        self.brimstone -= amount;
+        let gained = amount as i64 * self.brim_price * 3 / 2;
+        self.funds += gained;
+        self.heresy += 2;
+        Ok(gained)
+    }
+
+    /// A bound demon, sold alive to people who should not have one.
+    pub fn dark_sell_prisoner(&mut self, overseer: bool) -> Result<i64, GeoError> {
+        self.guard_over()?;
+        let (pool, price) = if overseer {
+            (&mut self.prisoners.overseers, 140)
+        } else {
+            (&mut self.prisoners.grunts, 60)
+        };
+        if *pool == 0 {
+            return Err(GeoError::NoPrisoners);
+        }
+        *pool -= 1;
+        self.funds += price;
+        self.heresy += 3;
+        Ok(price)
+    }
+
+    /// A named relic, gone quietly abroad.
+    pub fn dark_sell_relic(&mut self) -> Result<i64, GeoError> {
+        self.guard_over()?;
+        if self.relic_pool.is_empty() {
+            return Err(GeoError::NoMaterials);
+        }
+        self.relic_pool.remove(0);
+        self.funds += 120;
+        self.heresy += 2;
+        Ok(120)
     }
 
     /// Sell salvage to national reliquaries at this month's prices.
@@ -2494,6 +2653,23 @@ impl Campaign {
             };
             s.missions += 1;
             s.kills += xp.kills;
+            // The lifetime ledger, and — past enough of it — a NAME.
+            let before = calling_from(&s.deeds);
+            s.deeds.shots_hit += xp.shots_hit;
+            s.deeds.blade_hits += xp.blade_hits;
+            s.deeds.throws_true += xp.throws_true;
+            s.deeds.reaction_shots += xp.reaction_shots;
+            s.deeds.tiles_moved += xp.tiles_moved;
+            s.deeds.dread_survived += xp.dread_survived;
+            let after = calling_from(&s.deeds);
+            if after != before && let Some(c) = after {
+                let name = s.name.clone();
+                self.pending_events.push(GeoEvent::CallingEarned {
+                    name,
+                    calling: c.name(),
+                });
+            }
+            let s = &mut self.soldiers[squad_idx[squad_pos]];
             apply_growth(&mut s.stats, xp);
         }
         // Horror outlives the battle: sanity bleeds, and a mind pushed too
@@ -3109,10 +3285,23 @@ impl Campaign {
                 *funding -= *funding / 10;
             }
         }
-        let income: i64 = Region::ALL
+        let mut income: i64 = Region::ALL
             .iter()
             .map(|r| self.region_funding[r])
             .sum();
+        // The council reads its ledger. Whispers cost a tithe of funding
+        // (5% per ten marks, to 20%); past twenty-five marks it stops
+        // whispering and sends the Inquisition: a fine, a public penance,
+        // and a colder book to start the next month on.
+        if self.heresy >= 25 {
+            let fine = 150.min(self.funds.max(0));
+            self.funds -= fine;
+            self.heresy -= 10;
+            self.pending_events.push(GeoEvent::InquisitionCalled { fine });
+        }
+        let tithe_pct = ((self.heresy / 10) as i64 * 5).min(20);
+        income -= income * tithe_pct / 100;
+        self.heresy = self.heresy.saturating_sub(1); // penance, slowly
         let expenses = self.soldiers.len() as i64 * SOLDIER_SALARY
             + self.occultist_count() as i64 * OCCULTIST_SALARY
             + self.artificer_count() as i64 * ARTIFICER_SALARY
@@ -4412,6 +4601,79 @@ mod tests {
         c.take_salvage(&["blade".to_string(), "arbalest".to_string(), "rifle".to_string()]);
         assert_eq!(c.blade_stock, blades + 1);
         assert_eq!(c.weapon_stock.get("arbalest").copied().unwrap_or(0), arbs + 1);
+    }
+
+    #[test]
+    fn deeds_become_callings_and_callings_become_edges() {
+        let mut d = Deeds::default();
+        assert_eq!(calling_from(&d), None, "nobody is named for nothing");
+        d.shots_hit = 40;
+        assert_eq!(calling_from(&d), Some(Calling::Deadeye));
+        // A deeper deed takes the name over.
+        d.blade_hits = 45;
+        assert_eq!(calling_from(&d), Some(Calling::Bladesworn));
+    }
+
+    #[test]
+    fn the_ledger_fills_and_the_inquisition_answers() {
+        let mut c = Campaign::new(58);
+        c.month_plan.clear();
+        c.rifts.clear();
+        // Dark bargains: better prices, and every one written down.
+        c.brimstone = 100;
+        let funds = c.funds;
+        let fair = c.brim_price * 10;
+        let dark = c.dark_sell_brimstone(10).unwrap();
+        assert!(dark > fair, "the broker pays half again: {dark} vs {fair}");
+        assert_eq!(c.funds, funds + dark);
+        assert_eq!(c.heresy, 2);
+        c.prisoners.grunts = 1;
+        c.dark_sell_prisoner(false).unwrap();
+        assert_eq!(c.heresy, 5);
+        assert_eq!(c.prisoners.grunts, 0);
+
+        // Past twenty-five marks the council stops whispering.
+        c.heresy = 26;
+        let funds = c.funds;
+        let mut seen_inquisition = false;
+        for _ in 0..35 {
+            for e in c.advance_day() {
+                if let GeoEvent::InquisitionCalled { fine } = e {
+                    assert!(fine > 0);
+                    seen_inquisition = true;
+                }
+            }
+            if seen_inquisition {
+                break;
+            }
+        }
+        assert!(seen_inquisition, "the Inquisition arrives at month's end");
+        assert!(c.funds < funds + 1000, "and the fine is real");
+        assert!(c.heresy < 26, "penance counts for something");
+    }
+
+    #[test]
+    fn confessors_are_anointed_not_hired() {
+        let mut c = Campaign::new(59);
+        c.month_plan.clear();
+        c.rifts.clear();
+        // No rites known yet.
+        assert_eq!(c.anoint_confessor(0), Err(GeoError::PrerequisiteMissing));
+        c.research.completed.insert(Project::RitesOfConfession);
+        // Rites known, but no Sanctum at the soldier's house.
+        assert_eq!(c.anoint_confessor(0), Err(GeoError::PrerequisiteMissing));
+        c.bases[0].start_build(Facility::Sanctum, 1, 2);
+        for _ in 0..Facility::Sanctum.build_days() {
+            c.advance_day();
+        }
+        // A cracked mind cannot hold the channel.
+        c.soldiers[0].sanity = 40;
+        assert_eq!(c.anoint_confessor(0), Err(GeoError::BadAssignment));
+        c.soldiers[0].sanity = 90;
+        c.anoint_confessor(0).unwrap();
+        assert!(c.soldiers[0].confessor);
+        // Not twice.
+        assert_eq!(c.anoint_confessor(0), Err(GeoError::BadAssignment));
     }
 
     #[test]
