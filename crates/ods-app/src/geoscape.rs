@@ -2543,6 +2543,11 @@ fn chapterhouse_panel(
                         ui.label(format!("✓ {}", project.name()));
                         continue;
                     }
+                    // What the Order can't reach yet, it can't see: locked
+                    // chains and capture-gated studies stay off the docket.
+                    if !project.unlocked(&c.research, &c.codex_captured) {
+                        continue;
+                    }
                     let (brim, steel) = project.materials();
                     let (grunts, overseers) = project.prisoners();
                     let mut needs = String::new();
@@ -2603,6 +2608,14 @@ fn chapterhouse_panel(
                     }
                 }
                 for item in ManufactureItem::ALL {
+                    // Unresearched patterns don't exist as far as the
+                    // benches know.
+                    if item
+                        .required_research()
+                        .is_some_and(|p| !c.research.is_complete(p))
+                    {
+                        continue;
+                    }
                     let (brim, steel) = item.materials();
                     ui.horizontal(|ui| {
                         if ui.button("Make").clicked()

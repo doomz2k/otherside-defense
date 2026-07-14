@@ -1552,13 +1552,8 @@ impl Campaign {
         if self.bases[base].workshop_capacity() == 0 {
             return Err(GeoError::NoWorkshop);
         }
-        if item == ManufactureItem::ForgeLance
-            && !self.research.is_complete(Project::HellfireLance)
-        {
-            return Err(GeoError::PrerequisiteMissing);
-        }
-        if matches!(item, ManufactureItem::HellsteelLimb | ManufactureItem::FleshGraft)
-            && !self.research.is_complete(Project::FleshGrafting)
+        if let Some(prereq) = item.required_research()
+            && !self.research.is_complete(prereq)
         {
             return Err(GeoError::PrerequisiteMissing);
         }
@@ -1571,21 +1566,6 @@ impl Campaign {
         }
         if item == ManufactureItem::MountTrophy && self.codex_slain.is_empty() {
             return Err(GeoError::NoMaterials);
-        }
-        if matches!(item, ManufactureItem::ForgeCenser | ManufactureItem::ForgeMortar)
-            && !self.research.is_complete(Project::BlessedArms)
-        {
-            return Err(GeoError::PrerequisiteMissing);
-        }
-        if item == ManufactureItem::ForgeCirclet
-            && !self.research.is_complete(Project::Interrogation)
-        {
-            return Err(GeoError::PrerequisiteMissing);
-        }
-        if matches!(item, ManufactureItem::ForgePlate | ManufactureItem::ForgeAegis)
-            && !self.research.is_complete(Project::HellsteelPlate)
-        {
-            return Err(GeoError::PrerequisiteMissing);
         }
         if item == ManufactureItem::ForgeAegis
             && !self.codex_slain.contains(&ods_sim::units::Species::Behemoth)
@@ -1660,14 +1640,7 @@ impl Campaign {
         if self.research.active.is_some() {
             return Err(GeoError::ResearchBusy);
         }
-        if let Some(prereq) = project.prerequisite()
-            && !self.research.is_complete(prereq)
-        {
-            return Err(GeoError::PrerequisiteMissing);
-        }
-        if let Some(breed) = project.requires_capture()
-            && !self.codex_captured.contains(&breed)
-        {
+        if !project.unlocked(&self.research, &self.codex_captured) {
             return Err(GeoError::PrerequisiteMissing);
         }
         let (brim, steel) = project.materials();

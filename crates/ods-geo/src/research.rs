@@ -111,6 +111,26 @@ impl Project {
         }
     }
 
+    /// May the Order even see this on the docket yet? Prerequisite
+    /// chains and required captures hide what it has no way to know.
+    pub fn unlocked(
+        self,
+        research: &ResearchState,
+        captured: &std::collections::HashSet<ods_sim::units::Species>,
+    ) -> bool {
+        if let Some(p) = self.prerequisite()
+            && !research.is_complete(p)
+        {
+            return false;
+        }
+        if let Some(b) = self.requires_capture()
+            && !captured.contains(&b)
+        {
+            return false;
+        }
+        true
+    }
+
     /// Must be complete before this project can start.
     pub fn prerequisite(self) -> Option<Project> {
         match self {
@@ -220,6 +240,25 @@ pub enum ManufactureItem {
 }
 
 impl ManufactureItem {
+    /// The research this item waits on — the ONE table both the forge's
+    /// gate and the workshop list consult, so they can never disagree.
+    pub fn required_research(self) -> Option<Project> {
+        match self {
+            ManufactureItem::ForgeLance => Some(Project::HellfireLance),
+            ManufactureItem::HellsteelLimb | ManufactureItem::FleshGraft => {
+                Some(Project::FleshGrafting)
+            }
+            ManufactureItem::ForgeCenser | ManufactureItem::ForgeMortar => {
+                Some(Project::BlessedArms)
+            }
+            ManufactureItem::ForgeCirclet => Some(Project::Interrogation),
+            ManufactureItem::ForgePlate | ManufactureItem::ForgeAegis => {
+                Some(Project::HellsteelPlate)
+            }
+            _ => None,
+        }
+    }
+
     pub const ALL: [ManufactureItem; 18] = [
         ManufactureItem::HellfireCharges,
         ManufactureItem::FieldDressings,
