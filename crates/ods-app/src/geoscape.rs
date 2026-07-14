@@ -1270,25 +1270,7 @@ impl Core {
                         ui.separator();
                         stat_bars(ui, &c.soldiers[si]);
                         ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label("Magazines");
-                            if ui.small_button("-").clicked() && c.soldiers[si].mags_loadout > 0 {
-                                c.soldiers[si].mags_loadout -= 1;
-                            }
-                            ui.label(c.soldiers[si].mags_loadout.to_string());
-                            if ui.small_button("+").clicked() && c.soldiers[si].mags_loadout < 4 {
-                                c.soldiers[si].mags_loadout += 1;
-                            }
-                            ui.label(
-                                egui::RichText::new(format!("({} in stores)", c.quarrel_stock))
-                                    .weak()
-                                    .small(),
-                            )
-                            .on_hover_text(
-                                "spares carried into battle; drawn from the armoury's \
-                                 blessed magazines on launch",
-                            );
-                        });
+                        inventory_grid(ui, c, si);
                         ui.horizontal(|ui| {
                             use ods_sim::units::MagKind;
                             ui.label("Pressed with");
@@ -2151,6 +2133,141 @@ fn stat_bars(ui: &mut egui::Ui, s: &ods_geo::Soldier) {
             }
         });
     }
+}
+
+/// One cell of the kit grid: an item where it rides, or an empty slot.
+fn kit_cell(ui: &mut egui::Ui, icon: &str, hover: &str, in_pack: bool) {
+    let text = if icon.is_empty() {
+        egui::RichText::new("·").weak()
+    } else if in_pack {
+        egui::RichText::new(icon).size(15.0).weak()
+    } else {
+        egui::RichText::new(icon).size(15.0)
+    };
+    let cell = ui.add_sized([30.0, 28.0], egui::Button::new(text));
+    if !hover.is_empty() {
+        cell.on_hover_text(hover);
+    }
+}
+
+/// The kit, laid out the old way: hands, belt, pack. The belt's three
+/// slots are the first three consumable uses at the plain price; below
+/// them, everything else rides in the pack at +6 TU a fetch. Strength
+/// carries the weight — overload it and the hands slow.
+fn inventory_grid(ui: &mut egui::Ui, c: &mut Campaign, si: usize) {
+    let s = &c.soldiers[si];
+
+    // Hands: what the paper doll below actually assigns.
+    ui.label(egui::RichText::new("HANDS").weak().small());
+    ui.horizontal(|ui| {
+        let main = if s.has_lance {
+            "hellfire lance".to_string()
+        } else {
+            s.weapon_key.replace('_', " ")
+        };
+        ui.add_sized([132.0, 30.0], egui::Button::new(format!("⚔ {main}")))
+            .on_hover_text("the issued weapon — cycle it in the paper doll below");
+        let off = if s.has_blade { "consecrated blade" } else { "—" };
+        ui.add_sized([132.0, 30.0], egui::Button::new(format!("🗡 {off}")))
+            .on_hover_text("the sidearm at the hip — toggled below, drawn with [I] in the field");
+    });
+
+    // The consumables, in carry order: what the hands find first.
+    let mut items: Vec<(&str, String)> = Vec::new();
+    for _ in 0..s.grenades_loadout {
+        items.push(("🧨", "hellfire charge".to_string()));
+    }
+    for _ in 0..s.dressings_loadout {
+        items.push(("✚", "field dressing".to_string()));
+    }
+    for _ in 0..s.mags_loadout {
+        items.push(("▤", format!("{} magazine", s.mag_pref.name())));
+    }
+    items.push(("✦", "witchfire flare (standard issue)".to_string()));
+    items.push(("✦", "witchfire flare (standard issue)".to_string()));
+
+    ui.label(
+        egui::RichText::new("BELT — the three at hand, plain price").weak().small(),
+    );
+    ui.horizontal(|ui| {
+        for slot in 0..3 {
+            match items.get(slot) {
+                Some((icon, name)) => kit_cell(ui, icon, name, false),
+                None => kit_cell(ui, "", "an empty belt loop", false),
+            }
+        }
+    });
+
+    ui.label(egui::RichText::new("PACK — +6 TU a fetch").weak().small());
+    let rest = if items.len() > 3 { &items[3..] } else { &[] };
+    let rows = (rest.len() + 4) / 4; // at least one row of empties
+    for row in 0..rows.max(1) {
+        ui.horizontal(|ui| {
+            for col in 0..4 {
+                match rest.get(row * 4 + col) {
+                    Some((icon, name)) => {
+                        kit_cell(ui, icon, &format!("{name} — fetched at +6 TU"), true)
+                    }
+                    None => kit_cell(ui, "", "empty pack space", true),
+                }
+            }
+        });
+    }
+    ui.label(
+        egui::RichText::new("webbing: 1 smoke, 1 ward kit — always at hand")
+            .weak()
+            .small(),
+    );
+
+    // The back decides where "over" begins.
+    let load = s.grenades_loadout + s.dressings_loadout + s.mags_loadout / 2;
+    let capacity = 2 + s.stats.strength as u32 / 8;
+    let mule = s.quirk == Some(ods_geo::Quirk::PackMule);
+    let line = format!(
+        "Load {load} / {capacity}{}",
+        if load > capacity && mule {
+            " — over, but born to haul"
+        } else if load > capacity {
+            " — OVER: the hands slow (−4 TU)"
+        } else {
+            ""
+        }
+    );
+    ui.label(if load > capacity && !mule {
+        egui::RichText::new(line).color(egui::Color32::from_rgb(230, 120, 70))
+    } else {
+        egui::RichText::new(line).weak()
+    })
+    .on_hover_text(
+        "capacity is 2 + Strength/8; charges and dressings weigh one \
+         apiece, two magazines ride as one",
+    );
+
+    // The quartermaster's counters.
+    ui.horizontal(|ui| {
+        let s = &mut c.soldiers[si];
+        for (icon, count, max, stock, hover) in [
+            (
+                "🧨",
+                &mut s.grenades_loadout,
+                4u32,
+                c.grenade_stock,
+                "hellfire charges",
+            ),
+            ("✚", &mut s.dressings_loadout, 4, c.dressing_stock, "field dressings"),
+            ("▤", &mut s.mags_loadout, 4, c.quarrel_stock, "spare magazines"),
+        ] {
+            if ui.small_button("−").clicked() && *count > 0 {
+                *count -= 1;
+            }
+            ui.label(format!("{icon}{count}"))
+                .on_hover_text(format!("{hover} ({stock} in stores)"));
+            if ui.small_button("+").clicked() && *count < max {
+                *count += 1;
+            }
+            ui.add_space(6.0);
+        }
+    });
 }
 
 /// The paper doll: a painted silhouette wearing what the soldier wears,

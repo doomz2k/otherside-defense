@@ -1155,6 +1155,16 @@ impl BattleScreen {
                                     .weak(),
                             );
                         }
+                        if u.side == Side::Order && !u.civilian {
+                            let on = (u.belt.min(3)) as usize;
+                            let pips: String =
+                                "●".repeat(on) + &"○".repeat(3usize.saturating_sub(on));
+                            ui.label(egui::RichText::new(format!("belt {pips}")).small().weak())
+                                .on_hover_text(
+                                    "the three at hand: consumables past the belt are \
+                                     fetched from the pack at +6 TU",
+                                );
+                        }
                         ui.horizontal(|ui| {
                             use crate::icons::{self, Icon};
                             ui.spacing_mut().item_spacing.x = 3.0;
