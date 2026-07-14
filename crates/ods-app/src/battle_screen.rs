@@ -540,326 +540,24 @@ impl BattleScreen {
                         ui.colored_label(egui::Color32::from_rgb(140, 170, 220), "RAIN");
                     }
                 }
-                ui.separator();
-                match self.selected {
-                    Some(id) => {
-                        let u = self.battle.unit(id);
-                        ui.label(format!(
-                            "{} | TU {}/{} | HP {}/{} | sta {}/{} | morale {}{}{}",
-                            u.name,
-                            u.tu,
-                            u.tu_max,
-                            u.health,
-                            u.health_max,
-                            u.stamina,
-                            u.stamina_max,
-                            u.morale,
-                            if u.stamina <= 0 && !u.flies {
-                                " | WINDED"
-                            } else {
-                                ""
-                            },
-                            if u.wounds > 0 {
-                                format!(" | BLEEDING x{}", u.wounds)
-                            } else {
-                                String::new()
-                            }
-                        ));
-                        ui.label(format!("charges {} | dressings {}", u.grenades, u.heal_charges));
-                    }
-                    None => {
-                        ui.label("no soldier selected — click one or press Tab");
-                    }
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Fire:");
-                ui.selectable_value(&mut self.fire_mode, FireMode::Snap, "Snap [1]");
-                ui.selectable_value(&mut self.fire_mode, FireMode::Aimed, "Aimed [2]");
-                ui.selectable_value(&mut self.fire_mode, FireMode::Auto, "Auto [3]");
-                ui.separator();
-                let charge = ui.selectable_label(self.grenade_armed, "🧨 Charge [G]");
-                if charge.clicked() {
-                    self.grenade_armed = !self.grenade_armed;
-                }
-                if ui.button("✚ Dress wounds [H]").clicked() {
-                    self.heal_selected(renderer, audio);
-                }
+                // Flags the console bars can't show: wind and blood.
                 if let Some(id) = self.selected {
                     let u = self.battle.unit(id);
-                    if u.weapon.clip > 0
-                        && ui
-                            .button(format!("⟳ Reload [C] ({})", u.mags))
-                            .on_hover_text("12 TU — a fresh magazine for the weapon in hand")
-                            .clicked()
-                    {
-                        let result = self.battle.perform(Action::Reload { unit: id });
-                        self.apply(renderer, audio, result);
+                    if u.stamina <= 0 && !u.flies {
+                        ui.colored_label(egui::Color32::from_rgb(230, 200, 90), "WINDED");
                     }
-                    if let Some(side) = &self.battle.unit(id).sidearm {
-                        let label = format!("⇄ {} [I]", side.name);
-                        if ui
-                            .button(label)
-                            .on_hover_text("6 TU — trade the weapon in hand for the one at the hip")
-                            .clicked()
-                        {
-                            let result = self.battle.perform(Action::SwapWeapon { unit: id });
-                            self.apply(renderer, audio, result);
-                        }
-                    }
-                    // A helpless enemy in arm's reach can simply be ended.
-                    let me = self.battle.unit(id).tile;
-                    let victim = self
-                        .battle
-                        .units
-                        .iter()
-                        .find(|v| {
-                            v.alive
-                                && !v.conscious
-                                && v.side == Side::Demons
-                                && (v.tile - me).abs().max_element() <= 1
-                        })
-                        .map(|v| v.id);
-                    if let Some(target) = victim
-                        && ui
-                            .button("✖ Execute [Z]")
-                            .on_hover_text(
-                                "10 TU — certain, quick, and final; the capture is forfeit",
-                            )
-                            .clicked()
-                    {
-                        let result = self.battle.perform(Action::Execute { unit: id, target });
-                        self.apply(renderer, audio, result);
-                    }
-                    ui.separator();
-                    ui.label(egui::RichText::new("Watch:").weak());
-                    let current = self.battle.unit(id).reserve;
-                    for (label, mode, hint) in [
-                        ("–", None, "spend TUs freely; react with a snap"),
-                        ("Snap", Some(FireMode::Snap), "bank a snap: the cheap trip-wire"),
-                        ("Aim", Some(FireMode::Aimed), "bank an aimed shot: one good answer"),
-                        ("Auto", Some(FireMode::Auto), "bank the whole burst: the storm"),
-                    ] {
-                        if let Some(m) = mode
-                            && self.battle.unit(id).fire_cost(m).is_none()
-                        {
-                            continue;
-                        }
-                        if ui
-                            .selectable_label(current == mode, label)
-                            .on_hover_text(hint)
-                            .clicked()
-                        {
-                            let result =
-                                self.battle.perform(Action::SetReserve { unit: id, mode });
-                            self.apply(renderer, audio, result);
-                        }
-                    }
-                    // The anointed carry two whispers: one for their own,
-                    // one for the enemy. Each burns the mind that channels.
-                    if self.battle.unit(id).psi {
-                        ui.separator();
-                        let me = self.battle.unit(id).tile;
-                        let range = ods_sim::battle::TERRIFY_RANGE_TILES;
-                        let ally = self
-                            .battle
-                            .units
-                            .iter()
-                            .filter(|a| {
-                                a.is_active()
-                                    && a.side == Side::Order
-                                    && !a.civilian
-                                    && a.id != id
-                                    && a.morale < 70
-                                    && (a.tile - me).abs().max_element() <= range
-                            })
-                            .min_by_key(|a| a.morale)
-                            .map(|a| a.id);
-                        if let Some(target) = ally
-                            && ui
-                                .button("🕯 Steady")
-                                .on_hover_text(
-                                    "steady the most shaken ally in reach — the channel \
-                                     burns its keeper (+1 horror)",
-                                )
-                                .clicked()
-                        {
-                            let result =
-                                self.battle.perform(Action::Steady { unit: id, target });
-                            self.apply(renderer, audio, result);
-                        }
-                        let foe = self
-                            .battle
-                            .units
-                            .iter()
-                            .filter(|f| {
-                                f.is_active()
-                                    && f.side == Side::Demons
-                                    && (f.tile - me).abs().max_element() <= range
-                            })
-                            .min_by_key(|f| f.morale + f.bravery / 2)
-                            .map(|f| f.id);
-                        if let Some(target) = foe
-                            && ui
-                                .button("😱 Dread")
-                                .on_hover_text(
-                                    "batter the shakiest demon's mind in reach — the \
-                                     channel burns its keeper (+1 horror)",
-                                )
-                                .clicked()
-                        {
-                            let result =
-                                self.battle.perform(Action::Terrify { unit: id, target });
-                            self.apply(renderer, audio, result);
-                        }
+                    if u.wounds > 0 {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(230, 90, 70),
+                            format!("BLEEDING x{}", u.wounds),
+                        );
                     }
                 }
-                let officer = self.selected.is_some_and(|id| {
-                    let u = self.battle.unit(id);
-                    u.can_rally && !u.rally_spent
-                });
-                if officer
-                    && ui
-                        .button(egui::RichText::new("📣 Rally [Y]").color(egui::Color32::from_rgb(255, 220, 120)))
-                        .on_hover_text("once a battle: +30 morale to everyone within 8 tiles")
-                        .clicked()
-                    && let Some(id) = self.selected
-                {
-                    let result = self.battle.perform(Action::Rally { unit: id });
-                    self.apply(renderer, audio, result);
-                }
-                let rot_near = self.selected.is_some_and(|id| {
-                    let me = self.battle.unit(id).tile;
-                    self.battle.units.iter().any(|u| {
-                        u.alive
-                            && u.side == Side::Order
-                            && u.infected.is_some()
-                            && (u.tile - me).abs().max_element() <= 1
-                    })
-                });
-                if rot_near
-                    && ui
-                        .button(egui::RichText::new("🪚 Amputate [X]").color(egui::Color32::from_rgb(150, 220, 90)))
-                        .on_hover_text("demonic rot festers in a crippled limb: saw it off before it turns them")
-                        .clicked()
-                {
-                    self.amputate_selected(renderer, audio);
-                }
-                if ui.button("🧎 Kneel [K]").clicked()
-                    && let Some(id) = self.selected
-                {
-                    let result = self.battle.perform(Action::Kneel { unit: id });
-                    self.apply(renderer, audio, result);
-                }
-                if ui.button("Next [Tab]").clicked() {
-                    self.select_next_soldier();
-                    self.refresh_scene(renderer);
-                }
-                ui.separator();
-                if ui.button("⏭ End turn [Space]").clicked() {
-                    self.end_turn(renderer, audio);
-                }
-                if self.grenade_armed {
-                    ui.colored_label(egui::Color32::ORANGE, "CHARGE ARMED — click a tile");
-                }
-            });
-            // The intelligence line: what the cursor is worth.
-            ui.horizontal_wrapped(|ui| {
-                match (self.selected, self.hover) {
-                    (Some(id), Some(tile)) => {
-                        if let Some(enemy) = self.battle.unit_at(tile).filter(|&e| {
-                            self.battle.unit(e).side == Side::Demons
-                        }) {
-                            // The shot forecast: the resolver's true odds.
-                            let mut line = format!("Target: {}", self.battle.unit(enemy).name);
-                            let mut seen = true;
-                            let mut breakdown: Option<String> = None;
-                            for (label, mode) in
-                                [("snap", FireMode::Snap), ("aimed", FireMode::Aimed), ("auto", FireMode::Auto)]
-                            {
-                                if let Some(f) = self.battle.forecast_shot(id, enemy, mode) {
-                                    if f.rounds > 1 {
-                                        line.push_str(&format!(
-                                            "  {label} {}%×{} ({}TU)",
-                                            f.chance, f.rounds, f.cost
-                                        ));
-                                    } else {
-                                        line.push_str(&format!(
-                                            "  {label} {}% ({}TU)",
-                                            f.chance, f.cost
-                                        ));
-                                    }
-                                    seen = f.seen;
-                                    if mode == FireMode::Snap {
-                                        line.push_str(&if f.stun {
-                                            format!("  [SALT: stuns ≤{}]", f.power)
-                                        } else {
-                                            format!("  [dmg 0–{}]", f.power * 2)
-                                        });
-                                        // The arithmetic, for whoever asks why.
-                                        breakdown = Some(format!(
-                                            "skill {} × mode {}%{}{} = {}%",
-                                            f.skill,
-                                            f.mode_pct,
-                                            if f.kneeling { " × kneel 115%" } else { "" },
-                                            if f.high_ground > 0 {
-                                                " + high ground 10"
-                                            } else {
-                                                ""
-                                            },
-                                            f.chance
-                                        ));
-                                    }
-                                }
-                            }
-                            if !seen {
-                                line.push_str("  [NO LINE OF SIGHT]");
-                            }
-                            let resp = ui.colored_label(egui::Color32::LIGHT_RED, line);
-                            if let Some(b) = breakdown {
-                                resp.on_hover_text(b);
-                            }
-                        } else if let Some((_, cost)) = &self.hover_path {
-                            let u = self.battle.unit(id);
-                            let ok = *cost <= u.tu;
-                            // A move that eats the banked shot deserves a word.
-                            let breaks_watch = u.reserve.is_some_and(|m| {
-                                u.fire_cost(m).is_some_and(|c| *cost > u.tu - c)
-                            });
-                            ui.colored_label(
-                                if !ok {
-                                    egui::Color32::GRAY
-                                } else if breaks_watch {
-                                    egui::Color32::from_rgb(230, 180, 70)
-                                } else {
-                                    egui::Color32::LIGHT_GREEN
-                                },
-                                format!(
-                                    "Move: {cost} TU of {}{}",
-                                    u.tu,
-                                    if ok && breaks_watch { " — BREAKS YOUR WATCH" } else { "" }
-                                ),
-                            );
-                        }
-                    }
-                    _ => {
-                        ui.weak("hover a tile for move costs; hover a demon for hit odds");
-                    }
-                }
-                ui.separator();
-                ui.weak("[Q]/[E] turn the field  [F] floor cutaway  [T] threat  [M] map  [O] door  [V] smoke  [L] flare  [B] bind  [K] kneel  [X] amputate  [R] ward  [Y] rally");
             });
         });
 
-        // The war-room table map.
-        egui::Window::new("Field map")
-            .anchor(egui::Align2::RIGHT_TOP, [-8.0, 64.0])
-            .collapsible(true)
-            .resizable(false)
-            .show(ctx, |ui| {
-                self.minimap(ui, 6.0, false);
-            });
 
+        // The war-room table map.
         // The tactical map [M]: the whole field at reading size; click a
         // tile and the camera walks there.
         if self.show_map {
@@ -1073,190 +771,7 @@ impl BattleScreen {
 
         // The console: the whole squad at a glance along the very bottom,
         // the way the 1994 strip did it — vitals as bars, click to select.
-        egui::TopBottomPanel::bottom("squad-console").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let ids: Vec<UnitId> = self
-                    .battle
-                    .units
-                    .iter()
-                    .filter(|u| u.side == Side::Order && !u.civilian && u.alive)
-                    .map(|u| u.id)
-                    .collect();
-                let mut select: Option<UnitId> = None;
-                for id in ids {
-                    let u = self.battle.unit(id);
-                    let is_sel = self.selected == Some(id);
-                    let card = egui::Frame::new()
-                        .fill(if is_sel {
-                            egui::Color32::from_rgb(48, 40, 20)
-                        } else {
-                            egui::Color32::from_rgb(22, 18, 16)
-                        })
-                        .stroke(egui::Stroke::new(
-                            1.0,
-                            if is_sel {
-                                egui::Color32::from_rgb(230, 190, 90)
-                            } else {
-                                egui::Color32::from_gray(70)
-                            },
-                        ))
-                        .inner_margin(egui::Margin::symmetric(6, 3));
-                    let resp = card
-                        .show(ui, |ui| {
-                            ui.set_width(96.0);
-                            ui.spacing_mut().item_spacing.y = 2.0;
-                            let short =
-                                u.name.split_whitespace().last().unwrap_or(&u.name);
-                            ui.horizontal(|ui| {
-                                use crate::icons::{self, Icon};
-                                ui.spacing_mut().item_spacing.x = 2.0;
-                                crate::portraits::draw(
-                                    ui,
-                                    crate::portraits::seed_of(&u.name),
-                                    16.0,
-                                    u.injuries.len() + u.severed.len(),
-                                );
-                                ui.label(egui::RichText::new(short).small());
-                                if u.kneeling {
-                                    icons::draw(ui, Icon::Kneel, 11.0).on_hover_text("kneeling");
-                                }
-                                if u.wounds > 0 {
-                                    icons::draw(ui, Icon::Blood, 11.0).on_hover_text("bleeding");
-                                }
-                                if u.possessed > 0 {
-                                    icons::draw(ui, Icon::Eye, 11.0).on_hover_text("mind seized");
-                                }
-                                if !u.conscious {
-                                    icons::draw(ui, Icon::Down, 11.0).on_hover_text("down");
-                                }
-                                if u.is_active()
-                                    && u.fire_cost(FireMode::Snap)
-                                        .is_none_or(|c| u.tu < c)
-                                {
-                                    ui.label(egui::RichText::new("✔").weak().small())
-                                        .on_hover_text("spent: no shot left this turn");
-                                }
-                            });
-                            mini_bar(
-                                ui,
-                                u.health as f32 / u.health_max.max(1) as f32,
-                                egui::Color32::from_rgb(190, 60, 50),
-                            );
-                            mini_bar(
-                                ui,
-                                u.tu as f32 / u.tu_max.max(1) as f32,
-                                egui::Color32::from_rgb(200, 170, 60),
-                            );
-                            mini_bar(
-                                ui,
-                                u.stamina as f32 / u.stamina_max.max(1) as f32,
-                                egui::Color32::from_rgb(210, 205, 120),
-                            );
-                            mini_bar(
-                                ui,
-                                u.morale as f32 / 100.0,
-                                egui::Color32::from_rgb(150, 90, 200),
-                            );
-                        })
-                        .response;
-                    if resp.interact(egui::Sense::click()).clicked() {
-                        select = Some(id);
-                    }
-                }
-                if let Some(id) = select {
-                    self.selected = Some(id);
-                    self.refresh_scene(renderer);
-                }
-                ui.separator();
-                // The selected soldier's weapon plate.
-                if let Some(id) = self.selected {
-                    let u = self.battle.unit(id);
-                    ui.vertical(|ui| {
-                        ui.label(
-                            egui::RichText::new(u.weapon.name)
-                                .strong()
-                                .color(egui::Color32::from_rgb(220, 200, 150)),
-                        );
-                        let mut plate = String::new();
-                        for (label, mode) in [
-                            ("snap", FireMode::Snap),
-                            ("aim", FireMode::Aimed),
-                            ("auto", FireMode::Auto),
-                        ] {
-                            if let (Some(c), Some(t)) = (u.hit_chance(mode), u.fire_cost(mode)) {
-                                plate.push_str(&format!("{label} {c}%/{t}TU  "));
-                            }
-                        }
-                        ui.label(egui::RichText::new(plate).small().weak());
-                        if u.weapon.clip > 0 {
-                            let ammo_line = format!(
-                                "ammo {}/{} · {} mag(s){}",
-                                u.ammo,
-                                u.weapon.clip,
-                                u.mags,
-                                if u.ammo == 0 { " — DRY" } else { "" }
-                            );
-                            ui.label(if u.ammo == 0 {
-                                egui::RichText::new(ammo_line)
-                                    .small()
-                                    .color(egui::Color32::from_rgb(230, 90, 70))
-                            } else {
-                                egui::RichText::new(ammo_line).small().weak()
-                            });
-                        }
-                        if let Some(side) = &u.sidearm {
-                            ui.label(
-                                egui::RichText::new(format!("at the hip: {} [I]", side.name))
-                                    .small()
-                                    .weak(),
-                            );
-                        }
-                        if u.side == Side::Order && !u.civilian {
-                            let on = (u.belt.min(3)) as usize;
-                            let pips: String =
-                                "●".repeat(on) + &"○".repeat(3usize.saturating_sub(on));
-                            ui.label(egui::RichText::new(format!("belt {pips}")).small().weak())
-                                .on_hover_text(
-                                    "the three at hand: consumables past the belt are \
-                                     fetched from the pack at +6 TU",
-                                );
-                        }
-                        ui.horizontal(|ui| {
-                            use crate::icons::{self, Icon};
-                            ui.spacing_mut().item_spacing.x = 3.0;
-                            icons::draw(ui, Icon::Charge, 12.0).on_hover_text("hellfire charges");
-                            ui.label(egui::RichText::new(u.grenades.to_string()).small());
-                            icons::draw(ui, Icon::Dressing, 12.0).on_hover_text("field dressings");
-                            ui.label(egui::RichText::new(u.heal_charges.to_string()).small());
-                            icons::draw(ui, Icon::Flare, 12.0).on_hover_text("witchfire flares");
-                            ui.label(egui::RichText::new(u.flares.to_string()).small());
-                            if u.blade {
-                                icons::draw(ui, Icon::Blade, 12.0)
-                                    .on_hover_text("consecrated blade: ripostes melee");
-                            }
-                        });
-                    });
-                }
-                ui.separator();
-                let threat = ui
-                    .selectable_label(self.show_threat, "☠ Threat [T]")
-                    .on_hover_text("tint every tile a known demon can see");
-                if threat.clicked() {
-                    self.show_threat = !self.show_threat;
-                    self.refresh_scene(renderer);
-                }
-            });
-        });
-
-        egui::TopBottomPanel::bottom("battle-log")
-            .default_height(110.0)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-                    for line in &self.log {
-                        ui.colored_label(crate::geoscape::log_color(line), line);
-                    }
-                });
-            });
+        self.console(ctx, renderer, audio);
 
         // The briefing card: everything known, one DEPLOY button.
         if let Some(lines) = self.briefing.clone() {
@@ -2383,6 +1898,592 @@ impl BattleScreen {
         cam.view_proj(aspect)
     }
 
+    // ------------------------------------------------------------------
+    // The war console: the fixed command deck across the bottom quarter.
+    // Every battle action is an icon cell here; the keys are shortcuts.
+
+    fn console(&mut self, ctx: &egui::Context, renderer: &mut Renderer, audio: Option<&Audio>) {
+        let h = (ctx.content_rect().height() * 0.25).clamp(190.0, 340.0);
+        let frame = egui::Frame::new()
+            .fill(egui::Color32::from_rgb(17, 14, 13))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(110, 88, 55)))
+            .inner_margin(egui::Margin::same(8));
+        egui::TopBottomPanel::bottom("war-console")
+            .exact_height(h)
+            .frame(frame)
+            .show(ctx, |ui| {
+                let inner = h - 18.0;
+                ui.horizontal_top(|ui| {
+                    self.console_squad(ui, renderer, inner);
+                    ui.separator();
+                    self.console_plate(ui, inner);
+                    ui.separator();
+                    self.console_actions(ui, renderer, audio, inner);
+                    ui.separator();
+                    self.console_intel(ui, renderer, audio, inner);
+                    ui.separator();
+                    self.console_map(ui, renderer, audio, inner);
+                });
+            });
+    }
+
+    /// The squad roster: one row a head, click to command.
+    fn console_squad(&mut self, ui: &mut egui::Ui, renderer: &mut Renderer, h: f32) {
+        use crate::icons::{self, Icon};
+        struct Row {
+            id: UnitId,
+            name: String,
+            hp: f32,
+            tu: f32,
+            kneeling: bool,
+            bleeding: bool,
+            seized: bool,
+            down: bool,
+            spent: bool,
+        }
+        let rows: Vec<Row> = self
+            .battle
+            .units
+            .iter()
+            .filter(|u| u.side == Side::Order && !u.civilian && u.alive)
+            .map(|u| Row {
+                id: u.id,
+                name: u.name.split_whitespace().last().unwrap_or(&u.name).to_string(),
+                hp: u.health as f32 / u.health_max.max(1) as f32,
+                tu: u.tu as f32 / u.tu_max.max(1) as f32,
+                kneeling: u.kneeling,
+                bleeding: u.wounds > 0,
+                seized: u.possessed > 0,
+                down: !u.conscious,
+                spent: u.is_active() && u.fire_cost(FireMode::Snap).is_none_or(|c| u.tu < c),
+            })
+            .collect();
+        let mut select: Option<UnitId> = None;
+        ui.vertical(|ui| {
+            ui.set_width(150.0);
+            egui::ScrollArea::vertical()
+                .id_salt("console-squad")
+                .max_height(h)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for r in &rows {
+                        let is_sel = self.selected == Some(r.id);
+                        let card = egui::Frame::new()
+                            .fill(if is_sel {
+                                egui::Color32::from_rgb(48, 40, 20)
+                            } else {
+                                egui::Color32::from_rgb(24, 20, 18)
+                            })
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                if is_sel {
+                                    egui::Color32::from_rgb(230, 190, 90)
+                                } else {
+                                    egui::Color32::from_gray(60)
+                                },
+                            ))
+                            .inner_margin(egui::Margin::symmetric(4, 2));
+                        let resp = card
+                            .show(ui, |ui| {
+                                ui.set_width(136.0);
+                                ui.spacing_mut().item_spacing.y = 1.0;
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 2.0;
+                                    crate::portraits::draw(
+                                        ui,
+                                        crate::portraits::seed_of(&r.name),
+                                        14.0,
+                                        0,
+                                    );
+                                    ui.label(egui::RichText::new(&r.name).small());
+                                    if r.kneeling {
+                                        icons::draw(ui, Icon::Kneel, 10.0);
+                                    }
+                                    if r.bleeding {
+                                        icons::draw(ui, Icon::Blood, 10.0);
+                                    }
+                                    if r.seized {
+                                        icons::draw(ui, Icon::Eye, 10.0);
+                                    }
+                                    if r.down {
+                                        icons::draw(ui, Icon::Down, 10.0);
+                                    }
+                                    if r.spent && !r.down {
+                                        ui.label(egui::RichText::new("✔").weak().small());
+                                    }
+                                });
+                                mini_bar(ui, r.hp, egui::Color32::from_rgb(190, 60, 50));
+                                mini_bar(ui, r.tu, egui::Color32::from_rgb(200, 170, 60));
+                            })
+                            .response;
+                        if resp.interact(egui::Sense::click()).clicked() {
+                            select = Some(r.id);
+                        }
+                    }
+                });
+        });
+        if let Some(id) = select {
+            self.selected = Some(id);
+            self.refresh_scene(renderer);
+        }
+    }
+
+    /// The soldier plate: who they are, what they hold, what's left in it.
+    fn console_plate(&mut self, ui: &mut egui::Ui, _h: f32) {
+        use crate::icons::{self, Icon};
+        ui.vertical(|ui| {
+            ui.set_width(216.0);
+            let Some(id) = self.selected else {
+                ui.weak("no soldier selected");
+                ui.weak("click one, or press Tab");
+                return;
+            };
+            let u = self.battle.unit(id);
+            let name = u.name.clone();
+            let scars = u.injuries.len() + u.severed.len();
+            let (hp, hp_max) = (u.health, u.health_max);
+            let (tu, tu_max) = (u.tu, u.tu_max);
+            let (sta, sta_max) = (u.stamina, u.stamina_max);
+            let morale = u.morale;
+            let weapon = u.weapon.name;
+            let (ammo, clip, mags) = (u.ammo, u.weapon.clip, u.mags);
+            let belt = u.belt.min(3) as usize;
+            let sidearm = u.sidearm.as_ref().map(|w| w.name);
+            let (grenades, dressings, flares, blade) =
+                (u.grenades, u.heal_charges, u.flares, u.blade);
+            let modes: Vec<(FireMode, Icon, bool, String)> = [
+                (FireMode::Snap, Icon::Snap, "snap"),
+                (FireMode::Aimed, Icon::Aimed, "aimed"),
+                (FireMode::Auto, Icon::Auto, "auto"),
+            ]
+            .into_iter()
+            .map(|(m, ic, label)| {
+                let detail = match (u.hit_chance(m), u.fire_cost(m)) {
+                    (Some(c), Some(t)) => format!("{label}: {c}% · {t} TU"),
+                    _ => format!("{label}: not with this weapon"),
+                };
+                (m, ic, u.fire_cost(m).is_some(), detail)
+            })
+            .collect();
+
+            ui.horizontal(|ui| {
+                crate::portraits::draw(ui, crate::portraits::seed_of(&name), 34.0, scars);
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(&name)
+                            .strong()
+                            .color(egui::Color32::from_rgb(230, 210, 170)),
+                    );
+                    ui.label(egui::RichText::new(weapon).small().weak());
+                });
+            });
+            plate_bar(ui, "TU", tu, tu_max, egui::Color32::from_rgb(200, 170, 60));
+            plate_bar(ui, "HP", hp, hp_max, egui::Color32::from_rgb(190, 60, 50));
+            plate_bar(ui, "STA", sta, sta_max, egui::Color32::from_rgb(210, 205, 120));
+            plate_bar(ui, "MRL", morale, 100, egui::Color32::from_rgb(150, 90, 200));
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                for (m, ic, possible, detail) in &modes {
+                    if icons::button(ui, *ic, 24.0, *possible, self.fire_mode == *m, detail) {
+                        self.fire_mode = *m;
+                    }
+                }
+                if clip > 0 {
+                    let dry = ammo == 0;
+                    ui.label(
+                        egui::RichText::new(format!("{ammo}/{clip} ×{mags}"))
+                            .small()
+                            .color(if dry {
+                                egui::Color32::from_rgb(230, 90, 70)
+                            } else {
+                                egui::Color32::from_gray(170)
+                            }),
+                    )
+                    .on_hover_text(if dry {
+                        "DRY — reload"
+                    } else {
+                        "rounds in the weapon / clip size × spare magazines"
+                    });
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                icons::draw(ui, Icon::Charge, 12.0).on_hover_text("hellfire charges");
+                ui.label(egui::RichText::new(grenades.to_string()).small());
+                icons::draw(ui, Icon::Dressing, 12.0).on_hover_text("field dressings");
+                ui.label(egui::RichText::new(dressings.to_string()).small());
+                icons::draw(ui, Icon::Flare, 12.0).on_hover_text("witchfire flares");
+                ui.label(egui::RichText::new(flares.to_string()).small());
+                if blade {
+                    icons::draw(ui, Icon::Blade, 12.0)
+                        .on_hover_text("consecrated blade: ripostes melee");
+                }
+                let pips: String = "●".repeat(belt) + &"○".repeat(3usize.saturating_sub(belt));
+                ui.label(egui::RichText::new(pips).small().weak()).on_hover_text(
+                    "the belt: three at hand; anything past them costs +6 TU from the pack",
+                );
+            });
+            if let Some(side) = sidearm {
+                ui.label(egui::RichText::new(format!("at the hip: {side}")).small().weak());
+            }
+        });
+    }
+
+    /// The action deck: every order the field takes, one cell each.
+    fn console_actions(
+        &mut self,
+        ui: &mut egui::Ui,
+        renderer: &mut Renderer,
+        audio: Option<&Audio>,
+        h: f32,
+    ) {
+        use crate::icons::{self, Icon};
+        use winit::keyboard::KeyCode as K;
+        let sel = self.selected;
+        let armed = self.grenade_armed;
+        let (ok, charges, dressings, flares, reloadable, has_sidearm, psi) = sel
+            .map(|id| {
+                let u = self.battle.unit(id);
+                (
+                    u.is_active(),
+                    u.grenades,
+                    u.heal_charges,
+                    u.flares,
+                    u.weapon.clip > 0 && u.mags > 0,
+                    u.sidearm.is_some(),
+                    u.psi,
+                )
+            })
+            .unwrap_or((false, 0, 0, 0, false, false, false));
+        let officer = sel.is_some_and(|id| {
+            let u = self.battle.unit(id);
+            ok && u.can_rally && !u.rally_spent
+        });
+        let rot_near = sel.is_some_and(|id| {
+            let me = self.battle.unit(id).tile;
+            ok && self.battle.units.iter().any(|u| {
+                u.alive
+                    && u.side == Side::Order
+                    && u.infected.is_some()
+                    && (u.tile - me).abs().max_element() <= 1
+            })
+        });
+        let victim = sel.and_then(|id| {
+            let me = self.battle.unit(id).tile;
+            self.battle
+                .units
+                .iter()
+                .find(|v| {
+                    v.alive
+                        && !v.conscious
+                        && v.side == Side::Demons
+                        && (v.tile - me).abs().max_element() <= 1
+                })
+                .map(|v| v.id)
+        });
+        let range = ods_sim::battle::TERRIFY_RANGE_TILES;
+        let steady_target = sel.filter(|_| psi).and_then(|id| {
+            let me = self.battle.unit(id).tile;
+            self.battle
+                .units
+                .iter()
+                .filter(|a| {
+                    a.is_active()
+                        && a.side == Side::Order
+                        && !a.civilian
+                        && a.id != id
+                        && a.morale < 70
+                        && (a.tile - me).abs().max_element() <= range
+                })
+                .min_by_key(|a| a.morale)
+                .map(|a| a.id)
+        });
+        let dread_target = sel.filter(|_| psi).and_then(|id| {
+            let me = self.battle.unit(id).tile;
+            self.battle
+                .units
+                .iter()
+                .filter(|f| {
+                    f.is_active()
+                        && f.side == Side::Demons
+                        && (f.tile - me).abs().max_element() <= range
+                })
+                .min_by_key(|f| f.morale + f.bravery / 2)
+                .map(|f| f.id)
+        });
+        let (threat_on, cones_on, map_on, cut_on) =
+            (self.show_threat, self.show_cones, self.show_map, self.floor_cap);
+
+        let size = ((h - 20.0) / 4.0 - 4.0).clamp(26.0, 44.0);
+        let mut go: Option<K> = None;
+        let mut act: Option<Action> = None;
+        egui::Grid::new("console-actions").spacing([4.0, 4.0]).show(ui, |ui| {
+            let mut cell =
+                |ui: &mut egui::Ui, icon: Icon, on: bool, active: bool, hover: &str, key: K| {
+                    if icons::button(ui, icon, size, on, active, hover) {
+                        go = Some(key);
+                    }
+                };
+            // Row 1: what the hands do.
+            cell(ui, Icon::Charge, ok && charges > 0, armed, "arm a hellfire charge, then click a tile [G]", K::KeyG);
+            cell(ui, Icon::Dressing, ok && dressings > 0, false, "dress wounds — theirs, or a neighbor's [H]", K::KeyH);
+            cell(ui, Icon::Flare, ok && flares > 0, false, "throw a witchfire flare: light in the dark [L]", K::KeyL);
+            cell(ui, Icon::Smoke, ok, false, "pop smoke: cover to move behind [V]", K::KeyV);
+            cell(ui, Icon::Reload, ok && reloadable, false, "a fresh magazine — 12 TU [C]", K::KeyC);
+            cell(ui, Icon::Swap, ok && has_sidearm, false, "trade hands with the hip — 6 TU [I]", K::KeyI);
+            ui.end_row();
+            // Row 2: the ground and the fallen.
+            cell(ui, Icon::Kneel, ok, false, "kneel: steadier aim, smaller shape [K]", K::KeyK);
+            cell(ui, Icon::Door, ok, false, "open the door ahead [O]", K::KeyO);
+            cell(ui, Icon::Bind, ok, false, "bind an adjacent demon: stun, then take it alive [B]", K::KeyB);
+            cell(ui, Icon::Ward, ok, false, "chalk a burning ward on this ground [R]", K::KeyR);
+            cell(ui, Icon::Scavenge, ok, false, "take up a fallen weapon — 8 TU [J]", K::KeyJ);
+            cell(ui, Icon::Carry, ok, false, "shoulder a downed comrade [U]", K::KeyU);
+            ui.end_row();
+            // Row 3: officers, saws, whispers, and the unkind mercies.
+            cell(ui, Icon::Rally, officer, false, "once a battle: +30 morale in earshot [Y]", K::KeyY);
+            cell(ui, Icon::Amputate, rot_near, false, "saw off a rotting limb before it turns them [X]", K::KeyX);
+            if icons::button(
+                ui,
+                Icon::Execute,
+                size,
+                ok && victim.is_some(),
+                false,
+                "end a helpless enemy — 10 TU, the capture is forfeit [Z]",
+            ) && let (Some(unit), Some(target)) = (sel, victim)
+            {
+                act = Some(Action::Execute { unit, target });
+            }
+            if icons::button(
+                ui,
+                Icon::Steady,
+                size,
+                steady_target.is_some(),
+                false,
+                "steady the most shaken ally in reach — burns the channel's keeper",
+            ) && let (Some(unit), Some(target)) = (sel, steady_target)
+            {
+                act = Some(Action::Steady { unit, target });
+            }
+            if icons::button(
+                ui,
+                Icon::Dread,
+                size,
+                dread_target.is_some(),
+                false,
+                "batter the shakiest demon's mind in reach — burns the channel's keeper",
+            ) && let (Some(unit), Some(target)) = (sel, dread_target)
+            {
+                act = Some(Action::Terrify { unit, target });
+            }
+            cell(ui, Icon::Next, true, false, "next soldier with something left [Tab]", K::Tab);
+            ui.end_row();
+            // Row 4: how the field is seen.
+            cell(ui, Icon::Threat, true, threat_on, "tint the ground known demons can see [T]", K::KeyT);
+            cell(ui, Icon::Cones, true, cones_on, "show the squad's watch arcs [N]", K::KeyN);
+            cell(ui, Icon::Map, true, map_on, "the tactical map [M]", K::KeyM);
+            cell(ui, Icon::Cutaway, true, cut_on, "cut away the upper floors [F]", K::KeyF);
+            ui.end_row();
+        });
+        if let Some(k) = go {
+            self.key(renderer, audio, k);
+        }
+        if let Some(a) = act {
+            let result = self.battle.perform(a);
+            self.apply(renderer, audio, result);
+        }
+    }
+
+    /// Watch orders, the shot forecast, and the field log.
+    fn console_intel(
+        &mut self,
+        ui: &mut egui::Ui,
+        renderer: &mut Renderer,
+        audio: Option<&Audio>,
+        h: f32,
+    ) {
+        use crate::icons::{self, Icon};
+        ui.vertical(|ui| {
+            ui.set_width(250.0);
+            // The watch: what shot is banked for the demons' turn.
+            if let Some(id) = self.selected {
+                let current = self.battle.unit(id).reserve;
+                let mut set: Option<Option<FireMode>> = None;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    ui.label(egui::RichText::new("Watch").small().weak())
+                        .on_hover_text("bank TUs for a reaction shot on the demons' turn");
+                    for (icon, mode, hint) in [
+                        (Icon::NoWatch, None, "no watch: spend freely, react with a snap"),
+                        (Icon::Snap, Some(FireMode::Snap), "bank a snap: the cheap trip-wire"),
+                        (Icon::Aimed, Some(FireMode::Aimed), "bank an aimed shot: one good answer"),
+                        (Icon::Auto, Some(FireMode::Auto), "bank the whole burst: the storm"),
+                    ] {
+                        let possible = mode
+                            .is_none_or(|m| self.battle.unit(id).fire_cost(m).is_some());
+                        if icons::button(ui, icon, 22.0, possible, current == mode, hint) {
+                            set = Some(mode);
+                        }
+                    }
+                });
+                if let Some(mode) = set {
+                    let result = self.battle.perform(Action::SetReserve { unit: id, mode });
+                    self.apply(renderer, audio, result);
+                }
+            }
+            if self.grenade_armed {
+                ui.colored_label(egui::Color32::ORANGE, "CHARGE ARMED — click a tile");
+            }
+            // The forecast: what the cursor is worth.
+            match (self.selected, self.hover) {
+                (Some(id), Some(tile)) => {
+                    if let Some(enemy) = self
+                        .battle
+                        .unit_at(tile)
+                        .filter(|&e| self.battle.unit(e).side == Side::Demons)
+                    {
+                        let mut line = format!("Target: {}", self.battle.unit(enemy).name);
+                        let mut seen = true;
+                        let mut breakdown: Option<String> = None;
+                        for (label, mode) in [
+                            ("snap", FireMode::Snap),
+                            ("aimed", FireMode::Aimed),
+                            ("auto", FireMode::Auto),
+                        ] {
+                            if let Some(f) = self.battle.forecast_shot(id, enemy, mode) {
+                                if f.rounds > 1 {
+                                    line.push_str(&format!(
+                                        "  {label} {}%×{} ({}TU)",
+                                        f.chance, f.rounds, f.cost
+                                    ));
+                                } else {
+                                    line.push_str(&format!("  {label} {}% ({}TU)", f.chance, f.cost));
+                                }
+                                seen = f.seen;
+                                if mode == FireMode::Snap {
+                                    line.push_str(&if f.stun {
+                                        format!("  [SALT: stuns ≤{}]", f.power)
+                                    } else {
+                                        format!("  [dmg 0–{}]", f.power * 2)
+                                    });
+                                    breakdown = Some(format!(
+                                        "skill {} × mode {}%{}{} = {}%",
+                                        f.skill,
+                                        f.mode_pct,
+                                        if f.kneeling { " × kneel 115%" } else { "" },
+                                        if f.high_ground > 0 { " + high ground 10" } else { "" },
+                                        f.chance
+                                    ));
+                                }
+                            }
+                        }
+                        if !seen {
+                            line.push_str("  [NO LINE OF SIGHT]");
+                        }
+                        let resp = ui.colored_label(
+                            egui::Color32::LIGHT_RED,
+                            egui::RichText::new(line).small(),
+                        );
+                        if let Some(b) = breakdown {
+                            resp.on_hover_text(b);
+                        }
+                    } else if let Some((_, cost)) = &self.hover_path {
+                        let u = self.battle.unit(id);
+                        let okm = *cost <= u.tu;
+                        let breaks_watch = u
+                            .reserve
+                            .is_some_and(|m| u.fire_cost(m).is_some_and(|c| *cost > u.tu - c));
+                        ui.colored_label(
+                            if !okm {
+                                egui::Color32::GRAY
+                            } else if breaks_watch {
+                                egui::Color32::from_rgb(230, 180, 70)
+                            } else {
+                                egui::Color32::LIGHT_GREEN
+                            },
+                            egui::RichText::new(format!(
+                                "Move: {cost} TU of {}{}",
+                                u.tu,
+                                if okm && breaks_watch { " — BREAKS YOUR WATCH" } else { "" }
+                            ))
+                            .small(),
+                        );
+                    }
+                }
+                _ => {
+                    ui.label(
+                        egui::RichText::new("hover a tile for costs; a demon for odds")
+                            .small()
+                            .weak(),
+                    );
+                }
+            }
+            ui.separator();
+            // The field log rides in the console now.
+            egui::ScrollArea::vertical()
+                .id_salt("console-log")
+                .stick_to_bottom(true)
+                .max_height(h - 84.0)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    for line in &self.log {
+                        ui.colored_label(
+                            crate::geoscape::log_color(line),
+                            egui::RichText::new(line).small(),
+                        );
+                    }
+                });
+        });
+    }
+
+    /// The table map and the big red END TURN.
+    fn console_map(
+        &mut self,
+        ui: &mut egui::Ui,
+        renderer: &mut Renderer,
+        audio: Option<&Audio>,
+        h: f32,
+    ) {
+        let (min, max) = self.battle.tiles.bounds();
+        let size = max - min;
+        let px = ((h - 46.0) / size.y.max(1) as f32)
+            .min(210.0 / size.x.max(1) as f32)
+            .clamp(1.5, 6.0);
+        let mut jump: Option<IVec3> = None;
+        let turn = self.battle.turn;
+        let mut end_turn = false;
+        ui.vertical(|ui| {
+            jump = self.minimap(ui, px, true);
+            let w = size.x as f32 * px;
+            ui.horizontal(|ui| {
+                crate::icons::draw(ui, crate::icons::Icon::EndTurn, 26.0);
+                let end = egui::Button::new(
+                    egui::RichText::new("END TURN")
+                        .strong()
+                        .color(egui::Color32::from_rgb(255, 225, 180)),
+                )
+                .fill(egui::Color32::from_rgb(96, 32, 24));
+                if ui
+                    .add_sized([(w - 30.0).max(110.0), 26.0], end)
+                    .on_hover_text("hand the field to the Otherside [Space]")
+                    .clicked()
+                {
+                    end_turn = true;
+                }
+            });
+            ui.label(egui::RichText::new(format!("turn {turn}")).small().weak());
+        });
+        if end_turn {
+            self.end_turn(renderer, audio);
+        }
+        if let Some(tile) = jump {
+            let p = (tile * TILE_VOXELS).as_vec3() + Vec3::new(HALF_TILE, HALF_TILE, 0.0);
+            self.camera.target.x = p.x;
+            self.camera.target.y = p.y;
+        }
+    }
+
     /// The table map at `px` per tile. When clickable, returns the tile
     /// the player tapped (for camera jumps).
     fn minimap(&mut self, ui: &mut egui::Ui, px: f32, clickable: bool) -> Option<IVec3> {
@@ -2867,6 +2968,31 @@ fn push_marker(
 }
 
 /// A slim console gauge: background groove plus a colored fill fraction.
+/// A labeled console bar: name at the left, value over the fill.
+fn plate_bar(ui: &mut egui::Ui, label: &str, val: i32, max: i32, color: egui::Color32) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.add_sized(
+            [26.0, 12.0],
+            egui::Label::new(egui::RichText::new(label).small().weak()),
+        );
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(150.0, 11.0), egui::Sense::hover());
+        let paint = ui.painter_at(rect);
+        paint.rect_filled(rect, 2.0, egui::Color32::from_gray(34));
+        let frac = (val.max(0) as f32 / max.max(1) as f32).clamp(0.0, 1.0);
+        let mut fill = rect;
+        fill.set_width(rect.width() * frac);
+        paint.rect_filled(fill, 2.0, color);
+        paint.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            format!("{val}/{max}"),
+            egui::FontId::proportional(9.0),
+            egui::Color32::from_gray(235),
+        );
+    });
+}
+
 fn mini_bar(ui: &mut egui::Ui, frac: f32, color: egui::Color32) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width().min(88.0), 4.0), egui::Sense::hover());
