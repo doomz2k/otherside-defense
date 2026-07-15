@@ -136,11 +136,40 @@ pub fn build_globe(selected: Option<Region>) -> (Vec<LitVertex>, Vec<u32>) {
         let lat = 90.0 - 180.0 * i as f32 / STACKS as f32;
         for j in 0..=SLICES {
             let lon = -180.0 + 360.0 * j as f32 / SLICES as f32;
-            let pos = latlon_to_pos(lat, lon, GLOBE_RADIUS);
+            // Relief: the world is carved, not painted. Land rises on the
+            // same noise that mottles it; ranges peak snow-grey; the ice
+            // caps sit proud of the sea.
+            let relief_h = {
+                let mut x = (lat * 53.7) as i32 as u32;
+                x = x
+                    .wrapping_mul(2654435761)
+                    .wrapping_add((lon * 39.1) as i32 as u32)
+                    .wrapping_mul(1274126177);
+                x ^= x >> 15;
+                ((x.wrapping_mul(2246822519) >> 9) & 255) as f32 / 255.0
+            };
+            let land_here = is_land_detailed(lat, lon);
+            let mut rise = 0.0;
+            if land_here {
+                rise += relief_h * relief_h * 4.5;
+            }
+            if lat.abs() > 66.0 {
+                rise += ((lat.abs() - 66.0) / 24.0).min(1.0) * 2.0;
+            }
+            let pos = latlon_to_pos(lat, lon, GLOBE_RADIUS + rise);
             let normal = pos.normalize();
 
             let land = is_land_detailed(lat, lon);
             let mut color = if land { LAND } else { OCEAN };
+            // Shallows: ocean within reach of a coast shelves paler.
+            if !land
+                && (is_land_detailed(lat + 2.0, lon)
+                    || is_land_detailed(lat - 2.0, lon)
+                    || is_land_detailed(lat, lon + 2.0)
+                    || is_land_detailed(lat, lon - 2.0))
+            {
+                color = [OCEAN[0] + 0.05, OCEAN[1] + 0.09, OCEAN[2] + 0.10];
+            }
             if land {
                 // Mottle the land like the original's hand-placed terrain
                 // pixels: forests, plains, and badlands in one green.
@@ -161,6 +190,13 @@ pub fn build_globe(selected: Option<Region>) -> (Vec<LitVertex>, Vec<u32>) {
                     // The occasional dun badland breaks the green.
                     color[0] = (color[0] + 0.14).min(1.0);
                     color[2] *= 0.6;
+                }
+                if h > 0.93 {
+                    // The high ranges: rock shading to snow at the peak.
+                    color = [0.52, 0.50, 0.48];
+                }
+                if h > 0.97 {
+                    color = [0.80, 0.82, 0.86];
                 }
             }
             // Polar ice creeps over everything near the caps.
@@ -207,19 +243,24 @@ pub fn build_markers(campaign: &Campaign, time: f32) -> (Vec<LitVertex>, Vec<u32
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
 
-    let mut push = |lat: f32, lon: f32, size: f32, color: [f32; 4]| {
-        let center = latlon_to_pos(lat, lon, GLOBE_RADIUS + size);
+    // One placement helper: altitude and size separated, so keeps can
+    // stack and gashes can lie flat.
+    let mut push_at = |lat: f32, lon: f32, alt: f32, size: f32, color: [f32; 4]| {
+        let center = latlon_to_pos(lat, lon, GLOBE_RADIUS + alt);
         push_cube(&mut vertices, &mut indices, center, size, color);
     };
 
     for base in &campaign.bases {
+        // A keep, not a dot: bailey, tower, and a gold banner.
         let (lat, lon) = centroid(base.region);
-        push(lat, lon, 7.0, [1.0, 0.85, 0.25, 1.0]);
+        push_at(lat, lon, 6.5, 6.5, [0.45, 0.42, 0.40, 1.0]);
+        push_at(lat, lon, 8.0, 3.8, [0.55, 0.52, 0.50, 1.0]);
+        push_at(lat, lon, 13.0, 1.6, [1.0, 0.85, 0.25, 1.0]);
     }
     // Nests breathe, slow and swollen.
     let nest_pulse = 6.0 + 0.7 * (time * 1.7).sin();
     for nest in &campaign.nests {
-        push(nest.lat, nest.lon, nest_pulse, [0.45, 0.1, 0.55, 1.0]);
+        push_at(nest.lat, nest.lon, nest_pulse, nest_pulse, [0.45, 0.1, 0.55, 1.0]);
     }
     for rift in campaign.rifts.iter().filter(|r| r.detected) {
         // Unstable rifts flicker urgently; dug-in ones burn steady and dark.
@@ -232,7 +273,17 @@ pub fn build_markers(campaign: &Campaign, time: f32) -> (Vec<LitVertex>, Vec<u32
                 [0.8 + 0.2 * throb, 0.25 + 0.35 * throb, 0.12, 1.0],
             )
         };
-        push(rift.lat, rift.lon, size, color);
+        push_at(rift.lat, rift.lon, size, size, color);
+        // The gash itself: three dark shards splayed across the ground.
+        for (k, (dlat, dlon)) in [(0.0f32, 0.0f32), (2.0, 3.0), (-2.5, 2.0)].iter().enumerate() {
+            push_at(
+                rift.lat + dlat,
+                rift.lon + dlon,
+                1.0,
+                2.0 + (k as f32) * 0.6,
+                [0.12, 0.02, 0.03, 1.0],
+            );
+        }
     }
 
     // Sorties crawl their great-circle routes: the zeppelin as a small
@@ -261,12 +312,13 @@ pub fn build_markers(campaign: &Campaign, time: f32) -> (Vec<LitVertex>, Vec<u32
         let mut t = progress;
         while t < 1.0 {
             let (lat, lon) = lerp(t);
-            push(lat, lon, 1.4, [0.9, 0.8, 0.5, 1.0]);
+            push_at(lat, lon, 1.4, 1.4, [0.9, 0.8, 0.5, 1.0]);
             t += 0.08;
         }
         // The ship itself, bobbing on the wind.
         let (lat, lon) = lerp(progress);
-        push(lat, lon, 4.0 + 0.5 * (time * 3.0).sin(), [1.0, 0.85, 0.35, 1.0]);
+        let bob = 4.0 + 0.5 * (time * 3.0).sin();
+        push_at(lat, lon, bob, bob, [1.0, 0.85, 0.35, 1.0]);
     }
 
     (vertices, indices)
@@ -303,12 +355,19 @@ const CITIES: [(f32, f32); 24] = [
 /// City lights on the night side of the terminator, for the fx overlay slot.
 /// Each is a small warm quad flush with the surface; they twinkle faintly.
 pub fn build_city_lights(
+    campaign: &Campaign,
     sun_lon: f32,
     time: f32,
 ) -> (Vec<ods_render::OverlayVertex>, Vec<u32>) {
     let mut verts = Vec::new();
     let mut indices = Vec::new();
     for (i, &(lat, lon)) in CITIES.iter().enumerate() {
+        let region = region_at(lat, lon);
+        // Panic puts the lights out street by street; an infiltrated
+        // patron's cities burn the wrong color entirely.
+        let panic = campaign.region_panic.get(&region).copied().unwrap_or(0) as f32;
+        let corrupted = campaign.corrupted_patrons.contains(&region);
+        let dimmed = (1.0 - (panic / 100.0).clamp(0.0, 1.0) * 0.85).max(0.1);
         let mut d = (lon - sun_lon).abs() % 360.0;
         if d > 180.0 {
             d = 360.0 - d;
@@ -319,7 +378,7 @@ pub fn build_city_lights(
         // Brighter the deeper into night, with a slow per-city shimmer.
         let depth = ((d - 90.0) / 90.0).clamp(0.0, 1.0);
         let shimmer = 0.85 + 0.15 * (time * 2.0 + i as f32 * 1.7).sin();
-        let alpha = (0.35 + 0.55 * depth) * shimmer;
+        let alpha = (0.35 + 0.55 * depth) * shimmer * dimmed;
 
         let center = latlon_to_pos(lat, lon, GLOBE_RADIUS + 1.5);
         let normal = center.normalize();
@@ -337,10 +396,74 @@ pub fn build_city_lights(
         for p in corners {
             verts.push(ods_render::OverlayVertex {
                 position: p.to_array(),
-                color: [1.0, 0.85, 0.5, alpha],
+                color: if corrupted {
+                    [0.75, 0.3, 0.95, alpha]
+                } else {
+                    [1.0, 0.85, 0.5, alpha]
+                },
             });
         }
         indices.extend([0, 1, 2, 0, 2, 3].map(|k| first + k));
+    }
+    (verts, indices)
+}
+
+/// The wounds and the fear, in the fx overlay: violet plumes rising off
+/// detected rifts (taller and faster the closer the eruption), and ember
+/// specks drifting up from regions deep in panic.
+pub fn build_geo_omens(
+    campaign: &Campaign,
+    time: f32,
+) -> (Vec<ods_render::OverlayVertex>, Vec<u32>) {
+    let mut verts = Vec::new();
+    let mut indices = Vec::new();
+    let mut quad = |center: Vec3, r: f32, color: [f32; 4]| {
+        let normal = center.normalize_or(Vec3::Z);
+        let east = Vec3::Z.cross(normal).normalize_or(Vec3::X);
+        let north = normal.cross(east);
+        let first = verts.len() as u32;
+        for (du, dv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            verts.push(ods_render::OverlayVertex {
+                position: (center + east * (r * du) + north * (r * dv)).to_array(),
+                color,
+            });
+        }
+        indices.extend([0u32, 1, 2, 0, 2, 3].map(|k| first + k));
+    };
+    for rift in campaign.rifts.iter().filter(|r| r.detected) {
+        // The plume: urgency is height and heat.
+        let urgency = (1.0 - rift.days_left as f32 / 10.0).clamp(0.2, 1.0);
+        let segs = 4 + (urgency * 4.0) as i32;
+        for k in 0..segs {
+            let f = k as f32 / segs as f32;
+            let wobble = ((time * (1.5 + urgency) + k as f32 * 1.3).sin()) * 1.5;
+            let center = latlon_to_pos(
+                rift.lat + wobble * 0.2,
+                rift.lon + wobble * 0.3,
+                GLOBE_RADIUS + 4.0 + f * (10.0 + 14.0 * urgency),
+            );
+            quad(
+                center,
+                2.6 * (1.0 - f * 0.6),
+                [0.65, 0.2, 0.9, (0.5 - f * 0.4) * (0.6 + 0.4 * urgency)],
+            );
+        }
+    }
+    for (&region, &panic) in &campaign.region_panic {
+        if panic < 40 {
+            continue;
+        }
+        let (lat, lon) = centroid(region);
+        let n = ((panic - 40) / 15).clamp(1, 5);
+        for k in 0..n {
+            let ph = (time * 0.7 + k as f32 * 1.61).fract();
+            let center = latlon_to_pos(
+                lat + ((k * 17) % 7) as f32 - 3.0,
+                lon + ((k * 29) % 11) as f32 - 5.0,
+                GLOBE_RADIUS + 2.0 + ph * 9.0,
+            );
+            quad(center, 1.1, [1.0, 0.45, 0.1, 0.5 * (1.0 - ph)]);
+        }
     }
     (verts, indices)
 }

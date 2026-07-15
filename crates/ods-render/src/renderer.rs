@@ -311,6 +311,7 @@ struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) world: vec3<f32>,
 };
 
 @vertex
@@ -319,6 +320,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.clip = camera.view_proj * vec4<f32>(in.position, 1.0);
     out.normal = in.normal;
     out.color = in.color;
+    out.world = in.position;
     return out;
 }
 
@@ -362,6 +364,16 @@ fn fs_main(in: VsOut) -> FsOut {
     var out: FsOut;
     out.color = vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
     out.glow = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    // The air itself: a scattering rim on the limb, on fire along the
+    // terminator where day hands over to night.
+    if (length(camera.flash.xyz) > 1.0) {
+        let vdir = normalize(camera.flash.xyz - in.world);
+        let rim = pow(1.0 - clamp(dot(n, vdir), 0.0, 1.0), 2.6);
+        let twilight = pow(1.0 - abs(dot(n, camera.sun.xyz)), 6.0);
+        let air = vec3<f32>(0.30, 0.50, 0.85) + vec3<f32>(0.95, 0.45, 0.12) * twilight;
+        out.color = vec4<f32>(out.color.rgb + air * rim * 0.5, out.color.a);
+        out.glow = vec4<f32>(out.glow.rgb + air * rim * 0.22, 1.0);
+    }
     return out;
 }
 "#;

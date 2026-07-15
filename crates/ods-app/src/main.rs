@@ -887,11 +887,28 @@ impl Core {
                     let (vertices, indices) = globe::build_markers(c, self.clock);
                     self.renderer.set_markers(&vertices, &indices);
                 }
-                // Civilization glitters on the night side of the line.
-                let (lights, light_idx) = globe::build_city_lights(sun_lon, self.clock);
-                self.renderer.set_fx(&lights, &light_idx);
+                // Civilization glitters on the night side of the line —
+                // dimmed by panic, discolored by infiltration — and the
+                // world's wounds trail violet into the sky.
+                if let Some(c) = &self.campaign {
+                    let (mut fx, mut fx_idx) =
+                        globe::build_city_lights(c, sun_lon, self.clock);
+                    let (omens, omen_idx) = globe::build_geo_omens(c, self.clock);
+                    let base = fx.len() as u32;
+                    fx.extend(omens);
+                    fx_idx.extend(omen_idx.iter().map(|i| i + base));
+                    self.renderer.set_fx(&fx, &fx_idx);
+                }
                 let vp = self.geo_camera.view_proj(self.renderer.aspect());
-                self.renderer.set_camera(vp, sun, self.clock);
+                // The camera's seat rides the flash lane (w=0: no light,
+                // just the eye position the atmosphere rim needs).
+                let eye = self.geo_camera.eye();
+                self.renderer.set_camera_flash(
+                    vp,
+                    sun,
+                    self.clock,
+                    glam::Vec4::new(eye.x, eye.y, eye.z, 0.0),
+                );
             }
             Screen::Base => {
                 if let Some(a) = self.audio.as_mut() {
