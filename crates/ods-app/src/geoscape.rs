@@ -318,7 +318,11 @@ impl Core {
                                     ui.colored_label(egui::Color32::GOLD, "⛓ dissected");
                                 }
                             });
-                            ui.label(bestiary_lore(species));
+                            // Lore reads in the Order's own hand.
+                            ui.label(
+                                egui::RichText::new(bestiary_lore(species))
+                                    .font(crate::theme::reading(15.0)),
+                            );
                             if slain {
                                 let key = species.name().to_lowercase().replace(' ', "_");
                                 if let Some(d) = ods_sim::data::species().get(&key) {

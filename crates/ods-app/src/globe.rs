@@ -650,8 +650,11 @@ mod tests {
     #[test]
     fn globe_mesh_is_well_formed() {
         let (vertices, indices) = build_globe(None);
-        assert_eq!(vertices.len(), (STACKS + 1) * (SLICES + 1));
-        assert_eq!(indices.len(), STACKS * SLICES * 6);
+        // The sphere grid, plus the mapmaker's border ink on top.
+        let grid = (STACKS + 1) * (SLICES + 1);
+        assert!(vertices.len() >= grid, "{} < {grid}", vertices.len());
+        assert!(indices.len() >= STACKS * SLICES * 6);
+        assert_eq!(indices.len() % 3, 0);
         let max = *indices.iter().max().unwrap() as usize;
         assert!(max < vertices.len());
         // Normals point outward.
