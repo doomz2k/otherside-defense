@@ -126,6 +126,8 @@ pub(crate) fn build_defense(
         Facility::WardTower => RoomKind::WardTower,
         Facility::Kennel => RoomKind::Kennel,
         Facility::Vault => RoomKind::Vault,
+        // A hangar is a big open berth — fight it as an open yard.
+        Facility::Hangar => RoomKind::DrillYard,
     };
     // Only rooms the gate can reach are part of the fight: a hall cut off
     // from the way in is a hall the breach never finds.

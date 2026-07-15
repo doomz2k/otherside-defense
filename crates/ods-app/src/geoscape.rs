@@ -365,7 +365,6 @@ impl Core {
                         let lance_ok = c.research.is_complete(Project::HellfireLance);
                         let mut lance_toggle: Option<(usize, bool)> = None;
                         let mut transfer: Option<usize> = None;
-                        let mut squad_rotate: Option<usize> = None;
                         // Sorting and density are the commander's choice.
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut self.roster_compact, "compact")
@@ -413,6 +412,10 @@ impl Core {
                             }
                         }
                         let sort_state = &mut self.roster_sort;
+                        // House names, precomputed so the roster loop can name
+                        // each soldier's station without re-borrowing the bases.
+                        let base_names: Vec<String> =
+                            c.bases.iter().map(|b| b.region.name().to_string()).collect();
                         // The full table is wider than the desk: scroll it
                         // sideways rather than let it shove the panel open.
                         egui::ScrollArea::horizontal().id_salt("roster-h").show(ui, |ui| {
@@ -447,7 +450,7 @@ impl Core {
                             header(ui, "Rank", Some(5));
                             if !compact {
                                 header(ui, "Quirk", None);
-                                header(ui, "Squad", None);
+                                header(ui, "House", None);
                             }
                             header(ui, "Mind", Some(0));
                             header(ui, "TU", Some(1));
@@ -502,16 +505,20 @@ impl Core {
                                 }
                                 if !compact {
                                     ui.label(s.quirk.map_or("–", |q| q.name()));
-                                    let tag = ods_geo::SQUAD_NAMES[s.squad as usize];
-                                    let short: String = tag.chars().take(4).collect();
+                                    // The house the soldier is stationed at —
+                                    // click to repost to the next chapterhouse.
+                                    let full = base_names
+                                        .get(s.home)
+                                        .map_or("—", |n| n.as_str());
+                                    let short: String = full.chars().take(4).collect();
                                     if ui
                                         .small_button(short)
                                         .on_hover_text(format!(
-                                            "standing squad: {tag} (click to rotate)"
+                                            "stationed at {full} (click to repost)"
                                         ))
                                         .clicked()
                                     {
-                                        squad_rotate = Some(si);
+                                        transfer = Some(si);
                                     }
                                 }
                                 let mind_color = match (s.sanity, self.colorblind) {
@@ -600,10 +607,6 @@ impl Core {
                             }
                         });
                         });
-                        if let Some(si) = squad_rotate {
-                            c.soldiers[si].squad =
-                                (c.soldiers[si].squad + 1) % ods_geo::SQUAD_NAMES.len() as u8;
-                        }
                         if let Some((si, take)) = lance_toggle
                             && let Err(e) = c.assign_lance(si, take)
                         {
@@ -1090,8 +1093,8 @@ impl Core {
                         format!("⚠ {crises} crisis(es)"),
                     );
                 }
-                ui.label(format!("🛩 {}/{}", c.sorties.len(), c.zeppelins))
-                    .on_hover_text("sorties aloft / zeppelins");
+                ui.label(format!("🛩 {}/{}", c.sorties.len(), c.total_hangars()))
+                    .on_hover_text("sorties aloft / hangars across all houses");
                 if c.heresy > 0 {
                     ui.colored_label(
                         if c.heresy >= 25 {
@@ -1552,13 +1555,11 @@ impl Core {
                 let open_now = c.rifts.iter().filter(|r| r.detected).count();
                 ui.heading(format!("War room — {open_now} incursion(s)"));
                 let fit = c.soldiers.iter().filter(|s| s.is_fit()).count();
-                ui.label(format!("{fit} soldiers fit for duty"));
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Answering:");
-                    for (i, name) in ods_geo::SQUAD_NAMES.iter().enumerate() {
-                        ui.selectable_value(&mut c.active_squad, i as u8, *name);
-                    }
-                });
+                let free_hangars = c.total_hangars() - c.sorties.len().min(c.total_hangars());
+                ui.label(format!(
+                    "{fit} soldiers fit · {} hangar(s), {free_hangars} free",
+                    c.total_hangars()
+                ));
                 ui.separator();
 
                 let mut rifts: Vec<_> = c
@@ -1629,11 +1630,12 @@ impl Core {
                                     format!("🛫 squad en route — {}d", s.days_left),
                                 );
                             }
-                            // Boots on the ground, holding for the order.
+                            // Boots on the ground, holding for the order — the
+                            // squad aboard is already chosen, so lead direct.
                             Some(_) => {
                                 ui.colored_label(egui::Color32::LIGHT_GREEN, "on site");
                                 if ui.button("⚔ Lead").clicked() {
-                                    self.pending_launch = Some(MissionKind::Rift(id));
+                                    self.pending_lead = Some(MissionKind::Rift(id));
                                 }
                                 if ui.button("🎲 Auto").clicked() {
                                     match c.assault_rift(id) {
@@ -1644,40 +1646,24 @@ impl Core {
                                     }
                                 }
                             }
-                            // Local rifts strike same-day; distant ones fly.
-                            None if local => {
-                                if ui.button("⚔ Lead").clicked() {
-                                    self.pending_launch = Some(MissionKind::Rift(id));
-                                }
-                                if ui.button("🎲 Auto").clicked() {
-                                    match c.assault_rift(id) {
-                                        Ok(r) => self.log.push(report_line("assault", r)),
-                                        Err(e) => {
-                                            self.log.push(format!("cannot assault: {e:?}"))
-                                        }
-                                    }
-                                }
-                            }
+                            // No sortie yet: open the muster sheet to choose a
+                            // base to fly from and the soldiers to carry.
                             None => {
                                 let eta = c.travel_days(id).unwrap_or(0);
+                                let label = if local {
+                                    "⚔ Answer".to_string()
+                                } else {
+                                    format!("🛫 Answer ({eta}d)")
+                                };
                                 if ui
-                                    .button(format!("🛫 Fly & lead ({eta}d)"))
+                                    .button(label)
                                     .on_hover_text(
-                                        "no chapterhouse in the region: the squad flies out \
-                                         and holds on arrival for your order",
+                                        "open the muster sheet: pick a hangar to fly from \
+                                         and the soldiers to load aboard",
                                     )
                                     .clicked()
-                                    && let Err(e) = c.dispatch_squad(id, true)
                                 {
-                                    self.log.push(format!("cannot dispatch: {e:?}"));
-                                }
-                                if ui
-                                    .button(format!("🛫 Fly & auto ({eta}d)"))
-                                    .on_hover_text("auto-resolves the day the squad lands")
-                                    .clicked()
-                                    && let Err(e) = c.dispatch_squad(id, false)
-                                {
-                                    self.log.push(format!("cannot dispatch: {e:?}"));
+                                    self.pending_launch = Some(MissionKind::Rift(id));
                                 }
                             }
                         }
@@ -1997,7 +1983,19 @@ impl Core {
         // Every led mission passes the sheet: who answers, and what they
         // are missing, before boots leave the ground.
         if let Some(kind) = self.pending_launch {
-            let mut go = false;
+            // (Re)seed the sheet's base and manifest when it opens anew.
+            if self.launch_for != Some(kind) {
+                self.launch_for = Some(kind);
+                self.launch_base = best_launch_base(c, kind);
+                self.launch_manifest = default_manifest(c, self.launch_base);
+            }
+            let is_flight = matches!(kind, MissionKind::Rift(_));
+            let base = self.launch_base.min(c.bases.len().saturating_sub(1));
+            let manifest_snapshot = self.launch_manifest.clone();
+            let mut new_base: Option<usize> = None;
+            let mut toggle: Option<usize> = None;
+            let mut go_lead = false;
+            let mut go_auto = false;
             let mut stay = false;
             egui::Window::new("THE MUSTER SHEET")
                 .collapsible(false)
@@ -2005,84 +2003,155 @@ impl Core {
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, -20.0])
                 .show(ctx, |ui| {
                     ui.strong(format!("Operation: {}", kind.label().to_uppercase()));
-                    let want = c.active_squad;
-                    let mut squad: Vec<usize> = c
+                    // Which house answers — its hangar flies the sortie and
+                    // its garrison fills the manifest.
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(if is_flight { "Fly from:" } else { "Muster at:" });
+                        for bi in 0..c.bases.len() {
+                            let fit = c
+                                .soldiers
+                                .iter()
+                                .filter(|s| s.is_fit() && s.home == bi)
+                                .count();
+                            let free = c.base_free_hangars(bi);
+                            let usable = fit > 0 && (!is_flight || free > 0);
+                            let name = c.bases[bi].region.name();
+                            let tag = if is_flight {
+                                format!("{name} · {free}⛺ · {fit} fit")
+                            } else {
+                                format!("{name} · {fit} fit")
+                            };
+                            if ui
+                                .add_enabled(usable, egui::Button::selectable(base == bi, tag))
+                                .clicked()
+                            {
+                                new_base = Some(bi);
+                            }
+                        }
+                    });
+                    if is_flight
+                        && let MissionKind::Rift(id) = kind
+                        && let Ok(days) = c.travel_days_from(base, id)
+                    {
+                        ui.label(if days == 0 {
+                            "On our doorstep — the squad is on-site at once.".to_string()
+                        } else {
+                            format!("Flight from this house: {days} day(s).")
+                        });
+                    }
+                    ui.separator();
+                    // The manifest: this base's fit garrison, hand-picked.
+                    let candidates: Vec<usize> = c
                         .soldiers
                         .iter()
                         .enumerate()
-                        .filter(|(_, s)| s.is_fit() && want != 0 && s.squad == want)
+                        .filter(|(_, s)| s.is_fit() && s.home == base)
                         .map(|(i, _)| i)
-                        .take(6)
                         .collect();
-                    for (i, s) in c.soldiers.iter().enumerate() {
-                        if squad.len() >= 6 {
-                            break;
-                        }
-                        if s.is_fit() && !squad.contains(&i) {
-                            squad.push(i);
-                        }
-                    }
-                    let mut mags_wanted = 0;
-                    for &i in &squad {
-                        let s = &c.soldiers[i];
-                        let mut flags: Vec<&str> = Vec::new();
-                        if s.mags_loadout == 0 {
-                            flags.push("NO SPARE MAGS");
-                        }
-                        if s.dressings_loadout == 0 {
-                            flags.push("no dressings");
-                        }
-                        if s.sanity < 40 {
-                            flags.push("mind frayed");
-                        }
-                        mags_wanted += s.mags_loadout;
-                        if flags.is_empty() {
-                            ui.label(format!("{} — ready", s.name));
-                        } else {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(230, 180, 70),
-                                format!("{} — {}", s.name, flags.join(", ")),
-                            );
-                        }
-                    }
-                    if squad.is_empty() {
+                    if candidates.is_empty() {
                         ui.colored_label(
                             egui::Color32::from_rgb(220, 60, 60),
-                            "Nobody is fit to muster.",
-                        );
-                    } else if squad.len() < 6 {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(230, 180, 70),
-                            format!("Understrength: {} of 6.", squad.len()),
+                            "No soldier stationed here is fit to go.",
                         );
                     }
-                    if mags_wanted > c.quarrel_stock {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(230, 180, 70),
-                            format!(
-                                "The stores cannot fill every belt ({} wanted, {} pressed).",
-                                mags_wanted, c.quarrel_stock
-                            ),
-                        );
-                    }
+                    egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                        for i in candidates {
+                            let s = &c.soldiers[i];
+                            let on = manifest_snapshot.contains(&i);
+                            let full = manifest_snapshot.len() >= 6;
+                            let mut flags: Vec<&str> = Vec::new();
+                            if s.mags_loadout == 0 {
+                                flags.push("no mags");
+                            }
+                            if s.dressings_loadout == 0 {
+                                flags.push("no dressings");
+                            }
+                            if s.sanity < 40 {
+                                flags.push("frayed");
+                            }
+                            let label = if flags.is_empty() {
+                                s.name.clone()
+                            } else {
+                                format!("{} ({})", s.name, flags.join(", "))
+                            };
+                            let mut checked = on;
+                            let resp = ui.add_enabled(
+                                on || !full,
+                                egui::Checkbox::new(&mut checked, label),
+                            );
+                            if resp.changed() {
+                                toggle = Some(i);
+                            }
+                        }
+                    });
+                    ui.label(format!("Manifest: {} / 6", manifest_snapshot.len()));
                     ui.add_space(4.0);
+                    let ready = !manifest_snapshot.is_empty();
                     ui.horizontal(|ui| {
-                        if !squad.is_empty()
-                            && ui.button(egui::RichText::new("⚔ Launch").strong()).clicked()
+                        if is_flight {
+                            if ready
+                                && ui
+                                    .button(egui::RichText::new("⚔ Lead").strong())
+                                    .on_hover_text("fly out and lead the fight yourself")
+                                    .clicked()
+                            {
+                                go_lead = true;
+                            }
+                            if ready
+                                && ui
+                                    .button("🎲 Send")
+                                    .on_hover_text("fly out; the augurs resolve it on arrival")
+                                    .clicked()
+                            {
+                                go_auto = true;
+                            }
+                        } else if ready
+                            && ui.button(egui::RichText::new("⚔ Assault").strong()).clicked()
                         {
-                            go = true;
+                            go_lead = true;
                         }
                         if ui.button("Stand down").clicked() {
                             stay = true;
                         }
                     });
                 });
-            if go {
-                action = GeoAction::LeadMission(kind);
+            if let Some(b) = new_base {
+                self.launch_base = b;
+                self.launch_manifest = default_manifest(c, b);
+            } else if let Some(i) = toggle {
+                if let Some(pos) = self.launch_manifest.iter().position(|&x| x == i) {
+                    self.launch_manifest.remove(pos);
+                } else if self.launch_manifest.len() < 6 {
+                    self.launch_manifest.push(i);
+                }
+            }
+            if go_lead || go_auto {
+                let manifest = self.launch_manifest.clone();
+                match kind {
+                    MissionKind::Rift(id) => match c.dispatch_manifest(id, base, manifest, go_lead)
+                    {
+                        // A same-region strike is on-site at once: lead now.
+                        Ok(0) if go_lead => action = GeoAction::LeadMission(kind),
+                        Ok(_) => {}
+                        Err(e) => self.log.push(format!("cannot launch: {e:?}")),
+                    },
+                    other => {
+                        c.set_next_manifest(manifest);
+                        action = GeoAction::LeadMission(other);
+                    }
+                }
                 self.pending_launch = None;
+                self.launch_for = None;
             } else if stay {
                 self.pending_launch = None;
+                self.launch_for = None;
             }
+        }
+
+        // An on-site sortie the player chose to lead: its squad is already
+        // aboard, so skip the sheet and go straight to the field.
+        if let Some(kind) = self.pending_lead.take() {
+            action = GeoAction::LeadMission(kind);
         }
 
         // ------------------------------------- demolition wants a nod
@@ -2643,6 +2712,39 @@ fn seed_from_clock() -> u64 {
         .unwrap_or(1999)
 }
 
+/// The chapterhouse best placed to answer a mission: for a rift, the nearest
+/// with a free hangar and a fit garrison; otherwise the fullest garrison.
+fn best_launch_base(c: &Campaign, kind: MissionKind) -> usize {
+    let flight = matches!(kind, MissionKind::Rift(_));
+    let candidates: Vec<usize> = (0..c.bases.len())
+        .filter(|&b| {
+            let fit = c.soldiers.iter().any(|s| s.is_fit() && s.home == b);
+            fit && (!flight || c.base_free_hangars(b) > 0)
+        })
+        .collect();
+    match kind {
+        MissionKind::Rift(id) => candidates
+            .into_iter()
+            .min_by_key(|&b| c.travel_days_from(b, id).unwrap_or(99))
+            .unwrap_or(0),
+        _ => candidates
+            .into_iter()
+            .max_by_key(|&b| c.soldiers.iter().filter(|s| s.is_fit() && s.home == b).count())
+            .unwrap_or(0),
+    }
+}
+
+/// A base's fit garrison, up to a full manifest of six.
+fn default_manifest(c: &Campaign, base: usize) -> Vec<usize> {
+    c.soldiers
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.is_fit() && s.home == base)
+        .map(|(i, _)| i)
+        .take(6)
+        .collect()
+}
+
 /// A region's arms: the field tincture of its shield and the charge upon it.
 fn region_arms(region: ods_geo::Region) -> (egui::Color32, &'static str) {
     use egui::Color32 as C;
@@ -2874,27 +2976,20 @@ fn chapterhouse_panel(
                     });
                 }
 
-                // The fleet: hulls, sorties aloft, and how they fly.
+                // The fleet: hangars here, hulls Order-wide, and how they fly.
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
+                    let bi = (*selected_base).min(c.bases.len().saturating_sub(1));
+                    let here = c.base_hangars(bi);
+                    let free_here = c.base_free_hangars(bi);
                     ui.label(format!(
-                        "Fleet: {} zeppelin(s), {} aloft",
-                        c.zeppelins,
-                        c.sorties.len()
-                    ));
-                    if c.zeppelins < ods_geo::MAX_ZEPPELINS
-                        && ui
-                            .button(format!("Commission ({}k)", ods_geo::ZEPPELIN_COST))
-                            .on_hover_text("another hull: another sortie in the air at once")
-                            .clicked()
-                    {
-                        match c.commission_zeppelin() {
-                            Ok(()) => log.push(
-                                "A new envelope rises from the yards, blessed and named.".into(),
-                            ),
-                            Err(e) => log.push(format!("cannot commission: {e:?}")),
-                        }
-                    }
+                        "Hangars here: {here} ({free_here} free) · fleet {} aloft {}",
+                        c.total_hangars(),
+                        c.sorties.len(),
+                    ))
+                    .on_hover_text(
+                        "each 2×2 hangar berths one Zeppelin; build them on the floor plan above",
+                    );
                     ui.separator();
                     ui.label("Sorties fly:");
                     if ui

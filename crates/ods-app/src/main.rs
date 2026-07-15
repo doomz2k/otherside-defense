@@ -241,6 +241,16 @@ pub struct Core {
     pub toasts: Vec<(String, f32)>,
     /// A mission awaiting the muster sheet's confirmation.
     pub pending_launch: Option<ods_geo::MissionKind>,
+    /// The chapterhouse the muster sheet flies/musters from.
+    pub launch_base: usize,
+    /// Soldiers hand-picked on the muster sheet (indices into the roster).
+    pub launch_manifest: Vec<usize>,
+    /// The mission the muster sheet's base/manifest were last set up for, so
+    /// opening it for a new mission re-seeds the defaults.
+    pub launch_for: Option<ods_geo::MissionKind>,
+    /// An on-site sortie the player chose to lead: skip the sheet (the squad
+    /// aboard is already chosen) and go straight to the battle next frame.
+    pub pending_lead: Option<ods_geo::MissionKind>,
     /// Run the clock until something happens, then stop.
     pub run_to_event: bool,
     /// A finished facility awaiting demolition confirmation (base, x, y).
@@ -394,6 +404,10 @@ impl Core {
             log_filter: 0,
             toasts: Vec::new(),
             pending_launch: None,
+            launch_base: 0,
+            launch_manifest: Vec::new(),
+            launch_for: None,
+            pending_lead: None,
             run_to_event: false,
             pending_demolish: None,
             combat_text: cfg.combat_text,

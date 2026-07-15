@@ -300,6 +300,14 @@ fn push_facility(v: &mut Vec<LitVertex>, i: &mut Vec<u32>, c: Vec3, f: Facility)
             box_at(v, i, c + Vec3::new(0.0, 0.0, 7.0), Vec3::new(CELL - 3.0, CELL - 3.0, 7.0), [0.10, 0.09, 0.11, 1.0]);
             box_at(v, i, c + Vec3::new(0.0, 0.0, 14.8), Vec3::new(CELL - 5.0, CELL - 5.0, 0.8), [0.75, 0.60, 0.20, 1.0]);
         }
+        Facility::Hangar => {
+            // A low, wide airship shed. Drawn per cell (the 2×2 renders four
+            // low slabs that read as one long dock), with a ribbed roof and a
+            // pale envelope resting inside.
+            box_at(v, i, c + Vec3::new(0.0, 0.0, 5.0), Vec3::new(CELL - 1.0, CELL - 1.0, 5.0), [0.30, 0.28, 0.30, 1.0]);
+            box_at(v, i, c + Vec3::new(0.0, 0.0, 11.0), Vec3::new(CELL - 2.0, CELL - 2.0, 2.0), dark);
+            box_at(v, i, c + Vec3::new(0.0, 0.0, 15.0), Vec3::new(CELL - 5.0, CELL - 5.0, 4.0), [0.78, 0.76, 0.70, 1.0]);
+        }
     }
 }
 

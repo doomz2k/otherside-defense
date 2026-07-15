@@ -32,11 +32,15 @@ pub enum Facility {
     Kennel,
     /// Warded storage: salvage survives a Reckoning's looting.
     Vault,
+    /// A 2x2 berth for one consecrated airship. Each hangar is one Zeppelin,
+    /// and a sortie flies from a base only if it has a free one.
+    Hangar,
 }
 
 impl Facility {
-    pub const BUILDABLE: [Facility; 11] = [
+    pub const BUILDABLE: [Facility; 12] = [
         Facility::Quarters,
+        Facility::Hangar,
         Facility::AugurArray,
         Facility::Library,
         Facility::Infirmary,
@@ -48,6 +52,14 @@ impl Facility {
         Facility::Kennel,
         Facility::Vault,
     ];
+
+    /// Cells wide × tall on the floor plan. Only the hangar spans 2×2.
+    pub fn footprint(self) -> (usize, usize) {
+        match self {
+            Facility::Hangar => (2, 2),
+            _ => (1, 1),
+        }
+    }
 
     pub fn cost(self) -> i64 {
         match self {
@@ -63,6 +75,7 @@ impl Facility {
             Facility::WardTower => 140,
             Facility::Kennel => 170,
             Facility::Vault => 190,
+            Facility::Hangar => 300,
         }
     }
 
@@ -80,6 +93,7 @@ impl Facility {
             Facility::WardTower => 8,
             Facility::Kennel => 10,
             Facility::Vault => 12,
+            Facility::Hangar => 16,
         }
     }
 
@@ -97,6 +111,7 @@ impl Facility {
             Facility::WardTower => 6,
             Facility::Kennel => 10,
             Facility::Vault => 8,
+            Facility::Hangar => 18,
         }
     }
 
@@ -114,6 +129,7 @@ impl Facility {
             Facility::WardTower => "Ward Tower",
             Facility::Kennel => "Kennel",
             Facility::Vault => "Vault",
+            Facility::Hangar => "Hangar",
         }
     }
 }
@@ -122,6 +138,11 @@ impl Facility {
 struct Slot {
     facility: Facility,
     days_left: u32,
+    /// For multi-cell facilities: `None` marks the top-left origin cell that
+    /// carries the real build state; `Some((ax, ay))` marks a satellite cell
+    /// pointing back at its origin. Single-cell facilities are all origins.
+    #[serde(default)]
+    anchor: Option<(u8, u8)>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -155,15 +176,32 @@ impl Chapterhouse {
             (3, 2, Facility::AugurArray),
             (3, 3, Facility::Library),
         ] {
-            ch.grid[y][x] = Some(Slot { facility: f, days_left: 0 });
+            ch.grid[y][x] = Some(Slot { facility: f, days_left: 0, anchor: None });
+        }
+        // A founding hangar so the house can answer a rift on day one: a 2×2
+        // berth to the north, its origin at (2,0), abutting the gatehouse.
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let anchor = if (dx, dy) == (0, 0) { None } else { Some((2u8, 0u8)) };
+            ch.grid[dy][2 + dx] = Some(Slot {
+                facility: Facility::Hangar,
+                days_left: 0,
+                anchor,
+            });
         }
         ch
     }
 
+    /// Resolve a cell to the origin (top-left) of whatever facility owns it.
+    fn origin_of(&self, x: usize, y: usize) -> Option<(usize, usize)> {
+        let slot = self.grid[y][x].as_ref()?;
+        Some(slot.anchor.map_or((x, y), |(ax, ay)| (ax as usize, ay as usize)))
+    }
+
     pub fn facility_at(&self, x: usize, y: usize) -> Option<(Facility, bool)> {
-        self.grid[y][x]
-            .as_ref()
-            .map(|s| (s.facility, s.days_left == 0))
+        let slot = self.grid[y][x].as_ref()?;
+        let (ox, oy) = self.origin_of(x, y)?;
+        let built = self.grid[oy][ox].as_ref().is_none_or(|o| o.days_left == 0);
+        Some((slot.facility, built))
     }
 
     pub fn is_free(&self, x: usize, y: usize) -> bool {
@@ -184,34 +222,57 @@ impl Chapterhouse {
         })
     }
 
-    /// Begin construction. The campaign layer checks and deducts funds.
-    /// New facilities must abut the existing halls — no free-standing
-    /// islands out on the grounds.
-    pub fn start_build(&mut self, facility: Facility, x: usize, y: usize) -> bool {
-        if !self.is_free(x, y) || !self.touches(x, y) {
+    /// Whether a facility's whole footprint anchored at (x, y) fits: in
+    /// bounds, every cell free, and at least one cell abutting the halls.
+    pub fn fits(&self, facility: Facility, x: usize, y: usize) -> bool {
+        let (fw, fh) = facility.footprint();
+        if x + fw > GRID || y + fh > GRID {
             return false;
         }
-        self.grid[y][x] = Some(Slot {
-            facility,
-            days_left: facility.build_days(),
-        });
+        let all_free = (0..fh).all(|dy| (0..fw).all(|dx| self.is_free(x + dx, y + dy)));
+        let touches = (0..fh).any(|dy| (0..fw).any(|dx| self.touches(x + dx, y + dy)));
+        all_free && touches
+    }
+
+    /// Begin construction. The campaign layer checks and deducts funds.
+    /// New facilities must abut the existing halls — no free-standing
+    /// islands out on the grounds — and their whole footprint must fit.
+    pub fn start_build(&mut self, facility: Facility, x: usize, y: usize) -> bool {
+        if !self.fits(facility, x, y) {
+            return false;
+        }
+        let (fw, fh) = facility.footprint();
+        let days = facility.build_days();
+        for dy in 0..fh {
+            for dx in 0..fw {
+                let anchor = if (dx, dy) == (0, 0) {
+                    None
+                } else {
+                    Some((x as u8, y as u8))
+                };
+                self.grid[y + dy][x + dx] = Some(Slot { facility, days_left: days, anchor });
+            }
+        }
         true
     }
 
-    /// Days of construction left at a cell (None when empty or finished).
+    /// Days of construction left at a cell (None when empty or finished),
+    /// read from whichever cell owns the footprint.
     pub fn build_days_left(&self, x: usize, y: usize) -> Option<u32> {
-        self.grid[y][x]
+        let (ox, oy) = self.origin_of(x, y)?;
+        self.grid[oy][ox]
             .as_ref()
             .filter(|s| s.days_left > 0)
             .map(|s| s.days_left)
     }
 
     /// Advance construction one day; returns facilities that completed today.
+    /// Only origin cells carry build state, so a 2×2 finishes once.
     pub fn advance_day(&mut self) -> Vec<Facility> {
         let mut done = Vec::new();
         for row in &mut self.grid {
             for slot in row.iter_mut().flatten() {
-                if slot.days_left > 0 {
+                if slot.anchor.is_none() && slot.days_left > 0 {
                     slot.days_left -= 1;
                     if slot.days_left == 0 {
                         done.push(slot.facility);
@@ -227,8 +288,34 @@ impl Chapterhouse {
             .iter()
             .flatten()
             .flatten()
-            .filter(|s| s.facility == facility && s.days_left == 0)
+            .filter(|s| s.facility == facility && s.days_left == 0 && s.anchor.is_none())
             .count()
+    }
+
+    /// Built airship berths — one Zeppelin apiece.
+    pub fn hangars(&self) -> usize {
+        self.count_active(Facility::Hangar)
+    }
+
+    /// Drop a finished hangar into the first 2×2 that fits (for save
+    /// migration). Silently does nothing if the grid has no room left.
+    pub fn ensure_hangar(&mut self) {
+        for y in 0..GRID {
+            for x in 0..GRID {
+                if self.fits(Facility::Hangar, x, y) {
+                    self.start_build(Facility::Hangar, x, y);
+                    // Finish it at once — a migrated berth is already standing.
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            if let Some(slot) = self.grid[y + dy][x + dx].as_mut() {
+                                slot.days_left = 0;
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
     }
 
     /// Beds for soldiers + occultists.
@@ -295,19 +382,94 @@ impl Chapterhouse {
         (2, 2) // unreachable in practice: every chapterhouse is founded with one
     }
 
-    /// Tear a facility out of the grid (Reckoning damage).
+    /// Tear a facility out of the grid (demolition or Reckoning damage) —
+    /// the whole footprint goes, whichever of its cells was struck.
     pub fn demolish(&mut self, x: usize, y: usize) {
-        if x < GRID && y < GRID {
-            self.grid[y][x] = None;
+        if x >= GRID || y >= GRID {
+            return;
         }
+        let Some((ox, oy)) = self.origin_of(x, y) else {
+            return;
+        };
+        let (anchor_x, anchor_y) = (ox as u8, oy as u8);
+        for row in self.grid.iter_mut() {
+            for cell in row.iter_mut() {
+                if cell.as_ref().is_some_and(|s| s.anchor == Some((anchor_x, anchor_y))) {
+                    *cell = None;
+                }
+            }
+        }
+        self.grid[oy][ox] = None;
     }
 
+    /// Upkeep, counted once per facility (a 2×2 hangar bills once).
     pub fn maintenance(&self) -> i64 {
         self.grid
             .iter()
             .flatten()
             .flatten()
+            .filter(|s| s.anchor.is_none())
             .map(|s| s.facility.maintenance())
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn founding_house_has_one_built_hangar() {
+        let ch = Chapterhouse::founding(Region::Europe);
+        assert_eq!(ch.hangars(), 1, "a founding house berths one airship");
+        // The whole 2×2 footprint reads as the same built facility.
+        for (x, y) in [(2, 0), (3, 0), (2, 1), (3, 1)] {
+            assert_eq!(ch.facility_at(x, y), Some((Facility::Hangar, true)), "{x},{y}");
+        }
+    }
+
+    #[test]
+    fn a_hangar_takes_a_two_by_two_and_counts_once() {
+        let mut ch = Chapterhouse::founding(Region::Europe);
+        // A second hangar abutting the augur array, to the east.
+        assert!(ch.start_build(Facility::Hangar, 4, 2));
+        // All four cells are occupied; the origin carries the build days.
+        for (x, y) in [(4, 2), (5, 2), (4, 3), (5, 3)] {
+            assert!(!ch.is_free(x, y), "cell {x},{y} should be taken");
+        }
+        // Under construction: not yet counted as an active berth.
+        assert_eq!(ch.hangars(), 1, "still just the founding berth while building");
+        for _ in 0..Facility::Hangar.build_days() {
+            ch.advance_day();
+        }
+        assert_eq!(ch.hangars(), 2, "finished: a second berth — counted once");
+        // Upkeep bills each facility once, not per cell (two hangars = 2×).
+        let expected = Facility::Gatehouse.maintenance()
+            + Facility::Quarters.maintenance()
+            + Facility::AugurArray.maintenance()
+            + Facility::Library.maintenance()
+            + 2 * Facility::Hangar.maintenance();
+        assert_eq!(ch.maintenance(), expected);
+    }
+
+    #[test]
+    fn demolishing_any_hangar_cell_removes_the_whole_berth() {
+        let mut ch = Chapterhouse::founding(Region::Europe);
+        assert_eq!(ch.hangars(), 1);
+        // Strike a satellite cell, not the origin.
+        ch.demolish(3, 1);
+        assert_eq!(ch.hangars(), 0, "the whole berth is gone");
+        for (x, y) in [(2, 0), (3, 0), (2, 1), (3, 1)] {
+            assert!(ch.is_free(x, y), "cell {x},{y} should be clear");
+        }
+    }
+
+    #[test]
+    fn a_hangar_will_not_overhang_the_grid_or_collide() {
+        let ch = Chapterhouse::founding(Region::Europe);
+        // Off the east edge: the 2×2 would run out of bounds.
+        assert!(!ch.fits(Facility::Hangar, GRID - 1, 2));
+        // Onto the founding cluster: cells already taken.
+        assert!(!ch.fits(Facility::Hangar, 2, 2));
     }
 }

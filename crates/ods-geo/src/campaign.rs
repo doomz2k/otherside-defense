@@ -256,6 +256,10 @@ pub struct Sortie {
     /// Where the flight left from (lat, lon) — the route's other end.
     #[serde(default)]
     pub from: (f32, f32),
+    /// The chapterhouse this sortie flew from — its hangar is occupied until
+    /// the squad is home.
+    #[serde(default)]
+    pub base: usize,
 }
 
 /// How a gargoyle sky-hunt on a sortie ended.
@@ -1025,6 +1029,10 @@ pub struct Campaign {
     /// A dogfight in progress: gargoyles on a led sortie's wind.
     #[serde(default)]
     pub interception: Option<Interception>,
+    /// A hand-picked manifest the next non-flying mission deploys, set by the
+    /// launch sheet. Transient — never saved.
+    #[serde(default, skip)]
+    next_manifest: Option<Vec<usize>>,
     /// Events minted outside advance_day (mission conclusions), flushed on
     /// the next day tick so the log still hears about them.
     #[serde(default, skip)]
@@ -1128,6 +1136,7 @@ impl Campaign {
             omen_day: 0,
             sorties: Vec::new(),
             interception: None,
+            next_manifest: None,
             pending_events: Vec::new(),
             month_score: 0,
             bad_months: 0,
@@ -1360,6 +1369,15 @@ impl Campaign {
         if let Some((item, left)) = self.manufacture.take() {
             self.jobs.push(ManufactureJob { base: 0, item, left });
         }
+        // Pre-hangar saves kept the fleet as a global count and no berths.
+        // Grant the old fleet's worth of hangars to the founding house so a
+        // loaded game can still fly, matching its former air power.
+        if !self.bases.is_empty() && self.total_hangars() == 0 {
+            let want = self.zeppelins.max(1) as usize;
+            for _ in 0..want {
+                self.bases[0].ensure_hangar();
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1512,19 +1530,6 @@ impl Campaign {
         Ok(())
     }
 
-    /// Commission another consecrated zeppelin: another sortie in the air.
-    pub fn commission_zeppelin(&mut self) -> Result<(), GeoError> {
-        self.guard_over()?;
-        if self.zeppelins >= MAX_ZEPPELINS {
-            return Err(GeoError::BadAssignment);
-        }
-        if self.funds < crate::data::economy().zeppelin {
-            return Err(GeoError::NoFunds);
-        }
-        self.funds -= crate::data::economy().zeppelin;
-        self.zeppelins += 1;
-        Ok(())
-    }
 
     /// Found a second (third...) chapterhouse in a region without one.
     pub fn found_chapterhouse(&mut self, region: Region) -> Result<(), GeoError> {
@@ -1898,81 +1903,87 @@ impl Campaign {
         self.fight(MissionKind::Rift(rift_id))
     }
 
+    /// Arm the next non-flying mission (nest, purge, final) with a chosen
+    /// manifest of soldier indices; consumed by `begin_mission`.
+    pub fn set_next_manifest(&mut self, manifest: Vec<usize>) {
+        self.next_manifest = Some(manifest);
+    }
+
+    /// Airship berths at a base — one Zeppelin apiece.
+    pub fn base_hangars(&self, base: usize) -> usize {
+        self.bases.get(base).map_or(0, |b| b.hangars())
+    }
+
+    /// Berths at a base not currently holding a sortie aloft.
+    pub fn base_free_hangars(&self, base: usize) -> usize {
+        let out = self.sorties.iter().filter(|s| s.base == base).count();
+        self.base_hangars(base).saturating_sub(out)
+    }
+
+    /// The whole consecrated fleet: every built hangar across every house.
+    pub fn total_hangars(&self) -> usize {
+        (0..self.bases.len()).map(|b| self.base_hangars(b)).sum()
+    }
+
     /// Days of zeppelin flight from the nearest chapterhouse to a detected
-    /// rift. Zero when a chapterhouse stands in the rift's region — those
-    /// strikes roll out the same day.
+    /// rift. Zero when a chapterhouse stands in the rift's region.
     pub fn travel_days(&self, rift_id: u32) -> Result<u32, GeoError> {
+        let best = (0..self.bases.len())
+            .filter_map(|b| self.travel_days_from(b, rift_id).ok())
+            .min();
+        best.ok_or(GeoError::UnknownRift)
+    }
+
+    /// Days of flight from a specific chapterhouse to a detected rift. Zero
+    /// when that house stands in the rift's own region.
+    pub fn travel_days_from(&self, base: usize, rift_id: u32) -> Result<u32, GeoError> {
         let rift = self
             .rifts
             .iter()
             .find(|r| r.id == rift_id && r.detected)
             .ok_or(GeoError::UnknownRift)?;
-        if self.bases.iter().any(|b| b.region == rift.region) {
+        let house = self.bases.get(base).ok_or(GeoError::UnknownRift)?;
+        if house.region == rift.region {
             return Ok(0);
         }
-        let arc = self
-            .bases
-            .iter()
-            .map(|b| Region::arc_degrees(b.region.centroid(), (rift.lat, rift.lon)))
-            .fold(f32::MAX, f32::min);
+        let arc = Region::arc_degrees(house.region.centroid(), (rift.lat, rift.lon));
         // ~60 degrees of arc a day, always at least a day when it's abroad.
         Ok((1 + (arc / 60.0) as u32).min(3))
     }
 
-    /// Put a squad on the zeppelin toward a distant rift. They are locked
-    /// aboard until arrival; `lead` keeps the fight for the player, otherwise
-    /// it auto-resolves the day the squad lands. Same-region strikes don't
-    /// need this — assault directly.
-    pub fn dispatch_squad(&mut self, rift_id: u32, lead: bool) -> Result<u32, GeoError> {
+    /// Fly a hand-picked manifest from `base` toward a rift. The chosen
+    /// soldiers are locked aboard until arrival and one of the base's hangars
+    /// is held for the duration; `lead` keeps the fight for the player,
+    /// otherwise it auto-resolves the day the squad lands. A same-region
+    /// strike flies for zero days and is on-site at once.
+    pub fn dispatch_manifest(
+        &mut self,
+        rift_id: u32,
+        base: usize,
+        manifest: Vec<usize>,
+        lead: bool,
+    ) -> Result<u32, GeoError> {
         self.guard_over()?;
-        let days = self.travel_days(rift_id)?
-            + if self.posture == Posture::Cautious { 1 } else { 0 };
         if self.sorties.iter().any(|s| s.rift_id == rift_id) {
             return Err(GeoError::SortieAlready);
         }
-        if self.sorties.len() >= self.zeppelins as usize {
+        if base >= self.bases.len() || self.base_free_hangars(base) == 0 {
             return Err(GeoError::NoZeppelin);
         }
-        let want = self.active_squad;
-        let mut squad: Vec<usize> = self
-            .soldiers
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.is_fit() && want != 0 && s.squad == want)
-            .map(|(i, _)| i)
+        let manifest: Vec<usize> = manifest
+            .into_iter()
+            .filter(|&i| self.soldiers.get(i).is_some_and(|s| s.is_fit()))
             .take(SQUAD_SIZE)
             .collect();
-        for (i, s) in self.soldiers.iter().enumerate() {
-            if squad.len() >= SQUAD_SIZE {
-                break;
-            }
-            if s.is_fit() && !squad.contains(&i) {
-                squad.push(i);
-            }
-        }
-        if squad.is_empty() {
+        if manifest.is_empty() {
             return Err(GeoError::NoSquadFit);
         }
-        for &i in &squad {
+        let days = self.travel_days_from(base, rift_id)?
+            + if self.posture == Posture::Cautious { 1 } else { 0 };
+        for &i in &manifest {
             self.soldiers[i].aboard = Some(rift_id);
         }
-        // The route's home end: the chapterhouse nearest the rift.
-        let to = self
-            .rifts
-            .iter()
-            .find(|r| r.id == rift_id)
-            .map(|r| (r.lat, r.lon))
-            .unwrap_or((0.0, 0.0));
-        let from = self
-            .bases
-            .iter()
-            .map(|b| b.region.centroid())
-            .min_by(|a, b| {
-                Region::arc_degrees(*a, to)
-                    .partial_cmp(&Region::arc_degrees(*b, to))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .unwrap_or((50.0, 15.0));
+        let from = self.bases[base].region.centroid();
         self.sorties.push(Sortie {
             rift_id,
             days_left: days,
@@ -1980,8 +1991,52 @@ impl Campaign {
             bloodied: false,
             days_total: days,
             from,
+            base,
         });
         Ok(days)
+    }
+
+    /// Compatibility muster: pick the base best placed to answer (a free
+    /// hangar, nearest the rift) and load its readiest fit soldiers, then fly.
+    /// The interactive path uses `dispatch_manifest` with a chosen manifest.
+    pub fn dispatch_squad(&mut self, rift_id: u32, lead: bool) -> Result<u32, GeoError> {
+        self.guard_over()?;
+        if self.sorties.iter().any(|s| s.rift_id == rift_id) {
+            return Err(GeoError::SortieAlready);
+        }
+        let to = self
+            .rifts
+            .iter()
+            .find(|r| r.id == rift_id)
+            .map(|r| (r.lat, r.lon))
+            .ok_or(GeoError::UnknownRift)?;
+        // The nearest base that still has a berth free.
+        let base = (0..self.bases.len())
+            .filter(|&b| self.base_free_hangars(b) > 0)
+            .min_by(|&a, &b| {
+                let da = Region::arc_degrees(self.bases[a].region.centroid(), to);
+                let db = Region::arc_degrees(self.bases[b].region.centroid(), to);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .ok_or(GeoError::NoZeppelin)?;
+        // Load fit soldiers, the house's own garrison first.
+        let mut manifest: Vec<usize> = self
+            .soldiers
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_fit() && s.home == base)
+            .map(|(i, _)| i)
+            .take(SQUAD_SIZE)
+            .collect();
+        for (i, s) in self.soldiers.iter().enumerate() {
+            if manifest.len() >= SQUAD_SIZE {
+                break;
+            }
+            if s.is_fit() && !manifest.contains(&i) {
+                manifest.push(i);
+            }
+        }
+        self.dispatch_manifest(rift_id, base, manifest, lead)
     }
 
     /// Unmark a rift's flying squad and drop the sortie (post-battle or on
@@ -2243,42 +2298,43 @@ impl Campaign {
         // (applied to the squad below, after the battle is built).
         let trophy_bravery = (self.trophies as i32 * 2).min(10);
 
-        // A sortie's squad is whoever flew out; otherwise muster the fit
-        // (for Reckonings, only those stationed at the struck house).
-        let aboard: Vec<usize> = match kind {
-            MissionKind::Rift(id) => self
-                .soldiers
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| s.aboard == Some(id))
-                .map(|(i, _)| i)
-                .collect(),
-            _ => Vec::new(),
-        };
-        let squad_idx: Vec<usize> = if aboard.is_empty() {
-            // The active standing squad answers first; the pool fills gaps.
-            let want = self.active_squad;
-            let mut picked: Vec<usize> = self
-                .soldiers
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| {
-                    s.is_fit() && (!defense || s.home == base) && want != 0 && s.squad == want
-                })
-                .map(|(i, _)| i)
+        // Who deploys, in order of precedence:
+        //   1. a hand-picked manifest set by the launch sheet (nests, purges,
+        //      finals — missions that don't fly a sortie);
+        //   2. the soldiers a rift sortie flew out with (their `aboard` mark);
+        //   3. a fallback muster of the fit — for a Reckoning, only the
+        //      garrison stationed at the struck house.
+        let squad_idx: Vec<usize> = if let Some(m) = self
+            .next_manifest
+            .take()
+            .filter(|m| m.iter().any(|&i| self.soldiers.get(i).is_some_and(|s| s.is_fit())))
+        {
+            m.into_iter()
+                .filter(|&i| self.soldiers.get(i).is_some_and(|s| s.is_fit()))
                 .take(SQUAD_SIZE)
-                .collect();
-            for (i, s) in self.soldiers.iter().enumerate() {
-                if picked.len() >= SQUAD_SIZE {
-                    break;
-                }
-                if s.is_fit() && (!defense || s.home == base) && !picked.contains(&i) {
-                    picked.push(i);
-                }
-            }
-            picked
+                .collect()
         } else {
-            aboard
+            let aboard: Vec<usize> = match kind {
+                MissionKind::Rift(id) => self
+                    .soldiers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.aboard == Some(id))
+                    .map(|(i, _)| i)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if !aboard.is_empty() {
+                aboard
+            } else {
+                self.soldiers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.is_fit() && (!defense || s.home == base))
+                    .map(|(i, _)| i)
+                    .take(SQUAD_SIZE)
+                    .collect()
+            }
         };
         if squad_idx.is_empty() {
             return Err(GeoError::NoSquadFit);
@@ -4914,7 +4970,32 @@ mod tests {
     }
 
     #[test]
-    fn one_hull_one_sortie_until_the_yards_deliver() {
+    fn a_picked_manifest_flies_and_holds_the_berth() {
+        let mut c = Campaign::new(88);
+        c.month_plan.clear();
+        c.rifts.clear();
+        let id = detected_rift(&mut c, RiftKind::Harvest, Region::Africa);
+        // Hand-pick soldiers 0 and 2 to fly from the founding house.
+        c.dispatch_manifest(id, 0, vec![0, 2], true).unwrap();
+        assert_eq!(c.soldiers[0].aboard, Some(id));
+        assert_eq!(c.soldiers[2].aboard, Some(id));
+        assert_eq!(c.base_free_hangars(0), 0, "the one berth is held while aloft");
+        // No second berth free: a second strike can't fly from here.
+        let id2 = detected_rift(&mut c, RiftKind::Harvest, Region::Asia);
+        assert_eq!(
+            c.dispatch_manifest(id2, 0, vec![1], true),
+            Err(GeoError::NoZeppelin),
+        );
+        // An empty (or wholly unfit) manifest is turned away.
+        c.bases.push(crate::base::Chapterhouse::founding(Region::Asia));
+        assert_eq!(
+            c.dispatch_manifest(id2, 1, vec![], true),
+            Err(GeoError::NoSquadFit),
+        );
+    }
+
+    #[test]
+    fn one_berth_one_sortie_until_another_hangar_stands() {
         let mut c = Campaign::new(61);
         c.month_plan.clear();
         c.rifts.clear();
@@ -4929,13 +5010,13 @@ mod tests {
         assert_eq!(
             c.dispatch_squad(b, false),
             Err(GeoError::NoZeppelin),
-            "one hull, one sortie"
+            "one berth, one sortie"
         );
-        c.funds += ZEPPELIN_COST;
-        c.commission_zeppelin().unwrap();
-        assert_eq!(c.zeppelins, 2);
+        // A second chapterhouse brings its own founding hangar.
+        c.bases.push(crate::base::Chapterhouse::founding(Region::Africa));
+        assert_eq!(c.total_hangars(), 2, "two berths across two houses");
         c.dispatch_squad(b, false).unwrap();
-        assert_eq!(c.sorties.len(), 2, "two hulls fly two sorties at once");
+        assert_eq!(c.sorties.len(), 2, "two berths fly two sorties at once");
     }
 
     #[test]
@@ -5168,16 +5249,18 @@ mod tests {
     }
 
     #[test]
-    fn squads_answer_their_banner_first() {
+    fn a_picked_manifest_is_who_deploys() {
         let mut c = Campaign::new(71);
-        // Two in the Lamplighters, the rest unassigned.
-        c.soldiers[0].squad = 1;
-        c.soldiers[1].squad = 1;
-        c.active_squad = 1;
         let id = detected_rift(&mut c, RiftKind::Scouting, Region::Europe);
+        // The launch sheet hand-picks soldiers 2 and 3 for this strike.
+        c.set_next_manifest(vec![2, 3]);
         let (_, token) = c.begin_mission(MissionKind::Rift(id)).unwrap();
-        assert!(token.squad_idx.contains(&0) && token.squad_idx.contains(&1),
-            "the banner musters first: {:?}", token.squad_idx);
+        assert_eq!(
+            token.squad_idx,
+            vec![2, 3],
+            "exactly the chosen manifest deploys: {:?}",
+            token.squad_idx
+        );
     }
 
     #[test]
