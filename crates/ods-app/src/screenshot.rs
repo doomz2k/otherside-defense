@@ -4,7 +4,7 @@
 //! anyone who wants a quick still without launching.
 //!
 //!   ods-app --screenshot battle  shot.png [seed]
-//!   ods-app --screenshot globe   shot.png
+//!   ods-app --screenshot globe   shot.png [center longitude in degrees]
 //!   ods-app --screenshot base    shot.png
 
 use anyhow::{Context, Result};
@@ -18,7 +18,7 @@ pub fn capture(scene: &str, out: &str, seed: u64) -> Result<()> {
     let mut renderer =
         Renderer::headless(W, H).context("no GPU adapter — install mesa-vulkan-drivers")?;
     match scene {
-        "globe" => globe(&mut renderer)?,
+        "globe" => globe(&mut renderer, seed)?,
         "base" => base(&mut renderer)?,
         _ => battle(&mut renderer, seed)?,
     }
@@ -74,8 +74,9 @@ fn battle(renderer: &mut Renderer, seed: u64) -> Result<()> {
     Ok(())
 }
 
-/// The world from orbit, with a young campaign's markers on it.
-fn globe(renderer: &mut Renderer) -> Result<()> {
+/// The world from orbit, with a young campaign's markers on it. The seed
+/// doubles as the centered longitude in degrees, so any face can be checked.
+fn globe(renderer: &mut Renderer, seed: u64) -> Result<()> {
     let c = ods_geo::Campaign::new(7);
     let (verts, idx) = crate::globe::build_globe(None);
     renderer.set_globe(&verts, &idx);
@@ -90,7 +91,9 @@ fn globe(renderer: &mut Renderer) -> Result<()> {
     let mut cam = OrbitCamera::new(Vec3::ZERO);
     cam.distance = 640.0;
     cam.pitch = 0.35;
-    let sun = crate::globe::latlon_to_pos(12.0, 30.0, 1.0);
+    let center_lon = (seed % 360) as f32;
+    cam.yaw = center_lon.to_radians();
+    let sun = crate::globe::latlon_to_pos(12.0, center_lon + 25.0, 1.0);
     let eye = cam.eye();
     renderer.set_camera_flash(
         cam.view_proj(W as f32 / H as f32),

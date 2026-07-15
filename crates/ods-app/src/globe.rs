@@ -1,5 +1,5 @@
-//! The Geoscape globe: a lit UV-sphere with continents from an embedded
-//! equirectangular landmask, surface markers for rifts/nests/the
+//! The Geoscape globe: a lit UV-sphere with continents and biomes from an
+//! embedded equirectangular class map, surface markers for rifts/nests/the
 //! chapterhouse, and ray-sphere picking to select regions.
 //!
 //! Coordinates: Z is up (north pole +Z), latitude in degrees [-90, 90],
@@ -11,77 +11,57 @@ use ods_render::LitVertex;
 
 pub const GLOBE_RADIUS: f32 = 200.0;
 
-const STACKS: usize = 192;
-const SLICES: usize = 384;
+// Fine enough that the half-degree earth plates resolve: 0.625° per quad.
+const STACKS: usize = 288;
+const SLICES: usize = 576;
 
-// The 1994 palette: a deep saturated ocean and honest green land — the
+// The 1994 palette: a deep saturated ocean, land colored by biome — the
 // dedicated globe shader keeps them flat, so the colors carry the look.
 const OCEAN: [f32; 3] = [0.03, 0.10, 0.32];
-const LAND: [f32; 3] = [0.16, 0.44, 0.13];
-const ICE: [f32; 3] = [0.80, 0.84, 0.90];
+const ICE: [f32; 3] = [0.84, 0.87, 0.92];
 const HIGHLIGHT: [f32; 3] = [0.45, 0.38, 0.12];
 
-/// 64x32 equirectangular landmask, row 0 = north. '#' is land.
-const LANDMASK: [&str; 32] = [
-    "................................................................",
-    "............########.#######.......#.........######.............",
-    "..........##################.......#....#######################.",
-    ".....################.######.......#############################",
-    "...###################......##....##############################",
-    "..####################............##############################",
-    ".........##############......###################################",
-    "..........#############.......#############################..#..",
-    "..........############.......###############################....",
-    "..........###########........###....#######################.....",
-    "...........#########........############################........",
-    "...........#####...........################.############........",
-    "............######.........###############..####..#####.........",
-    ".............####.........#############.....###...#######.......",
-    "..............####..........############......#..#####.##.......",
-    "...............#######......###########..........########.####..",
-    "..............##########.....#########............#############.",
-    "..............###########....########..............#####..####..",
-    "..............###########....########...............#######.....",
-    "...............#########.....#########.............#########....",
-    "................#######.......#####.#..............#########....",
-    "................######........####..................#######.....",
-    "................#####..........#........................##......",
-    "................####....................................##...##.",
-    "................###.........................................##..",
-    "................###.............................................",
-    "................................................................",
-    "...................###..........................................",
-    "......#########...#############...#############...###########...",
-    "....#########################################################...",
-    "..#############################################################.",
-    "################################################################",
-];
+/// The cartographer's plates: a 720x360 equirectangular class map, half a
+/// degree per texel, row 0 = north. Each byte is a biome class; 0 is ocean.
+/// Traced from real continent outlines and climate zones by
+/// `tools/gen_earth.py`, which regenerates this file.
+static EARTH: &[u8] = include_bytes!("../assets/earth.bin");
+const EARTH_W: usize = 720;
+const EARTH_H: usize = 360;
 
-fn is_land(lat: f32, lon: f32) -> bool {
-    let row = (((90.0 - lat) / 180.0) * LANDMASK.len() as f32) as usize;
-    let col = (((lon + 180.0) / 360.0) * 64.0) as usize;
-    let row = row.min(LANDMASK.len() - 1);
-    let col = col.min(63);
-    LANDMASK[row].as_bytes()[col] == b'#'
+const CLASS_OCEAN: u8 = 0;
+const CLASS_ICE: u8 = 1;
+
+/// Biome class at a point: 0 ocean, 1 ice, 2 tundra, 3 boreal, 4 temperate,
+/// 5 steppe, 6 savanna, 7 desert, 8 rainforest.
+fn earth_class(lat: f32, lon: f32) -> u8 {
+    let row = (((90.0 - lat) / 180.0) * EARTH_H as f32) as isize;
+    let col = (((lon + 180.0) / 360.0) * EARTH_W as f32) as isize;
+    let row = row.clamp(0, EARTH_H as isize - 1) as usize;
+    let col = col.rem_euclid(EARTH_W as isize) as usize;
+    EARTH[row * EARTH_W + col]
 }
 
-/// The landmask is coarse; the mesh no longer is. Perturb the sample point
-/// with position-hashed jitter so coastlines break into ragged, detailed
-/// pixel-coast instead of mask-cell staircases.
-fn is_land_detailed(lat: f32, lon: f32) -> bool {
-    let h = |a: f32, b: f32, k: u32| -> f32 {
-        let mut x = (a * 91.7) as i32 as u32;
-        x = x
-            .wrapping_mul(2654435761)
-            .wrapping_add((b * 73.3) as i32 as u32)
-            .wrapping_mul(1274126177)
-            .wrapping_add(k);
-        x ^= x >> 15;
-        ((x.wrapping_mul(2246822519) >> 9) & 1023) as f32 / 1023.0 - 0.5
-    };
-    let jlat = h(lat, lon, 1) * 2.4;
-    let jlon = h(lat, lon, 2) * 2.4;
-    is_land((lat + jlat).clamp(-90.0, 90.0), lon + jlon)
+fn is_land(lat: f32, lon: f32) -> bool {
+    earth_class(lat, lon) != CLASS_OCEAN
+}
+
+/// Each biome's base ink, chosen for the flat globe shader: sand yellow for
+/// desert, straw for steppe, sun-cured gold for savanna, honest green for
+/// temperate country, near-black green for spruce and jungle, washed moss
+/// for tundra, cap white for the ice.
+fn class_color(class: u8) -> [f32; 3] {
+    match class {
+        CLASS_ICE => ICE,
+        2 => [0.42, 0.44, 0.32], // tundra
+        3 => [0.08, 0.27, 0.11], // boreal
+        4 => [0.16, 0.44, 0.13], // temperate
+        5 => [0.31, 0.36, 0.11], // steppe
+        6 => [0.42, 0.40, 0.12], // savanna
+        7 => [0.74, 0.62, 0.29], // desert
+        8 => [0.05, 0.23, 0.07], // rainforest
+        _ => OCEAN,
+    }
 }
 
 /// Rough box-partition of the world into our eight council regions.
@@ -149,11 +129,15 @@ fn surface_rise(lat: f32, lon: f32) -> f32 {
         ((x.wrapping_mul(2246822519) >> 9) & 255) as f32 / 255.0
     };
     let mut rise = 0.0;
-    if is_land_detailed(lat, lon) {
+    let class = earth_class(lat, lon);
+    if class != CLASS_OCEAN {
         rise += relief_h * relief_h * 4.5;
-    }
-    if lat.abs() > 66.0 {
-        rise += ((lat.abs() - 66.0) / 24.0).min(1.0) * 2.0;
+        if class == CLASS_ICE {
+            rise += 2.0; // the sheets sit proud of the sea
+        }
+    } else if lat > 72.0 {
+        // Arctic pack ice creeps over the polar sea.
+        rise += ((lat - 72.0) / 8.0).min(1.0) * 1.8;
     }
     rise
 }
@@ -170,20 +154,21 @@ pub fn build_globe(selected: Option<Region>) -> (Vec<LitVertex>, Vec<u32>) {
             let pos = latlon_to_pos(lat, lon, GLOBE_RADIUS + surface_rise(lat, lon));
             let normal = pos.normalize();
 
-            let land = is_land_detailed(lat, lon);
-            let mut color = if land { LAND } else { OCEAN };
+            let class = earth_class(lat, lon);
+            let land = class != CLASS_OCEAN;
+            let mut color = if land { class_color(class) } else { OCEAN };
             // Shallows: ocean within reach of a coast shelves paler.
             if !land
-                && (is_land_detailed(lat + 2.0, lon)
-                    || is_land_detailed(lat - 2.0, lon)
-                    || is_land_detailed(lat, lon + 2.0)
-                    || is_land_detailed(lat, lon - 2.0))
+                && (is_land(lat + 1.0, lon)
+                    || is_land(lat - 1.0, lon)
+                    || is_land(lat, lon + 1.0)
+                    || is_land(lat, lon - 1.0))
             {
                 color = [OCEAN[0] + 0.05, OCEAN[1] + 0.09, OCEAN[2] + 0.10];
             }
-            if land {
-                // Mottle the land like the original's hand-placed terrain
-                // pixels: forests, plains, and badlands in one green.
+            if land && class != CLASS_ICE {
+                // Mottle within the biome like the original's hand-placed
+                // terrain pixels — texture, never a different climate.
                 let h = {
                     let mut x = (lat * 53.7) as i32 as u32;
                     x = x
@@ -193,27 +178,22 @@ pub fn build_globe(selected: Option<Region>) -> (Vec<LitVertex>, Vec<u32>) {
                     x ^= x >> 15;
                     ((x.wrapping_mul(2246822519) >> 9) & 255) as f32 / 255.0
                 };
-                let m = 0.80 + 0.45 * h;
+                let m = 0.88 + 0.26 * h;
                 for c in color.iter_mut() {
                     *c = (*c * m).min(1.0);
                 }
-                if h > 0.86 {
-                    // The occasional dun badland breaks the green.
-                    color[0] = (color[0] + 0.14).min(1.0);
-                    color[2] *= 0.6;
-                }
-                if h > 0.965 {
+                if h > 0.975 {
                     // The high ranges: rock, rarely snow — ranges, not
                     // dandruff.
                     color = [0.46, 0.44, 0.42];
                 }
-                if h > 0.99 {
+                if h > 0.995 {
                     color = [0.72, 0.74, 0.78];
                 }
             }
-            // Polar ice creeps over everything near the caps.
-            let ice = ((lat.abs() - 62.0) / 12.0).clamp(0.0, 1.0);
-            if ice > 0.0 && (land || lat.abs() > 74.0) {
+            // Arctic pack ice whitens the polar sea.
+            if !land && lat > 72.0 {
+                let ice = ((lat - 72.0) / 6.0).clamp(0.0, 1.0);
                 for (c, i) in color.iter_mut().zip(ICE) {
                     *c = *c + (i - *c) * ice;
                 }
@@ -629,17 +609,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn landmask_rows_are_64_wide() {
-        for (i, row) in LANDMASK.iter().enumerate() {
-            assert_eq!(row.len(), 64, "row {i}");
-        }
+    fn earth_plates_are_full_size() {
+        assert_eq!(EARTH.len(), EARTH_W * EARTH_H);
+        assert!(EARTH.iter().all(|&c| c <= 8), "unknown biome class");
+        // The plates actually hold both land and sea.
+        assert!(EARTH.contains(&CLASS_OCEAN));
+        assert!(EARTH.iter().any(|&c| c != CLASS_OCEAN));
     }
 
     #[test]
     fn known_places_resolve() {
         assert!(is_land(48.0, 2.0), "Paris is on land");
         assert!(is_land(-15.0, -55.0), "Brazil is on land");
+        assert!(is_land(51.5, -0.1), "London is on land");
         assert!(!is_land(0.0, -140.0), "the mid-Pacific is ocean");
+        assert!(!is_land(0.0, -30.0), "the mid-Atlantic is ocean");
+        assert_eq!(earth_class(23.0, 10.0), 7, "the Sahara is desert");
+        assert_eq!(earth_class(-5.0, -60.0), 8, "the Amazon is rainforest");
+        assert_eq!(earth_class(60.0, 100.0), 3, "Siberia is boreal");
+        assert_eq!(earth_class(75.0, -40.0), CLASS_ICE, "Greenland is ice");
+        assert_eq!(earth_class(-25.0, 133.0), 7, "the Outback is desert");
         assert_eq!(region_at(48.0, 2.0), Region::Europe);
         assert_eq!(region_at(40.0, -100.0), Region::NorthAmerica);
         assert_eq!(region_at(-25.0, 135.0), Region::Oceania);
