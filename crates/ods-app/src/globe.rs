@@ -252,6 +252,33 @@ pub fn latlon_to_pos(lat: f32, lon: f32, radius: f32) -> Vec3 {
     )
 }
 
+/// Great-circle interpolation between two lat/lon points — the true shortest
+/// path over the sphere, for flight arcs, filaments, and sea lanes.
+fn slerp_latlon(a: (f32, f32), b: (f32, f32), t: f32) -> (f32, f32) {
+    let pa = latlon_to_pos(a.0, a.1, 1.0);
+    let pb = latlon_to_pos(b.0, b.1, 1.0);
+    let omega = pa.dot(pb).clamp(-1.0, 1.0).acos();
+    let p = if omega < 1.0e-4 {
+        pa
+    } else {
+        let s = omega.sin();
+        pa * (((1.0 - t) * omega).sin() / s) + pb * ((t * omega).sin() / s)
+    };
+    let lat = (p.z / p.length()).clamp(-1.0, 1.0).asin().to_degrees();
+    let lon = p.y.atan2(p.x).to_degrees();
+    (lat, lon)
+}
+
+/// The great shipping lanes, as great-circle routes over open water — busy
+/// early, emptying as the world's fear climbs.
+const SEA_LANES: [((f32, f32), (f32, f32)); 5] = [
+    ((40.0, -70.0), (50.0, -10.0)),  // North Atlantic
+    ((35.0, 150.0), (34.0, -125.0)), // trans-Pacific
+    ((13.0, 52.0), (9.0, 75.0)),     // Arabian Sea
+    ((-34.0, 18.0), (-34.0, -52.0)), // Cape route
+    ((-31.0, 115.0), (1.0, 105.0)),  // Australia to the straits
+];
+
 /// Terrain relief above the sphere: land rises on the same noise that
 /// mottles it, and the ice caps sit proud of the sea.
 fn surface_rise(lat: f32, lon: f32) -> f32 {
@@ -526,39 +553,29 @@ pub fn build_markers(campaign: &Campaign, time: f32) -> (Vec<LitVertex>, Vec<u32
         }
     }
 
-    // Sorties crawl their great-circle routes: the zeppelin as a small
-    // gold mote, with the road ahead dotted out to the rift.
+    // Sorties fly the true great-circle route, arced up off the surface: the
+    // zeppelin a small gold mote with the road ahead dashed out to the rift.
     for sortie in &campaign.sorties {
         let Some(rift) = campaign.rifts.iter().find(|r| r.id == sortie.rift_id) else {
             continue;
         };
         let total = sortie.days_total.max(1) as f32;
         let progress = (1.0 - sortie.days_left as f32 / total).clamp(0.0, 1.0);
-        let lerp = |t: f32| -> (f32, f32) {
-            // Straight lat/lon interpolation, shortest way around.
-            let mut dlon = rift.lon - sortie.from.1;
-            if dlon > 180.0 {
-                dlon -= 360.0;
-            }
-            if dlon < -180.0 {
-                dlon += 360.0;
-            }
-            (
-                sortie.from.0 + (rift.lat - sortie.from.0) * t,
-                sortie.from.1 + dlon * t,
-            )
-        };
-        // The road ahead, dotted.
+        let from = sortie.from;
+        let to = (rift.lat, rift.lon);
+        let arc = |t: f32| -> (f32, f32) { slerp_latlon(from, to, t) };
+        // The road ahead, dashed and arcing highest at the mid-point.
         let mut t = progress;
         while t < 1.0 {
-            let (lat, lon) = lerp(t);
-            push_at(lat, lon, 1.4, 1.4, [0.9, 0.8, 0.5, 1.0]);
-            t += 0.08;
+            let (lat, lon) = arc(t);
+            let alt = 1.4 + (t * std::f32::consts::PI).sin() * 6.0;
+            push_at(lat, lon, alt, 1.3, [0.9, 0.8, 0.5, 1.0]);
+            t += 0.05;
         }
         // The ship itself: envelope fore and aft, gondola slung below,
         // bobbing on the wind, trailing a fading wake.
-        let (lat, lon) = lerp(progress);
-        let (lat2, lon2) = lerp((progress + 0.04).min(1.0));
+        let (lat, lon) = arc(progress);
+        let (lat2, lon2) = arc((progress + 0.02).min(1.0));
         let bob = 8.0 + 0.5 * (time * 3.0).sin();
         let (dlat, dlon) = (lat2 - lat, lon2 - lon);
         let n = (dlat * dlat + dlon * dlon).sqrt().max(0.001);
@@ -576,6 +593,25 @@ pub fn build_markers(campaign: &Campaign, time: f32) -> (Vec<LitVertex>, Vec<u32
                 1.2 - w as f32 * 0.25,
                 [0.75, 0.75, 0.7, 1.0],
             );
+        }
+    }
+
+    // Interception: the gargoyles close on the held sortie from every side,
+    // their approach trails converging on the one point.
+    if let Some(inter) = &campaign.interception {
+        let target = centroid(inter.region);
+        for g in 0..inter.gargoyles.min(4) {
+            let ang = g as f32 * std::f32::consts::TAU / 4.0 + time * 0.5;
+            let start = (target.0 + ang.sin() * 20.0, target.1 + ang.cos() * 28.0);
+            let closed = (time * 0.4 + g as f32 * 0.25).rem_euclid(1.0);
+            for k in 0..6 {
+                let t = closed + k as f32 * 0.03;
+                if t > 1.0 {
+                    break;
+                }
+                let (lat, lon) = slerp_latlon(start, target, t);
+                push_at(lat, lon, 6.0, 1.3, [0.72, 0.15, 0.20, 1.0]);
+            }
         }
     }
 
@@ -888,7 +924,7 @@ pub fn build_geo_omens(
             continue;
         }
         let (lat, lon) = centroid(region);
-        let n = ((panic - 40) / 15).clamp(1, 5);
+        let n = ((panic - 40) / 15).clamp(1, 5) as u32;
         for k in 0..n {
             let ph = (time * 0.7 + k as f32 * 1.61).fract();
             let center = latlon_to_pos(
@@ -897,6 +933,60 @@ pub fn build_geo_omens(
                 GLOBE_RADIUS + 2.0 + ph * 9.0,
             );
             disc(&mut verts, &mut indices, center, 1.5, [1.0, 0.45, 0.1, 0.5 * (1.0 - ph)]);
+        }
+    }
+    // Corruption filaments: a red thread arcing from each fallen patron's
+    // seat back to the nearest open rift, with a bright bead crawling along
+    // it — the spread of the enemy drawn as a web, not a list.
+    for &region in &campaign.corrupted_patrons {
+        let (rlat, rlon) = centroid(region);
+        let Some(rift) = campaign
+            .rifts
+            .iter()
+            .filter(|r| r.detected)
+            .min_by(|x, y| {
+                let dx = (x.lat - rlat).hypot(x.lon - rlon);
+                let dy = (y.lat - rlat).hypot(y.lon - rlon);
+                dx.total_cmp(&dy)
+            })
+        else {
+            continue;
+        };
+        let pulse = 0.5 + 0.5 * (time * 3.0).sin();
+        let bead = (time * 0.2).fract();
+        const SEGS: u32 = 16;
+        for k in 0..SEGS {
+            let t = k as f32 / SEGS as f32;
+            let (lat, lon) = slerp_latlon((rlat, rlon), (rift.lat, rift.lon), t);
+            let lift = (t * std::f32::consts::PI).sin() * 5.0;
+            let center = latlon_to_pos(lat, lon, GLOBE_RADIUS + 3.0 + lift);
+            let bright = if (t - bead).abs() < 0.08 { 0.5 } else { 0.0 };
+            disc(
+                &mut verts,
+                &mut indices,
+                center,
+                1.2,
+                [0.85, 0.12, 0.20, 0.20 + 0.25 * pulse + bright],
+            );
+        }
+    }
+    // Sea lanes: merchant traffic on the great-circle routes, thinning as the
+    // world's fear rises — an emptying ocean is a doom meter.
+    let avg_panic = if campaign.region_panic.is_empty() {
+        0.0
+    } else {
+        campaign.region_panic.values().map(|&p| p as f32).sum::<f32>()
+            / campaign.region_panic.len() as f32
+    };
+    let health = (1.0 - avg_panic / 100.0).clamp(0.0, 1.0);
+    for (li, &(a, b)) in SEA_LANES.iter().enumerate() {
+        let ships = (health * 4.0).round() as u32;
+        for s in 0..ships {
+            let t =
+                (time * 0.03 + s as f32 / ships.max(1) as f32 + li as f32 * 0.13).rem_euclid(1.0);
+            let (lat, lon) = slerp_latlon(a, b, t);
+            let center = latlon_to_pos(lat, lon, GLOBE_RADIUS + 1.6);
+            disc(&mut verts, &mut indices, center, 1.0, [0.95, 0.90, 0.70, 0.55]);
         }
     }
     (verts, indices)
@@ -1110,6 +1200,21 @@ mod tests {
             let on_land = course.iter().filter(|&&(la, lo)| is_land(la, lo)).count();
             assert!(on_land >= 2, "river {i} barely touches land ({on_land} pts)");
         }
+    }
+
+    #[test]
+    fn great_circle_interpolates_the_ends() {
+        // The endpoints are exact, and the midpoint lands between them.
+        let a = (40.0, -70.0);
+        let b = (50.0, -10.0);
+        let s0 = slerp_latlon(a, b, 0.0);
+        let s1 = slerp_latlon(a, b, 1.0);
+        assert!((s0.0 - a.0).abs() < 0.1 && (s0.1 - a.1).abs() < 0.1);
+        assert!((s1.0 - b.0).abs() < 0.1 && (s1.1 - b.1).abs() < 0.1);
+        let mid = slerp_latlon(a, b, 0.5);
+        assert!(mid.1 > -70.0 && mid.1 < -10.0, "mid lon between the ends");
+        // A great circle bows poleward of the latitude midpoint at these lats.
+        assert!(mid.0 >= 45.0, "the arc bows north");
     }
 
     #[test]
