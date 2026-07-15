@@ -1342,6 +1342,51 @@ impl Core {
             }
         }
 
+        // The cities named in a smaller hand — only once the map is drawn
+        // in close enough to read them, fading up as the camera descends.
+        if self.geo_camera.distance < 500.0 {
+            let rect = ctx.content_rect();
+            let aspect = (rect.width() / rect.height()).max(0.1);
+            let vp = self.geo_camera.view_proj(aspect);
+            let eye = self.geo_camera.eye();
+            let zoom = ((500.0 - self.geo_camera.distance) / 180.0).clamp(0.0, 1.0);
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Background,
+                egui::Id::new("city-names"),
+            ));
+            for (name, pos, normal) in crate::globe::city_anchors() {
+                let facing = normal.dot((eye - pos).normalize_or(normal));
+                if facing < 0.35 {
+                    continue;
+                }
+                let clip = vp * pos.extend(1.0);
+                if clip.w <= 0.0 {
+                    continue;
+                }
+                let ndc = clip.truncate() / clip.w;
+                let screen = egui::pos2(
+                    rect.center().x + ndc.x * rect.width() / 2.0,
+                    rect.center().y - ndc.y * rect.height() / 2.0,
+                );
+                let a = (((facing - 0.35) / 0.65).clamp(0.0, 1.0) * zoom * 220.0) as u8;
+                let font = crate::theme::reading(11.5);
+                painter.text(
+                    screen + egui::vec2(0.8, 0.8),
+                    egui::Align2::CENTER_CENTER,
+                    name,
+                    font.clone(),
+                    egui::Color32::from_rgba_unmultiplied(6, 4, 3, a),
+                );
+                painter.text(
+                    screen,
+                    egui::Align2::CENTER_CENTER,
+                    name,
+                    font,
+                    egui::Color32::from_rgba_unmultiplied(208, 196, 152, a),
+                );
+            }
+        }
+
         // ------------------------------------------------- operations
         // Cap the width: the ops desk must never bury the world behind it.
         egui::SidePanel::left("geo-ops")
@@ -1395,9 +1440,11 @@ impl Core {
                             self.geo_swing =
                                 Some((lon.to_radians(), lat.to_radians().clamp(0.15, 1.2)));
                         }
+                        let near = crate::globe::nearest_city(lat, lon);
                         let line = format!(
-                            "{} in {} — {days_left}d · ~{garrison} demons{}",
+                            "{} near {} ({}) — {days_left}d · ~{garrison} demons{}",
                             kind.name(),
+                            near,
                             region.name(),
                             if stabilized { " (DUG IN)" } else { " (unstable)" }
                         );

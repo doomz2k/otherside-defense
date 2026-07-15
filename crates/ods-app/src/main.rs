@@ -839,6 +839,16 @@ impl Core {
                                         ods_geo::GeoEvent::CallingEarned { name, calling } => {
                                             Some(format!("☩ {name} is called {calling}"))
                                         }
+                                        ods_geo::GeoEvent::RiftDetected { id, .. } => c
+                                            .rifts
+                                            .iter()
+                                            .find(|r| r.id == *id)
+                                            .map(|r| {
+                                                format!(
+                                                    "⚠ Rift near {}",
+                                                    globe::nearest_city(r.lat, r.lon)
+                                                )
+                                            }),
                                         _ => None,
                                     };
                                     if let Some(t) = toast {
@@ -951,14 +961,16 @@ impl Core {
                     self.renderer.set_fx(&fx, &fx_idx);
                 }
                 let vp = self.geo_camera.view_proj(self.renderer.aspect());
-                // The camera's seat rides the flash lane (w=0: no light,
-                // just the eye position the atmosphere rim needs).
+                // The camera's seat rides the flash lane: xyz is the eye the
+                // atmosphere rim needs; w carries the zoom (0 far, 1 close)
+                // so the shader can thicken the graticule as we descend.
                 let eye = self.geo_camera.eye();
+                let lod = ((640.0 - self.geo_camera.distance) / 320.0).clamp(0.0, 1.0);
                 self.renderer.set_camera_flash(
                     vp,
                     sun,
                     self.clock,
-                    glam::Vec4::new(eye.x, eye.y, eye.z, 0.0),
+                    glam::Vec4::new(eye.x, eye.y, eye.z, lod),
                 );
             }
             Screen::Base => {

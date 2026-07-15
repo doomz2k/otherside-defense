@@ -64,6 +64,142 @@ fn class_color(class: u8) -> [f32; 3] {
     }
 }
 
+// The great mountain chains, as ridgelines (lat, lon) the relief follows —
+// so the ranges rise where they really are, not as scattered confetti peaks.
+const RANGES: [&[(f32, f32)]; 15] = [
+    &[(35.0, 71.0), (34.0, 76.0), (30.0, 82.0), (28.0, 88.0), (27.0, 92.0), (25.0, 96.0)], // Himalaya
+    &[(10.0, -72.0), (0.0, -78.0), (-15.0, -72.0), (-30.0, -70.0), (-45.0, -73.0), (-52.0, -72.0)], // Andes
+    &[(63.0, -142.0), (54.0, -125.0), (46.0, -116.0), (39.0, -106.0), (33.0, -108.0)], // Rockies
+    &[(44.0, 7.0), (46.0, 10.0), (47.0, 13.0)],                                          // Alps
+    &[(68.0, 66.0), (60.0, 59.0), (54.0, 59.0), (50.0, 58.0)],                           // Urals
+    &[(31.0, -8.0), (33.0, -2.0), (35.0, 4.0), (36.0, 9.0)],                             // Atlas
+    &[(43.0, 42.0), (42.0, 45.0), (41.0, 47.0)],                                          // Caucasus
+    &[(47.0, -70.0), (41.0, -78.0), (35.0, -83.0)],                                       // Appalachians
+    &[(-18.0, 146.0), (-28.0, 152.0), (-36.0, 148.0)],                                    // Gt Dividing
+    &[(69.0, 20.0), (63.0, 12.0), (60.0, 8.0)],                                            // Scandes
+    &[(14.0, 38.0), (9.0, 39.0), (6.0, 38.0)],                                             // Ethiopian
+    &[(-28.0, 29.0), (-31.0, 28.0)],                                                       // Drakensberg
+    &[(37.0, 45.0), (33.0, 50.0), (29.0, 54.0)],                                           // Zagros
+    &[(43.0, 75.0), (42.0, 80.0), (41.0, 85.0)],                                           // Tien Shan
+    &[(46.0, 100.0), (48.0, 92.0), (50.0, 88.0)],                                          // Altai
+];
+
+// The great rivers, as courses (lat, lon) inked across the land.
+const RIVERS: [&[(f32, f32)]; 10] = [
+    &[(31.0, 30.0), (27.0, 31.0), (22.0, 32.0), (16.0, 33.0), (10.0, 31.0), (3.0, 32.0)], // Nile
+    &[(-1.0, -49.0), (-3.0, -58.0), (-4.0, -66.0), (-5.0, -73.0), (-11.0, -74.0)],        // Amazon
+    &[(29.0, -89.0), (35.0, -90.0), (42.0, -91.0), (47.0, -95.0)],                        // Mississippi
+    &[(46.0, 48.0), (51.0, 46.0), (55.0, 48.0), (57.0, 44.0)],                            // Volga
+    &[(-6.0, 12.0), (-2.0, 18.0), (1.0, 24.0), (2.0, 25.0)],                              // Congo
+    &[(31.0, 121.0), (30.0, 112.0), (29.0, 104.0), (33.0, 98.0)],                         // Yangtze
+    &[(23.0, 90.0), (25.0, 85.0), (27.0, 80.0), (30.0, 78.0)],                            // Ganges
+    &[(66.0, 69.0), (60.0, 73.0), (55.0, 76.0)],                                          // Ob
+    &[(45.0, 29.0), (45.0, 20.0), (48.0, 17.0), (48.0, 12.0)],                            // Danube
+    &[(-34.0, -58.0), (-27.0, -55.0), (-20.0, -50.0)],                                    // Paraná
+];
+
+/// Planar (equirectangular, longitude scaled by latitude) distance in degrees
+/// from a point to a lat/lon segment — cheap and good enough for continental
+/// features away from the poles. `cl` is cos(lat), passed in so a whole set
+/// of segments at one latitude share the single trig call.
+fn seg_dist_deg(lat: f32, lon: f32, a: (f32, f32), b: (f32, f32), cl: f32) -> f32 {
+    let (px, py) = ((lon - a.1) * cl, lat - a.0);
+    let (bx, by) = ((b.1 - a.1) * cl, b.0 - a.0);
+    let t = ((px * bx + py * by) / (bx * bx + by * by + 1e-6)).clamp(0.0, 1.0);
+    let (dx, dy) = (px - bx * t, py - by * t);
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn dist_to_lines_deg(lat: f32, lon: f32, lines: &[&[(f32, f32)]]) -> f32 {
+    let cl = lat.to_radians().cos().max(0.15);
+    let mut best = f32::INFINITY;
+    for line in lines {
+        for w in line.windows(2) {
+            best = best.min(seg_dist_deg(lat, lon, w[0], w[1], cl));
+        }
+    }
+    best
+}
+
+/// Extra relief from the nearest mountain chain: a ridged crest that falls
+/// off over a few degrees to either side of the ridgeline.
+fn mountain_rise(lat: f32, lon: f32) -> f32 {
+    let d = dist_to_lines_deg(lat, lon, &RANGES);
+    let w = 4.5;
+    if d >= w {
+        return 0.0;
+    }
+    let t = 1.0 - d / w;
+    t * t * 10.0
+}
+
+/// Distance-to-coast field over the earth grid, in degrees, built once by a
+/// weighted two-pass chamfer transform (land seeds at 0, longitude wraps).
+/// Horizontal steps carry each row's true angular width, so the distance is
+/// angular, not raw cells — good enough for the shelf/deep-water bands.
+fn coast_field() -> &'static [f32] {
+    static FIELD: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+    FIELD.get_or_init(|| {
+        let (w, h) = (EARTH_W, EARTH_H);
+        let vstep = 180.0 / h as f32;
+        let hstep: Vec<f32> = (0..h)
+            .map(|r| {
+                let lat = 90.0 - (r as f32 + 0.5) * 180.0 / h as f32;
+                (360.0 / w as f32) * lat.to_radians().cos().max(0.15)
+            })
+            .collect();
+        let mut d = vec![1.0e9f32; w * h];
+        for i in 0..w * h {
+            if EARTH[i] != CLASS_OCEAN {
+                d[i] = 0.0;
+            }
+        }
+        // Forward: relax from the west and north (already-settled) neighbours.
+        for r in 0..h {
+            let hs = hstep[r];
+            let diag = (hs * hs + vstep * vstep).sqrt();
+            for c in 0..w {
+                let mut best = d[r * w + c];
+                best = best.min(d[r * w + (c + w - 1) % w] + hs);
+                if r > 0 {
+                    let up = (r - 1) * w;
+                    best = best.min(d[up + c] + vstep);
+                    best = best.min(d[up + (c + w - 1) % w] + diag);
+                    best = best.min(d[up + (c + 1) % w] + diag);
+                }
+                d[r * w + c] = best;
+            }
+        }
+        // Backward: relax from the east and south.
+        for r in (0..h).rev() {
+            let hs = hstep[r];
+            let diag = (hs * hs + vstep * vstep).sqrt();
+            for c in (0..w).rev() {
+                let mut best = d[r * w + c];
+                best = best.min(d[r * w + (c + 1) % w] + hs);
+                if r + 1 < h {
+                    let dn = (r + 1) * w;
+                    best = best.min(d[dn + c] + vstep);
+                    best = best.min(d[dn + (c + w - 1) % w] + diag);
+                    best = best.min(d[dn + (c + 1) % w] + diag);
+                }
+                d[r * w + c] = best;
+            }
+        }
+        d
+    })
+}
+
+/// Distance (in degrees) from a point to the nearest coast — an O(1) sample
+/// of the cached field above, capped at the far band.
+fn coast_dist_deg(lat: f32, lon: f32) -> f32 {
+    let row = (((90.0 - lat) / 180.0) * EARTH_H as f32) as isize;
+    let col = (((lon + 180.0) / 360.0) * EARTH_W as f32) as isize;
+    let row = row.clamp(0, EARTH_H as isize - 1) as usize;
+    let col = col.rem_euclid(EARTH_W as isize) as usize;
+    coast_field()[row * EARTH_W + col].min(18.0)
+}
+
 /// Rough box-partition of the world into our eight council regions.
 pub fn region_at(lat: f32, lon: f32) -> Region {
     if !(-60.0..=66.0).contains(&lat) {
@@ -119,6 +255,13 @@ pub fn latlon_to_pos(lat: f32, lon: f32, radius: f32) -> Vec3 {
 /// Terrain relief above the sphere: land rises on the same noise that
 /// mottles it, and the ice caps sit proud of the sea.
 fn surface_rise(lat: f32, lon: f32) -> f32 {
+    surface_rise_with(lat, lon, mountain_rise(lat, lon))
+}
+
+/// The relief with the mountain term supplied — so the hot per-vertex path
+/// can compute the (expensive) `mountain_rise` once and share it with the
+/// rock/snow coloring instead of paying for it twice.
+fn surface_rise_with(lat: f32, lon: f32, mr: f32) -> f32 {
     let relief_h = {
         let mut x = (lat * 53.7) as i32 as u32;
         x = x
@@ -132,6 +275,7 @@ fn surface_rise(lat: f32, lon: f32) -> f32 {
     let class = earth_class(lat, lon);
     if class != CLASS_OCEAN {
         rise += relief_h * relief_h * 4.5;
+        rise += mr; // the great chains stand proud
         if class == CLASS_ICE {
             rise += 2.0; // the sheets sit proud of the sea
         }
@@ -151,20 +295,37 @@ pub fn build_globe(selected: Option<Region>) -> (Vec<LitVertex>, Vec<u32>) {
         let lat = 90.0 - 180.0 * i as f32 / STACKS as f32;
         for j in 0..=SLICES {
             let lon = -180.0 + 360.0 * j as f32 / SLICES as f32;
-            let pos = latlon_to_pos(lat, lon, GLOBE_RADIUS + surface_rise(lat, lon));
-            let normal = pos.normalize();
-
             let class = earth_class(lat, lon);
             let land = class != CLASS_OCEAN;
+            // One mountain lookup per land vertex, shared by relief and
+            // coloring; the sea never needs it.
+            let mr = if land { mountain_rise(lat, lon) } else { 0.0 };
+            let pos = latlon_to_pos(lat, lon, GLOBE_RADIUS + surface_rise_with(lat, lon, mr));
+            let normal = pos.normalize();
+
             let mut color = if land { class_color(class) } else { OCEAN };
-            // Shallows: ocean within reach of a coast shelves paler.
-            if !land
-                && (is_land(lat + 1.0, lon)
-                    || is_land(lat - 1.0, lon)
-                    || is_land(lat, lon + 1.0)
-                    || is_land(lat, lon - 1.0))
-            {
-                color = [OCEAN[0] + 0.05, OCEAN[1] + 0.09, OCEAN[2] + 0.10];
+            // The sea, read as bathymetry: a dark ink line right at the
+            // shore, a pale shelf just off it, honest ocean beyond, and the
+            // deep abyssal blue where no coast is near.
+            if !land {
+                let cd = coast_dist_deg(lat, lon);
+                const ABYSS: [f32; 3] = [0.015, 0.05, 0.20];
+                const SHELF: [f32; 3] = [OCEAN[0] + 0.06, OCEAN[1] + 0.11, OCEAN[2] + 0.10];
+                const CONTOUR: [f32; 3] = [0.02, 0.06, 0.15];
+                color = if cd <= 0.8 {
+                    CONTOUR
+                } else if cd <= 2.0 {
+                    SHELF
+                } else if cd <= 4.0 {
+                    OCEAN
+                } else {
+                    let t = ((cd - 4.0) / 14.0).clamp(0.0, 1.0);
+                    [
+                        OCEAN[0] + (ABYSS[0] - OCEAN[0]) * t,
+                        OCEAN[1] + (ABYSS[1] - OCEAN[1]) * t,
+                        OCEAN[2] + (ABYSS[2] - OCEAN[2]) * t,
+                    ]
+                };
             }
             if land && class != CLASS_ICE {
                 // Mottle within the biome like the original's hand-placed
@@ -182,13 +343,22 @@ pub fn build_globe(selected: Option<Region>) -> (Vec<LitVertex>, Vec<u32>) {
                 for c in color.iter_mut() {
                     *c = (*c * m).min(1.0);
                 }
-                if h > 0.975 {
-                    // The high ranges: rock, rarely snow — ranges, not
-                    // dandruff.
-                    color = [0.46, 0.44, 0.42];
-                }
-                if h > 0.995 {
-                    color = [0.72, 0.74, 0.78];
+                // The great chains carry their own rock, and snow only on
+                // the highest crests — high near the poles, near-bare at the
+                // equator, so tropical ranges show stone, not toothpaste.
+                if mr > 2.5 {
+                    let rock = [0.44, 0.42, 0.40];
+                    let t = ((mr - 2.5) / 4.5).clamp(0.0, 1.0);
+                    for (c, r) in color.iter_mut().zip(rock) {
+                        *c = *c + (r - *c) * t;
+                    }
+                    let snowline = 9.6 - (lat.abs() / 90.0) * 4.6;
+                    if mr > snowline {
+                        let s = ((mr - snowline) / 1.6).clamp(0.0, 1.0);
+                        for c in color.iter_mut() {
+                            *c = *c + (0.78 - *c) * s;
+                        }
+                    }
                 }
             }
             // Arctic pack ice whitens the polar sea.
@@ -252,6 +422,44 @@ pub fn build_globe(selected: Option<Region>) -> (Vec<LitVertex>, Vec<u32>) {
                 lon += step;
             }
             lat += step;
+        }
+    }
+
+    // The great rivers, inked as dark-water threads that hug the land they
+    // cross — sampled densely along each authored course.
+    {
+        let water = [0.13, 0.26, 0.40, 1.0f32];
+        for course in &RIVERS {
+            for seg in course.windows(2) {
+                let (a, b) = (seg[0], seg[1]);
+                let span = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+                let steps = (span / 0.6).ceil().max(1.0) as usize;
+                for s in 0..=steps {
+                    let t = s as f32 / steps as f32;
+                    let lat = a.0 + (b.0 - a.0) * t;
+                    let lon = a.1 + (b.1 - a.1) * t;
+                    if !is_land(lat, lon) {
+                        continue;
+                    }
+                    // Ride above the local relief and clear of the border
+                    // ink (at +0.9) so the two thin quad layers never fight.
+                    let center =
+                        latlon_to_pos(lat, lon, GLOBE_RADIUS + surface_rise(lat, lon) + 1.3);
+                    let normal = center.normalize();
+                    let east = Vec3::Z.cross(normal).normalize_or(Vec3::X);
+                    let north = normal.cross(east);
+                    let first = vertices.len() as u32;
+                    for (du, dv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                        let p = center + (east * du + north * dv) * 0.7;
+                        vertices.push(LitVertex {
+                            position: p.to_array(),
+                            normal: normal.to_array(),
+                            color: water,
+                        });
+                    }
+                    indices.extend([0u32, 1, 2, 0, 2, 3].map(|k| first + k));
+                }
+            }
         }
     }
 
@@ -371,6 +579,13 @@ pub fn build_markers(campaign: &Campaign, time: f32) -> (Vec<LitVertex>, Vec<u32
         }
     }
 
+    // The great cities, as small pale pinpricks riding the land (above its
+    // relief, so highland cities aren't buried) — the day-side counterpart
+    // to the night-side lights, and the anchors the map labels hang from.
+    for &(lat, lon) in &CITIES {
+        push_at(lat, lon, surface_rise(lat, lon) + 1.2, 0.7, [0.86, 0.80, 0.58, 1.0]);
+    }
+
     (vertices, indices)
 }
 
@@ -401,6 +616,62 @@ const CITIES: [(f32, f32); 24] = [
     (-33.9, 151.2),  // Sydney
     (14.6, 121.0),   // Manila
 ];
+
+/// Names for the cities above, in the same order — inked on the map when
+/// the camera comes in close, and used to name where a rift really struck.
+pub const CITY_NAMES: [&str; 24] = [
+    "New York",
+    "Los Angeles",
+    "Chicago",
+    "Mexico City",
+    "São Paulo",
+    "Buenos Aires",
+    "London",
+    "Paris",
+    "Berlin",
+    "Rome",
+    "Moscow",
+    "Cairo",
+    "Lagos",
+    "Johannesburg",
+    "Dubai",
+    "Delhi",
+    "Mumbai",
+    "Beijing",
+    "Shanghai",
+    "Tokyo",
+    "Seoul",
+    "Singapore",
+    "Sydney",
+    "Manila",
+];
+
+/// Each city's screen anchor: its surface position and outward normal, for
+/// hanging a label (only drawn when it faces the camera and the map is
+/// zoomed in close enough to read).
+pub fn city_anchors() -> impl Iterator<Item = (&'static str, Vec3, Vec3)> {
+    CITIES.iter().zip(CITY_NAMES.iter()).map(|(&(lat, lon), &name)| {
+        let p = latlon_to_pos(lat, lon, GLOBE_RADIUS + 2.0);
+        (name, p, p.normalize())
+    })
+}
+
+/// The nearest great city to a point, for naming a rift or terror strike by
+/// the place it fell on rather than the whole continent.
+pub fn nearest_city(lat: f32, lon: f32) -> &'static str {
+    let cl = lat.to_radians().cos().max(0.15);
+    let mut best = ("", f32::INFINITY);
+    for (&(clat, clon), &name) in CITIES.iter().zip(CITY_NAMES.iter()) {
+        // Wrap the longitude gap the short way so the antimeridian doesn't
+        // pair a point at +179° with a city at -179° across the whole globe.
+        let dlon = (((lon - clon) + 540.0) % 360.0) - 180.0;
+        let d = ((lat - clat).powi(2) + (dlon * cl).powi(2)).sqrt();
+        if d < best.1 {
+            best = (name, d);
+        }
+    }
+    best.0
+}
 
 /// City lights on the night side of the terminator, for the fx overlay slot.
 /// Each is a small warm quad flush with the surface; they twinkle faintly.
@@ -622,13 +893,25 @@ mod tests {
         assert!(is_land(48.0, 2.0), "Paris is on land");
         assert!(is_land(-15.0, -55.0), "Brazil is on land");
         assert!(is_land(51.5, -0.1), "London is on land");
+        // Interior Europe and European Russia are filled, not sea.
+        assert!(is_land(52.5, 13.4), "Berlin is on land");
+        assert!(is_land(55.8, 37.6), "Moscow is on land");
+        assert!(is_land(48.0, 16.0), "Vienna is on land");
+        // Other inland cities the lake carve must not have swallowed.
+        assert!(is_land(28.6, 77.2), "Delhi is on land");
+        assert!(is_land(39.9, 116.4), "Beijing is on land");
+        assert!(is_land(41.9, -87.6), "Chicago is on land");
         assert!(!is_land(0.0, -140.0), "the mid-Pacific is ocean");
         assert!(!is_land(0.0, -30.0), "the mid-Atlantic is ocean");
+        assert!(!is_land(43.0, 34.0), "the Black Sea is water");
         assert_eq!(earth_class(23.0, 10.0), 7, "the Sahara is desert");
         assert_eq!(earth_class(-5.0, -60.0), 8, "the Amazon is rainforest");
         assert_eq!(earth_class(60.0, 100.0), 3, "Siberia is boreal");
         assert_eq!(earth_class(75.0, -40.0), CLASS_ICE, "Greenland is ice");
         assert_eq!(earth_class(-25.0, 133.0), 7, "the Outback is desert");
+        // The great inland waters were carved back to sea.
+        assert!(!is_land(43.0, 50.0), "the Caspian is water");
+        assert!(!is_land(44.0, -84.0), "the Great Lakes are water");
         assert_eq!(region_at(48.0, 2.0), Region::Europe);
         assert_eq!(region_at(40.0, -100.0), Region::NorthAmerica);
         assert_eq!(region_at(-25.0, 135.0), Region::Oceania);
@@ -652,6 +935,59 @@ mod tests {
             let n = Vec3::from(v.normal);
             assert!(p.normalize().dot(n) > 0.99);
         }
+    }
+
+    #[test]
+    fn mountains_rise_on_their_ranges() {
+        // The Himalaya crest stands well above the sea; the open steppe
+        // north of it does not; and the rise falls off monotonically as you
+        // step off the ridgeline.
+        assert!(mountain_rise(30.0, 84.0) > 4.0, "the Himalaya rises");
+        assert_eq!(mountain_rise(55.0, 84.0), 0.0, "the open steppe is flat");
+        assert!(
+            mountain_rise(30.0, 84.0) > mountain_rise(31.8, 84.0),
+            "the crest is higher than its flank",
+        );
+    }
+
+    #[test]
+    fn cities_name_and_anchor() {
+        // Names line up with the marked cities, and the nearest resolves.
+        assert_eq!(CITIES.len(), CITY_NAMES.len());
+        assert_eq!(nearest_city(48.9, 2.4), "Paris");
+        assert_eq!(nearest_city(35.6, 139.8), "Tokyo");
+        // A point just west of the dateline: Sydney (151°E) is nearest only
+        // if the longitude gap wraps — without the wrap it mis-picks a
+        // western-hemisphere city, so this discriminates the bug.
+        assert_eq!(nearest_city(-35.0, -179.0), "Sydney");
+        // Anchors carry real content: a name, a point out past the surface,
+        // and a unit normal pointing up from it.
+        let anchors: Vec<_> = city_anchors().collect();
+        assert_eq!(anchors.len(), CITIES.len());
+        for (name, pos, normal) in anchors {
+            assert!(!name.is_empty());
+            assert!(pos.length() > GLOBE_RADIUS);
+            assert!((normal.length() - 1.0).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn rivers_actually_touch_land() {
+        // Every authored river must cross land the renderer will draw on —
+        // a course entirely over sea (as the Volga and Danube once were,
+        // before Europe was filled) renders nothing.
+        for (i, course) in RIVERS.iter().enumerate() {
+            let on_land = course.iter().filter(|&&(la, lo)| is_land(la, lo)).count();
+            assert!(on_land >= 2, "river {i} barely touches land ({on_land} pts)");
+        }
+    }
+
+    #[test]
+    fn coast_shades_from_shelf_to_deep() {
+        // A point hard against a coast finds land immediately; the deep
+        // mid-ocean does not, out to the far ring.
+        assert!(coast_dist_deg(30.0, 34.0) <= 4.0, "the Red Sea hugs a coast");
+        assert!(coast_dist_deg(0.0, -140.0) > 12.0, "the mid-Pacific is deep");
     }
 
     #[test]

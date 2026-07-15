@@ -89,17 +89,24 @@ fn globe(renderer: &mut Renderer, seed: u64) -> Result<()> {
     fxi.extend(oi.iter().map(|i| i + base));
     renderer.set_fx(&fx, &fxi);
     let mut cam = OrbitCamera::new(Vec3::ZERO);
-    cam.distance = 640.0;
+    // Seeds >= 1000 request a close-in view (seed - 1000 = centered lon) so
+    // the zoom LOD and city detail can be checked; otherwise full orbit.
+    let (center_lon, dist) = if seed >= 1000 {
+        ((seed - 1000) as f32 % 360.0, 380.0)
+    } else {
+        ((seed % 360) as f32, 640.0)
+    };
+    cam.distance = dist;
     cam.pitch = 0.35;
-    let center_lon = (seed % 360) as f32;
     cam.yaw = center_lon.to_radians();
     let sun = crate::globe::latlon_to_pos(12.0, center_lon + 25.0, 1.0);
     let eye = cam.eye();
+    let lod = ((640.0 - dist) / 320.0).clamp(0.0, 1.0);
     renderer.set_camera_flash(
         cam.view_proj(W as f32 / H as f32),
         sun,
         1.0,
-        Vec4::new(eye.x, eye.y, eye.z, 0.0),
+        Vec4::new(eye.x, eye.y, eye.z, lod),
     );
     renderer.render(None)?;
     renderer.render(None)?;

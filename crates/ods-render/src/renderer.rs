@@ -415,8 +415,11 @@ fn fs_main(in: VsOut) -> FsOut {
     let dlat = abs(lat - round(lat / 30.0) * 30.0);
     let dlon = abs(lon - round(lon / 30.0) * 30.0);
     let lon_tol = 0.30 / max(cos(radians(lat)), 0.05);
+    // The graticule thickens as the camera descends (flash.w carries the
+    // zoom): a clean skein from orbit, a dense mapmaker's grid up close.
+    let grat = 0.22 + 0.30 * clamp(camera.flash.w, 0.0, 1.0);
     if dlat < 0.30 || dlon < lon_tol {
-        color = mix(color, vec3<f32>(0.30, 0.44, 0.58), 0.40);
+        color = mix(color, vec3<f32>(0.30, 0.44, 0.58), grat);
     }
 
     let l = dot(n, camera.sun.xyz);
