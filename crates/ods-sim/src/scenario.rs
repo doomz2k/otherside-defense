@@ -1136,13 +1136,9 @@ fn sculpt_ground(world: &mut VoxelWorld, seed: u64, biome: Biome) {
             // Shallow dips: the topsoil gives way to darker turned earth,
             // one or two voxels down. Support stays; only the eye drops.
             let m = noise(x, y, 23);
-            if m > 0.72 {
+            if m > 0.82 {
                 world.set_voxel(p, Voxel::EMPTY);
                 world.set_voxel(p - IVec3::Z, MAT_EARTH);
-                if m > 0.85 {
-                    world.set_voxel(p - IVec3::Z, Voxel::EMPTY);
-                    world.set_voxel(p - IVec3::Z * 2, MAT_EARTH);
-                }
             }
         }
     }

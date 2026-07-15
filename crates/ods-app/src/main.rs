@@ -725,10 +725,12 @@ impl Core {
                     b.update_frame(dt, &mut self.renderer, self.audio.as_ref(), w, h);
                     let vp = b.camera_vp(self.renderer.aspect());
                     // Night fights are lit low and flat.
+                    // Late-afternoon sun: low enough that walls and trees
+                    // lay real shadows across the field.
                     let sun = if b.battle.vision_tiles < 14 {
                         Vec3::new(-0.2, -0.3, 0.35)
                     } else {
-                        Vec3::new(0.35, 0.5, 0.8)
+                        Vec3::new(0.45, 0.55, 0.5)
                     };
                     let flash = glam::Vec4::new(
                         b.muzzle.0.x,
@@ -978,6 +980,11 @@ impl Core {
                     self.base_dirty = false;
                 }
                 self.base_camera.yaw += dt * 0.04;
+                let extent = ods_geo::GRID as f32 * 44.0;
+                self.renderer.shadow_bounds = Some((
+                    Vec3::new(-40.0, -80.0, -10.0),
+                    Vec3::new(extent + 40.0, extent + 40.0, 60.0),
+                ));
                 let vp = self.base_camera.view_proj(self.renderer.aspect());
                 // The sun tracks the campaign clock over the halls too.
                 let sun = self

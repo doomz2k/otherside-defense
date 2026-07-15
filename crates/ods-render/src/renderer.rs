@@ -45,7 +45,7 @@ fn sun_shadow(world: vec3<f32>) -> f32 {
 var<private> PALETTE: array<vec3<f32>, 26> = array<vec3<f32>, 26>(
     vec3<f32>(1.0, 0.0, 1.0),    // 0: unused (empty)
     vec3<f32>(0.33, 0.34, 0.27), // 1: ground: dark field-green-grey
-    vec3<f32>(0.40, 0.24, 0.18), // 2: chapel brick, soot-darkened
+    vec3<f32>(0.31, 0.21, 0.17), // 2: chapel brick, soot-darkened
     vec3<f32>(0.27, 0.25, 0.22), // 3: rubble
     vec3<f32>(0.24, 0.40, 0.26), // 4: rift obelisk
     vec3<f32>(0.30, 0.19, 0.10), // 5: door timber
@@ -715,6 +715,8 @@ pub struct Renderer {
     /// Player-tunable shadow depth bias and strength.
     pub shadow_bias: f32,
     pub shadow_strength: f32,
+    /// Sun-pass bounds for scenes with no chunks (the base diorama).
+    pub shadow_bounds: Option<(glam::Vec3, glam::Vec3)>,
     sun_dir: glam::Vec3,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
@@ -1380,6 +1382,7 @@ impl Renderer {
             shadow_lit_pipeline,
             shadow_bias: 0.0022,
             shadow_strength: 1.0,
+            shadow_bounds: None,
             sun_dir: glam::Vec3::new(0.35, 0.5, 0.8).normalize(),
             camera_bind_group,
             lit_pipeline,
@@ -1400,6 +1403,7 @@ impl Renderer {
 
     /// Drop all scene geometry (between battles / on returning to menus).
     pub fn clear_scene(&mut self) {
+        self.shadow_bounds = None;
         self.chunk_meshes.clear();
         self.unit_mesh = None;
         self.overlay_mesh = None;
@@ -1727,7 +1731,21 @@ impl Renderer {
         // The sun surveys the field before anyone paints it: an ortho
         // depth pass over the whole battlefield feeds the shadow lookups.
         {
-            let sun_vp = if self.chunk_meshes.is_empty() {
+            let sun_vp = if let Some((lo, hi)) = self.shadow_bounds.filter(|_| self.chunk_meshes.is_empty()) {
+                let center = (lo + hi) / 2.0;
+                let radius = ((hi - lo) / 2.0).length().max(1.0);
+                let eye = center + self.sun_dir * (radius + 60.0);
+                let view = Mat4::look_at_rh(eye, center, glam::Vec3::Z);
+                let proj = Mat4::orthographic_rh(
+                    -radius,
+                    radius,
+                    -radius,
+                    radius,
+                    1.0,
+                    2.0 * radius + 120.0,
+                );
+                proj * view
+            } else if self.chunk_meshes.is_empty() {
                 // No field, no shadows: park every lookup at "fully lit".
                 Mat4::from_cols(
                     glam::Vec4::ZERO,
@@ -1778,7 +1796,7 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if !self.chunk_meshes.is_empty() {
+            if !self.chunk_meshes.is_empty() || self.shadow_bounds.is_some() {
                 pass.set_pipeline(&self.shadow_voxel_pipeline);
                 pass.set_bind_group(0, &self.shadow_cast_bind_group, &[]);
                 for mesh in self.chunk_meshes.values().chain(self.unit_mesh.iter()) {

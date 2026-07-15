@@ -191,12 +191,13 @@ pub fn build_globe(selected: Option<Region>) -> (Vec<LitVertex>, Vec<u32>) {
                     color[0] = (color[0] + 0.14).min(1.0);
                     color[2] *= 0.6;
                 }
-                if h > 0.93 {
-                    // The high ranges: rock shading to snow at the peak.
-                    color = [0.52, 0.50, 0.48];
+                if h > 0.965 {
+                    // The high ranges: rock, rarely snow — ranges, not
+                    // dandruff.
+                    color = [0.46, 0.44, 0.42];
                 }
-                if h > 0.97 {
-                    color = [0.80, 0.82, 0.86];
+                if h > 0.99 {
+                    color = [0.72, 0.74, 0.78];
                 }
             }
             // Polar ice creeps over everything near the caps.
@@ -477,11 +478,11 @@ pub fn build_geo_omens(
         for (j, (dlat, dlon, r)) in
             [(0.0f32, 0.0f32, 7.0f32), (2.5, 4.0, 5.0), (-2.0, 5.5, 4.2)].iter().enumerate()
         {
-            let center = latlon_to_pos(lat + dlat, lon + dlon, GLOBE_RADIUS + 6.5);
+            let center = latlon_to_pos(lat + dlat, lon + dlon, GLOBE_RADIUS + 14.0);
             quad(
                 center,
                 *r,
-                [0.9, 0.92, 0.95, 0.10 + 0.03 * ((k + j as u32) % 3) as f32],
+                [0.9, 0.92, 0.95, 0.07 + 0.02 * ((k + j as u32) % 3) as f32],
             );
         }
     }

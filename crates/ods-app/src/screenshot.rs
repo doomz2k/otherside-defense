@@ -61,10 +61,14 @@ fn battle(renderer: &mut Renderer, seed: u64) -> Result<()> {
         .map(|u| (u.tile * ods_sim::TILE_VOXELS).as_vec3())
         .fold(Vec3::ZERO, |a, b| a + b)
         / 6.0;
-    screen.camera.target = mid + Vec3::new(3.0 * ods_sim::TILE_VOXELS as f32, 0.0, 0.0);
-    screen.camera.distance *= 0.45;
+    // Halfway between the squad and the heart of the map: deployment on
+    // one side, the hamlet on the other.
+    let (lo, hi) = screen.battle.tiles.bounds();
+    let center = ((lo + hi) / 2 * ods_sim::TILE_VOXELS).as_vec3();
+    screen.camera.target = (mid + center) / 2.0;
+    screen.camera.distance *= 0.42;
     let vp = screen.camera_vp(W as f32 / H as f32);
-    renderer.set_camera_flash(vp, Vec3::new(0.35, 0.5, 0.8), 1.6, Vec4::ZERO);
+    renderer.set_camera_flash(vp, Vec3::new(0.45, 0.55, 0.5), 1.6, Vec4::ZERO);
     renderer.render(None)?;
     renderer.render(None)?; // second pass: the headless target now exists
     Ok(())
@@ -104,6 +108,11 @@ fn base(renderer: &mut Renderer) -> Result<()> {
     let house = ods_geo::Chapterhouse::founding(ods_geo::Region::Europe);
     let (verts, idx) = crate::basescape::build_base_scene(&house, 8, true, 1.0);
     renderer.set_figures(&verts, &idx);
+    let extent = ods_geo::GRID as f32 * 44.0;
+    renderer.shadow_bounds = Some((
+        Vec3::new(-40.0, -80.0, -10.0),
+        Vec3::new(extent + 40.0, extent + 40.0, 60.0),
+    ));
     let mut cam = OrbitCamera::isometric(crate::basescape::scene_center());
     cam.distance = 420.0;
     renderer.set_camera(cam.view_proj(W as f32 / H as f32), Vec3::new(0.5, 0.4, 0.65), 1.0);
