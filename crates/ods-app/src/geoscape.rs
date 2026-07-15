@@ -1154,19 +1154,32 @@ impl Core {
                         .color(day_color),
                 );
                 ui.label(egui::RichText::new(c.difficulty.name()).weak().small());
+                // The moon, in its phase — full when the packs run strongest.
+                let abs_day = (c.month as i64 - 1).max(0) * 30 + c.day as i64;
+                if c.blood_moon.is_some() {
+                    ui.label(
+                        egui::RichText::new("🌑 blood moon")
+                            .color(egui::Color32::from_rgb(232, 70, 58))
+                            .small(),
+                    );
+                } else {
+                    let (glyph, name) = moon_glyph(abs_day);
+                    ui.label(egui::RichText::new(format!("{glyph} {name}")).weak().small())
+                        .on_hover_text("the moon waxes to full on a 29-day round");
+                }
             });
             ui.add_space(6.0);
             ui.separator();
 
             let alive = c.over.is_none();
             let sky_held = c.interception.is_some();
-            ui.label("Time");
+            ui.label("The watch-glass");
             ui.horizontal(|ui| {
                 for (speed, label, hint) in [
-                    (0u8, "⏸", "hold the clock"),
-                    (1, "▶", "a day each twelve seconds"),
-                    (2, "▶▶", "a day every three seconds"),
-                    (3, "▶▶▶", "days streak past"),
+                    (0u8, "⏸", "Still — hold the clock"),
+                    (1, "▶", "Watch — a day each twelve seconds"),
+                    (2, "▶▶", "March — a day every three seconds"),
+                    (3, "▶▶▶", "Race — days streak past"),
                 ] {
                     if ui
                         .add_enabled(
@@ -1185,7 +1198,7 @@ impl Core {
                         alive && !sky_held,
                         egui::Button::selectable(self.run_to_event, "⏭"),
                     )
-                    .on_hover_text("run the clock until something happens, then stop")
+                    .on_hover_text("run to the next omen, then stop the glass")
                     .clicked()
                 {
                     self.run_to_event = !self.run_to_event;
@@ -1306,6 +1319,30 @@ impl Core {
                     }
                 });
             }
+            ui.separator();
+            ui.label("Map overlay");
+            ui.horizontal_wrapped(|ui| {
+                for mode in [
+                    crate::globe::MapMode::Terrain,
+                    crate::globe::MapMode::Panic,
+                    crate::globe::MapMode::Corruption,
+                    crate::globe::MapMode::Funding,
+                ] {
+                    if ui
+                        .add(egui::Button::selectable(self.map_mode == mode, mode.label()))
+                        .on_hover_text(match mode {
+                            crate::globe::MapMode::Terrain => "the honest world",
+                            crate::globe::MapMode::Panic => "heat by regional dread",
+                            crate::globe::MapMode::Corruption => "which patrons have fallen",
+                            crate::globe::MapMode::Funding => "who still pays the tithe",
+                        })
+                        .clicked()
+                    {
+                        self.map_mode = mode;
+                    }
+                }
+            });
+            ui.separator();
             if ui.add_sized(wide, egui::Button::new("Menu")).clicked() {
                 self.confirm_menu = true;
             }
@@ -1434,6 +1471,73 @@ impl Core {
         // The mapmaker's hand: region and city names inked onto the world.
         Self::paint_map_labels(&self.geo_camera, ctx);
 
+        // Anchored vignettes: the fiercest incursions pinned to their place
+        // on the globe with a leader line, so the eye finds the wound.
+        {
+            let rect = ctx.content_rect();
+            let aspect = (rect.width() / rect.height()).max(0.1);
+            let vp = self.geo_camera.view_proj(aspect);
+            let eye = self.geo_camera.eye();
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("rift-vignettes"),
+            ));
+            let mut rifts: Vec<_> = c.rifts.iter().filter(|r| r.detected).collect();
+            rifts.sort_by_key(|r| r.days_left);
+            for (shown, rift) in rifts.iter().take(4).enumerate() {
+                let pos = crate::globe::latlon_to_pos(
+                    rift.lat,
+                    rift.lon,
+                    crate::globe::GLOBE_RADIUS + 3.0,
+                );
+                let normal = pos.normalize();
+                if normal.dot((eye - pos).normalize_or(normal)) < 0.25 {
+                    continue;
+                }
+                let clip = vp * pos.extend(1.0);
+                if clip.w <= 0.0 {
+                    continue;
+                }
+                let ndc = clip.truncate() / clip.w;
+                let anchor = egui::pos2(
+                    rect.center().x + ndc.x * rect.width() / 2.0,
+                    rect.center().y - ndc.y * rect.height() / 2.0,
+                );
+                let card = anchor + egui::vec2(18.0, -16.0 - shown as f32 * 26.0);
+                painter.line_segment(
+                    [anchor, card],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(210, 150, 70)),
+                );
+                painter.circle_filled(anchor, 2.5, egui::Color32::from_rgb(232, 120, 70));
+                let text = format!("{} · {}d", rift.kind.name(), rift.days_left);
+                let w = text.chars().count() as f32 * 6.8 + 12.0;
+                let plate = egui::Rect::from_min_size(card, egui::vec2(w, 19.0));
+                painter.rect_filled(
+                    plate,
+                    2.0,
+                    egui::Color32::from_rgba_unmultiplied(24, 16, 14, 224),
+                );
+                painter.rect_stroke(
+                    plate,
+                    2.0,
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 118, 62)),
+                    egui::StrokeKind::Inside,
+                );
+                let ink = if rift.days_left <= 1 {
+                    egui::Color32::from_rgb(240, 150, 120)
+                } else {
+                    egui::Color32::from_rgb(224, 206, 150)
+                };
+                painter.text(
+                    plate.left_center() + egui::vec2(6.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    text,
+                    crate::theme::reading(12.0),
+                    ink,
+                );
+            }
+        }
+
         // ------------------------------------------------- operations
         // Cap the width: the ops desk must never bury the world behind it.
         egui::SidePanel::left("geo-ops")
@@ -1500,8 +1604,19 @@ impl Core {
                             2 => egui::Color32::from_rgb(230, 180, 70),
                             _ => ui.visuals().text_color(),
                         };
-                        ui.colored_label(urgency, line)
-                            .on_hover_text(format!("{} country", region.biome().name()));
+                        // A full dossier on hover: where it fell, how hard it
+                        // is held, how long the fuse, and who answers.
+                        let dossier = format!(
+                            "{}\nStruck in {} country, near {}.\nGarrison: ~{} demons {}.\nFuse: {} day(s) until it digs in for good.\nReach: {}.",
+                            kind.name(),
+                            region.biome().name(),
+                            near,
+                            garrison,
+                            if stabilized { "(already dug in)" } else { "(still unstable — strike now)" },
+                            days_left,
+                            if local { "a chapterhouse stands in this region — no sortie needed" } else { "distant — needs a zeppelin sortie" },
+                        );
+                        ui.colored_label(urgency, line).on_hover_text(dossier);
                         match sortie {
                             // In the air: nothing to do but watch the clock.
                             Some(s) if s.days_left > 0 => {
@@ -2049,25 +2164,45 @@ impl Core {
             });
 
         if let Some(region) = self.selected_region {
-            egui::Window::new(region.name())
+            egui::Window::new(format!("Charter of {}", region.name()))
                 .anchor(egui::Align2::LEFT_BOTTOM, [12.0, -160.0])
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        region_crest(ui, region);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(region.name())
+                                    .font(crate::theme::display(18.0)),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!("under {}", region.patron()))
+                                    .weak()
+                                    .small(),
+                            );
+                            if ui.small_button("⌖ turn the world here").clicked() {
+                                let (clat, clon) = crate::globe::region_center(region);
+                                self.geo_swing = Some((
+                                    clon.to_radians(),
+                                    clat.to_radians().clamp(0.15, 1.2),
+                                ));
+                            }
+                        });
+                    });
+                    ui.separator();
                     ui.label(format!(
                         "Monthly funding: {}k",
                         c.region_funding.get(&region).copied().unwrap_or(0)
                     ));
+                    let keeps = c.bases.iter().filter(|b| b.region == region).count();
+                    ui.label(format!("Chapterhouses held: {keeps}"));
                     let rifts_here = c
                         .rifts
                         .iter()
                         .filter(|r| r.detected && r.region == region)
                         .count();
-                    let base_hint = if c.bases.iter().any(|b| b.region == region) {
-                        " (chapterhouse here)"
-                    } else {
-                        ""
-                    };
+                    let base_hint = if keeps > 0 { " (garrisoned)" } else { "" };
                     ui.label(format!("Detected rifts: {rifts_here}{base_hint}"));
                     ui.label(format!(
                         "Standing nests: {}",
@@ -2502,6 +2637,68 @@ fn seed_from_clock() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(1999)
+}
+
+/// A region's arms: the field tincture of its shield and the charge upon it.
+fn region_arms(region: ods_geo::Region) -> (egui::Color32, &'static str) {
+    use egui::Color32 as C;
+    use ods_geo::Region;
+    match region {
+        Region::NorthAmerica => (C::from_rgb(40, 60, 110), "🦅"),
+        Region::SouthAmerica => (C::from_rgb(30, 96, 70), "🐆"),
+        Region::Europe => (C::from_rgb(70, 40, 96), "✚"),
+        Region::Africa => (C::from_rgb(120, 84, 28), "☀"),
+        Region::MiddleEast => (C::from_rgb(110, 92, 30), "☾"),
+        Region::Asia => (C::from_rgb(120, 40, 44), "🐉"),
+        Region::Oceania => (C::from_rgb(28, 84, 104), "⚓"),
+        Region::Arctic => (C::from_rgb(70, 92, 110), "❄"),
+    }
+}
+
+/// Paint a small heraldic shield for a region: a tinctured field, a bronze
+/// bordure, and the region's charge.
+fn region_crest(ui: &mut egui::Ui, region: ods_geo::Region) {
+    let size = egui::vec2(46.0, 54.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let (field, charge) = region_arms(region);
+    let p = ui.painter();
+    let cx = rect.center().x;
+    let (l, r, top, bot) = (rect.left() + 3.0, rect.right() - 3.0, rect.top() + 3.0, rect.bottom() - 2.0);
+    let shoulder = top + size.y * 0.52;
+    let pts = vec![
+        egui::pos2(l, top),
+        egui::pos2(r, top),
+        egui::pos2(r, shoulder),
+        egui::pos2(cx, bot),
+        egui::pos2(l, shoulder),
+    ];
+    p.add(egui::Shape::convex_polygon(
+        pts,
+        field,
+        egui::Stroke::new(1.6, egui::Color32::from_rgb(150, 118, 62)),
+    ));
+    p.text(
+        egui::pos2(cx, top + size.y * 0.34),
+        egui::Align2::CENTER_CENTER,
+        charge,
+        egui::FontId::proportional(19.0),
+        egui::Color32::from_rgb(238, 224, 182),
+    );
+}
+
+/// The moon's phase on a 29-day round, as a glyph and its old name — full at
+/// the round's middle, when the demon packs run strongest.
+fn moon_glyph(abs_day: i64) -> (&'static str, &'static str) {
+    match abs_day.rem_euclid(29) {
+        0 | 1 => ("🌑", "new moon"),
+        2..=6 => ("🌒", "waxing crescent"),
+        7 | 8 => ("🌓", "first quarter"),
+        9..=13 => ("🌔", "waxing gibbous"),
+        14 | 15 => ("🌕", "full moon"),
+        16..=20 => ("🌖", "waning gibbous"),
+        21 | 22 => ("🌗", "last quarter"),
+        _ => ("🌘", "waning crescent"),
+    }
 }
 
 /// The chapterhouse desk: build grid, founding, hiring, drills, the Codex,

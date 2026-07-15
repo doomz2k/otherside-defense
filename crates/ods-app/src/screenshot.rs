@@ -78,7 +78,7 @@ fn battle(renderer: &mut Renderer, seed: u64) -> Result<()> {
 /// doubles as the centered longitude in degrees, so any face can be checked.
 fn globe(renderer: &mut Renderer, seed: u64) -> Result<()> {
     let c = ods_geo::Campaign::new(7);
-    let (verts, idx) = crate::globe::build_globe(None);
+    let (verts, idx) = crate::globe::build_globe(None, None);
     renderer.set_globe(&verts, &idx);
     let (mv, mi) = crate::globe::build_markers(&c, 1.0);
     renderer.set_markers(&mv, &mi);

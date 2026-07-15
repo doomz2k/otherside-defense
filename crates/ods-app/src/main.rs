@@ -272,7 +272,9 @@ pub struct Core {
     /// Gold flash on the sidebar clock when the world auto-pauses.
     pub pause_flash: f32,
     pub selected_region: Option<Region>,
-    globe_built_for: Option<Option<Region>>,
+    /// The strategic overlay washing the globe (terrain / dread / …).
+    pub map_mode: globe::MapMode,
+    globe_built_for: Option<(Option<Region>, globe::MapMode)>,
     /// The title screen's frozen skirmish, slowly orbited.
     menu_built: bool,
     menu_camera: OrbitCamera,
@@ -408,6 +410,7 @@ impl Core {
             frame_ms: 16.0,
             pause_flash: 0.0,
             selected_region: None,
+            map_mode: globe::MapMode::Terrain,
             globe_built_for: None,
             menu_built: false,
             menu_camera,
@@ -472,13 +475,47 @@ impl Core {
         .save();
     }
 
+    /// The per-region colour wash for the active strategic overlay, or None
+    /// for honest terrain. Green→red by dread, violet where a patron has
+    /// fallen, straw→gold by funding.
+    fn map_tint(&self) -> Option<std::collections::HashMap<Region, [f32; 3]>> {
+        let c = self.campaign.as_ref()?;
+        if self.map_mode == globe::MapMode::Terrain {
+            return None;
+        }
+        let mut m = std::collections::HashMap::new();
+        for &r in Region::ALL.iter() {
+            let col = match self.map_mode {
+                globe::MapMode::Panic => {
+                    let p = (*c.region_panic.get(&r).unwrap_or(&0) as f32 / 100.0).clamp(0.0, 1.0);
+                    [0.18 + 0.72 * p, 0.52 * (1.0 - p) + 0.08, 0.12]
+                }
+                globe::MapMode::Corruption => {
+                    if c.corrupted_patrons.contains(&r) {
+                        [0.68, 0.16, 0.82]
+                    } else {
+                        [0.20, 0.30, 0.30]
+                    }
+                }
+                globe::MapMode::Funding => {
+                    let f = (*c.region_funding.get(&r).unwrap_or(&0) as f32 / 220.0).clamp(0.0, 1.0);
+                    [0.62 * (1.0 - f) + 0.16, 0.30 + 0.52 * f, 0.16]
+                }
+                globe::MapMode::Terrain => unreachable!(),
+            };
+            m.insert(r, col);
+        }
+        Some(m)
+    }
+
     /// Switch to the Geoscape and (re)install the globe scene.
     pub fn enter_geoscape(&mut self) {
         self.renderer.clear_scene();
         self.menu_built = false;
-        let (vertices, indices) = globe::build_globe(self.selected_region);
+        let tint = self.map_tint();
+        let (vertices, indices) = globe::build_globe(self.selected_region, tint.as_ref());
         self.renderer.set_globe(&vertices, &indices);
-        self.globe_built_for = Some(self.selected_region);
+        self.globe_built_for = Some((self.selected_region, self.map_mode));
         self.screen = Screen::Geoscape;
         self.fade = 1.0;
     }
@@ -771,10 +808,12 @@ impl Core {
                 } else if !self.geo_drag {
                     self.geo_camera.yaw += dt * 0.08;
                 }
-                if self.globe_built_for != Some(self.selected_region) {
-                    let (vertices, indices) = globe::build_globe(self.selected_region);
+                if self.globe_built_for != Some((self.selected_region, self.map_mode)) {
+                    let tint = self.map_tint();
+                    let (vertices, indices) =
+                        globe::build_globe(self.selected_region, tint.as_ref());
                     self.renderer.set_globe(&vertices, &indices);
-                    self.globe_built_for = Some(self.selected_region);
+                    self.globe_built_for = Some((self.selected_region, self.map_mode));
                 }
                 // Real time flows through the calendar at the chosen
                 // compression — and stops dead the moment the world needs
@@ -938,6 +977,11 @@ impl Core {
                         }
                         if crossed > 0 {
                             write_autosave(c);
+                            // A strategic overlay must track the day's news:
+                            // force a rebuild so the heat map stays live.
+                            if self.map_mode != globe::MapMode::Terrain {
+                                self.globe_built_for = None;
+                            }
                         }
                     }
                 }

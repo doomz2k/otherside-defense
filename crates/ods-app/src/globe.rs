@@ -230,6 +230,12 @@ pub fn region_label_pos(region: Region) -> (Vec3, Vec3) {
     (p, n)
 }
 
+/// The lat/lon a region hangs its business from — for swinging the globe to
+/// it or anchoring its charter.
+pub fn region_center(region: Region) -> (f32, f32) {
+    centroid(region)
+}
+
 fn centroid(region: Region) -> (f32, f32) {
     match region {
         Region::NorthAmerica => (45.0, -100.0),
@@ -313,8 +319,34 @@ fn surface_rise_with(lat: f32, lon: f32, mr: f32) -> f32 {
     rise
 }
 
-/// Build the globe sphere, optionally tinting one region's land.
-pub fn build_globe(selected: Option<Region>) -> (Vec<LitVertex>, Vec<u32>) {
+/// The strategic overlays that can wash the map: the honest terrain, or a
+/// heat by regional dread, corruption, or funding.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MapMode {
+    #[default]
+    Terrain,
+    Panic,
+    Corruption,
+    Funding,
+}
+
+impl MapMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            MapMode::Terrain => "Terrain",
+            MapMode::Panic => "Dread",
+            MapMode::Corruption => "Corruption",
+            MapMode::Funding => "Funding",
+        }
+    }
+}
+
+/// Build the globe sphere. `selected` tints one region's land brighter;
+/// `tint` (if given) washes each region toward a strategic-overlay colour.
+pub fn build_globe(
+    selected: Option<Region>,
+    tint: Option<&std::collections::HashMap<Region, [f32; 3]>>,
+) -> (Vec<LitVertex>, Vec<u32>) {
     let mut vertices = Vec::with_capacity((STACKS + 1) * (SLICES + 1));
     let mut indices = Vec::new();
 
@@ -395,12 +427,22 @@ pub fn build_globe(selected: Option<Region>) -> (Vec<LitVertex>, Vec<u32>) {
                     *c = *c + (i - *c) * ice;
                 }
             }
-            if land
-                && let Some(sel) = selected
-                && region_at(lat, lon) == sel
-            {
-                for (c, h) in color.iter_mut().zip(HIGHLIGHT) {
-                    *c = (*c + h).min(1.0);
+            if land {
+                let land_region = region_at(lat, lon);
+                // Map-mode heat: wash the land toward a per-region tint.
+                if let Some(tint) = tint
+                    && let Some(&t) = tint.get(&land_region)
+                {
+                    for (c, tc) in color.iter_mut().zip(t) {
+                        *c = *c * 0.30 + tc * 0.70;
+                    }
+                }
+                if let Some(sel) = selected
+                    && land_region == sel
+                {
+                    for (c, h) in color.iter_mut().zip(HIGHLIGHT) {
+                        *c = (*c + h).min(1.0);
+                    }
                 }
             }
 
@@ -1141,7 +1183,7 @@ mod tests {
 
     #[test]
     fn globe_mesh_is_well_formed() {
-        let (vertices, indices) = build_globe(None);
+        let (vertices, indices) = build_globe(None, None);
         // The sphere grid, plus the mapmaker's border ink on top.
         let grid = (STACKS + 1) * (SLICES + 1);
         assert!(vertices.len() >= grid, "{} < {grid}", vertices.len());
