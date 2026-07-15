@@ -42,7 +42,7 @@ fn sun_shadow(world: vec3<f32>) -> f32 {
 }
 
 // Entries 16+ are EMISSIVE: they ignore the sun and pulse on the clock.
-var<private> PALETTE: array<vec3<f32>, 26> = array<vec3<f32>, 26>(
+var<private> PALETTE: array<vec3<f32>, 28> = array<vec3<f32>, 28>(
     vec3<f32>(1.0, 0.0, 1.0),    // 0: unused (empty)
     vec3<f32>(0.33, 0.34, 0.27), // 1: ground: dark field-green-grey
     vec3<f32>(0.31, 0.21, 0.17), // 2: chapel brick, soot-darkened
@@ -68,7 +68,9 @@ var<private> PALETTE: array<vec3<f32>, 26> = array<vec3<f32>, 26>(
     vec3<f32>(0.30, 0.23, 0.15), // 22: bare earth, turned soil
     vec3<f32>(0.44, 0.38, 0.28), // 23: the worn road, packed pale
     vec3<f32>(0.29, 0.37, 0.18), // 24: meadow grass, a lighter green
-    vec3<f32>(0.38, 0.38, 0.35)  // 25: field boulder grey
+    vec3<f32>(0.38, 0.38, 0.35), // 25: field boulder grey
+    vec3<f32>(0.58, 0.54, 0.47), // 26: limewashed plaster
+    vec3<f32>(0.28, 0.30, 0.34)  // 27: slate shingle
 );
 
 struct VsIn {
@@ -108,6 +110,12 @@ fn face_shade(n: vec3<f32>) -> f32 {
     return 0.52;                        // the other in shadow
 }
 
+// Floor division for possibly-negative voxel coordinates.
+fn div_floor(a: i32, b: i32) -> i32 {
+    let q = a / b;
+    return q - select(0, 1, a % b != 0 && (a < 0) != (b < 0));
+}
+
 // A cheap integer hash for per-voxel value jitter.
 fn voxel_hash(cell: vec3<i32>) -> f32 {
     var h: u32 = u32(cell.x) * 374761393u + u32(cell.y) * 668265263u + u32(cell.z) * 2147483647u;
@@ -127,7 +135,7 @@ fn bayer(frag: vec2<f32>) -> f32 {
 fn fs_main(in: VsOut) -> FsOut {
     var out: FsOut;
     out.glow = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-    let base = PALETTE[min(in.material, 25u)];
+    let base = PALETTE[min(in.material, 27u)];
     if in.material >= 16u && in.material <= 18u {
         // Occult light: full-bright, breathing on the clock. Unlit by sun,
         // so sigils burn brightest exactly where the night is darkest —
@@ -142,14 +150,69 @@ fn fs_main(in: VsOut) -> FsOut {
     // on by stepping half a voxel against the face normal, then jitter its
     // value so big surfaces read as tiled texture, not slab.
     let cell = vec3<i32>(floor(in.world - n * 0.5));
-    let jitter = 0.86 + 0.22 * voxel_hash(cell);
+    var jitter = 0.86 + 0.22 * voxel_hash(cell);
+    var texel = base;
+    // Structured surfaces: real masonry, not tinted slabs. Patterns are
+    // carried by world position so they wrap corners and survive greedy
+    // meshing.
+    let along = cell.x + cell.y;
+    switch in.material {
+        // Brick: three-voxel courses in running bond, mortar in the
+        // joints, and every brick its own firing.
+        case 2u: {
+            let course = div_floor(cell.z, 3);
+            let shifted = along + select(0, 3, (course & 1) == 1);
+            let brick = div_floor(shifted, 6);
+            if (cell.z - course * 3 == 2 || shifted - brick * 6 == 5) {
+                texel = vec3<f32>(0.22, 0.20, 0.18);
+                jitter = 1.0;
+            } else {
+                jitter = 0.82 + 0.30 * voxel_hash(vec3<i32>(brick, course, 11));
+            }
+        }
+        // Timber and doors: plank seams, each plank its own weathering.
+        case 5u, 13u: {
+            let plank = div_floor(along, 3);
+            if (along - plank * 3 == 2) {
+                jitter = 0.68;
+            } else {
+                jitter = 0.84 + 0.18 * voxel_hash(vec3<i32>(plank, div_floor(cell.z, 9), 7));
+            }
+        }
+        // Stone and rubble: irregular blocks with sunken joints.
+        case 3u, 25u: {
+            let row = div_floor(cell.z, 2);
+            let block = div_floor(along + select(0, 2, (row & 1) == 1), 4);
+            if (along + select(0, 2, (row & 1) == 1) - block * 4 == 3 || cell.z - row * 2 == 1 && voxel_hash(vec3<i32>(block, row, 3)) > 0.6) {
+                jitter = 0.62;
+            } else {
+                jitter = 0.72 + 0.42 * voxel_hash(vec3<i32>(block, row, 5));
+            }
+        }
+        // Plaster: smooth lime wash with faint damp stains low down.
+        case 26u: {
+            jitter = 0.94 + 0.10 * voxel_hash(vec3<i32>(div_floor(cell.x, 4), div_floor(cell.y, 4), div_floor(cell.z, 4)));
+            if (cell.z < 12) {
+                jitter = jitter * (0.82 + 0.015 * f32(cell.z));
+            }
+        }
+        // Slate: shingle rows.
+        case 27u: {
+            let row = div_floor(cell.z, 2);
+            jitter = 0.72 + 0.38 * voxel_hash(vec3<i32>(div_floor(along, 3), row, 9));
+            if (cell.z - row * 2 == 1) {
+                jitter = jitter * 0.8;
+            }
+        }
+        default: {}
+    }
     // Face-quantized light, with the sun deciding only how hard the
     // contrast bites (flat per face — no smooth gradients anywhere).
     // The direct term dies in cast shadow; ambient carries the rest.
     let s = sun_shadow(in.world + n * 0.5);
     let sun_bite = 0.58 + 0.42 * max(dot(n, camera.sun.xyz), 0.0) * s;
     // Baked corner occlusion: pits darken, edges pop.
-    var color = base * face_shade(n) * sun_bite * jitter * in.ao;
+    var color = texel * face_shade(n) * sun_bite * jitter * in.ao;
     // A transient light (muzzle, blast) warms everything near it.
     if (camera.flash.w > 0.0) {
         let fall = clamp(1.0 - distance(in.world, camera.flash.xyz) / 48.0, 0.0, 1.0);

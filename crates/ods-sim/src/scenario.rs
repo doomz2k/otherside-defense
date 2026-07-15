@@ -53,6 +53,10 @@ pub const MAT_PATH: Voxel = Voxel(23);
 pub const MAT_MEADOW: Voxel = Voxel(24);
 /// Field boulder grey.
 pub const MAT_STONE: Voxel = Voxel(25);
+/// Limewashed plaster: cottage walls under timber studs.
+pub const MAT_PLASTER: Voxel = Voxel(26);
+/// Slate shingle: the roofs that survived.
+pub const MAT_SLATE: Voxel = Voxel(27);
 /// Viscera. What overkill leaves.
 pub const MAT_GORE: Voxel = Voxel(15);
 /// Glowing sigil-crimson: summoning circles, the obelisk's runes. EMISSIVE.
@@ -318,14 +322,15 @@ pub fn incursion_mission(
             }
         }
         1 => {
-            // Twin ruins: two gutted farmhouses on the approach.
+            // Twin ruins: two gutted farmhouses on the approach —
+            // limewashed plaster between the timbers.
             for (bx, by) in [(7, 4), (10, 14)] {
                 for tx in bx..bx + 4 {
                     for ty in by..by + 5 {
                         let ring = tx == bx || tx == bx + 3 || ty == by || ty == by + 4;
                         let doorway = tx == bx && ty == by + 2;
                         if ring && !doorway {
-                            fill_tile_walls(&mut world, IVec3::new(tx, ty, 0), MAT_WALL);
+                            fill_tile_walls(&mut world, IVec3::new(tx, ty, 0), MAT_PLASTER);
                         }
                     }
                 }
@@ -368,8 +373,8 @@ pub fn incursion_mission(
                 }
             }
             for tx in 9..=12 {
-                fill_tile_walls(&mut world, IVec3::new(tx, 8, 0), MAT_WALL);
-                fill_tile_walls(&mut world, IVec3::new(tx, 14, 0), MAT_WALL);
+                fill_tile_walls(&mut world, IVec3::new(tx, 8, 0), MAT_STONE);
+                fill_tile_walls(&mut world, IVec3::new(tx, 14, 0), MAT_STONE);
             }
         }
     }
@@ -446,7 +451,10 @@ pub fn incursion_mission(
             return false; // the shelter yard where civilians hide
         }
         let probe = tile * TILE_VOXELS + IVec3::new(8, 8, GROUND_TOP + 1);
-        world.voxel(probe) == Voxel::EMPTY
+        // Open ground AND open sky: nothing sprouts inside a building or
+        // under a roof, a loft, or a canopy.
+        let sky = tile * TILE_VOXELS + IVec3::new(8, 8, TILE_VOXELS + 4);
+        world.voxel(probe) == Voxel::EMPTY && world.voxel(sky) == Voxel::EMPTY
     };
     let hash = |a: i32, b: i32, k: u32| -> u32 {
         let mut h = (seed as u32)
@@ -1766,21 +1774,25 @@ fn dress_walls(world: &mut VoxelWorld, seed: u64) {
     let mid = GROUND_TOP + 6;
     for y in 0..span.y {
         for x in 0..span.x {
-            if world.voxel(IVec3::new(x, y, mid)) != MAT_WALL {
+            let mat = world.voxel(IVec3::new(x, y, mid));
+            if mat != MAT_WALL && mat != MAT_PLASTER && mat != MAT_STONE {
                 continue;
             }
-            let exposed = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dy)| {
+            let out_dir = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().copied().find(|&(dx, dy)| {
                 world.voxel(IVec3::new(x + dx, y + dy, mid)) == Voxel::EMPTY
             });
-            if !exposed {
+            let Some((dx, dy)) = out_dir else {
                 continue;
-            }
+            };
             // The boot: three courses of field stone.
             for z in GROUND_TOP..(GROUND_TOP + 3) {
                 world.set_voxel(IVec3::new(x, y, z), MAT_STONE);
             }
-            // Studs: a timber upright every eighth course of the face.
-            if x.rem_euclid(8) == 0 || y.rem_euclid(8) == 0 {
+            // Studs: a timber upright every eighth voxel ALONG the run —
+            // measured on the axis the wall actually travels, so a wall
+            // sitting on a tile boundary doesn't become all timber.
+            let run = if dx != 0 { y } else { x };
+            if run.rem_euclid(8) == 0 {
                 for z in (GROUND_TOP + 3)..WALL_TOP {
                     world.set_voxel(IVec3::new(x, y, z), MAT_TIMBER);
                 }
@@ -1793,14 +1805,22 @@ fn dress_walls(world: &mut VoxelWorld, seed: u64) {
             // Windows: some eight-voxel bays get a dark shuttered relief
             // with a timber sill. Solid voxels still — the eye falls in,
             // the quarrel doesn't.
+            // Weathering: the odd tooth gone from the exposed wall top.
+            if hash(x, y, 91) % 5 == 0 {
+                world.set_voxel(IVec3::new(x, y, WALL_TOP - 1), Voxel::EMPTY);
+            }
             let (bx, by) = (x.div_euclid(8), y.div_euclid(8));
             if hash(bx, by, 71) % 3 == 0 {
                 let along = x.rem_euclid(8) >= 2 && x.rem_euclid(8) <= 5;
                 let across = y.rem_euclid(8) >= 2 && y.rem_euclid(8) <= 5;
                 if along || across {
+                    // A real reveal: the shell voxel is carved away and
+                    // the pane sits one voxel deep, in shadow. Sight and
+                    // shot still stop on the wall behind it.
                     world.set_voxel(IVec3::new(x, y, GROUND_TOP + 5), MAT_TIMBER);
                     for z in (GROUND_TOP + 6)..(GROUND_TOP + 13) {
-                        world.set_voxel(IVec3::new(x, y, z), MAT_OBSIDIAN);
+                        world.set_voxel(IVec3::new(x, y, z), Voxel::EMPTY);
+                        world.set_voxel(IVec3::new(x - dx, y - dy, z), MAT_OBSIDIAN);
                     }
                 }
             }
@@ -1826,7 +1846,7 @@ fn roof_over(world: &mut VoxelWorld, t0: IVec3, t1: IVec3) {
                 TILE_VOXELS
             };
             for z in base..h {
-                world.set_voxel(IVec3::new(x, y, z), MAT_DOOR);
+                world.set_voxel(IVec3::new(x, y, z), MAT_SLATE);
             }
         }
     }
