@@ -2014,12 +2014,20 @@ impl Core {
                                 .filter(|s| s.is_fit() && s.home == bi)
                                 .count();
                             let free = c.base_free_hangars(bi);
-                            let usable = fit > 0 && (!is_flight || free > 0);
+                            // A rift in this house's own region needs no
+                            // zeppelin — the garrison strikes on foot.
+                            let local = matches!(
+                                kind,
+                                MissionKind::Rift(id) if c.travel_days_from(bi, id) == Ok(0)
+                            );
+                            let usable = fit > 0 && (!is_flight || local || free > 0);
                             let name = c.bases[bi].region.name();
-                            let tag = if is_flight {
-                                format!("{name} · {free}⛺ · {fit} fit")
-                            } else {
+                            let tag = if !is_flight {
                                 format!("{name} · {fit} fit")
+                            } else if local {
+                                format!("{name} · on-site · {fit} fit")
+                            } else {
+                                format!("{name} · {free}⛺ · {fit} fit")
                             };
                             if ui
                                 .add_enabled(usable, egui::Button::selectable(base == bi, tag))
@@ -2128,13 +2136,28 @@ impl Core {
             if go_lead || go_auto {
                 let manifest = self.launch_manifest.clone();
                 match kind {
-                    MissionKind::Rift(id) => match c.dispatch_manifest(id, base, manifest, go_lead)
-                    {
-                        // A same-region strike is on-site at once: lead now.
-                        Ok(0) if go_lead => action = GeoAction::LeadMission(kind),
-                        Ok(_) => {}
-                        Err(e) => self.log.push(format!("cannot launch: {e:?}")),
-                    },
+                    MissionKind::Rift(id) if c.travel_days_from(base, id) == Ok(0) => {
+                        // A same-region strike is on-site at once: no zeppelin
+                        // flies and no berth is held. Arm the chosen manifest
+                        // and either lead now or let the augurs resolve it.
+                        c.set_next_manifest(manifest);
+                        if go_lead {
+                            action = GeoAction::LeadMission(kind);
+                        } else {
+                            match c.assault_rift(id) {
+                                Ok(r) => self.log.push(report_line("assault", r)),
+                                Err(e) => self.log.push(format!("cannot launch: {e:?}")),
+                            }
+                        }
+                    }
+                    MissionKind::Rift(id) => {
+                        // A distant strike flies out; it reaches the field on
+                        // arrival — led sorties wait on-site for the order,
+                        // auto sorties resolve the day they land.
+                        if let Err(e) = c.dispatch_manifest(id, base, manifest, go_lead) {
+                            self.log.push(format!("cannot launch: {e:?}"));
+                        }
+                    }
                     other => {
                         c.set_next_manifest(manifest);
                         action = GeoAction::LeadMission(other);
@@ -2719,7 +2742,10 @@ fn best_launch_base(c: &Campaign, kind: MissionKind) -> usize {
     let candidates: Vec<usize> = (0..c.bases.len())
         .filter(|&b| {
             let fit = c.soldiers.iter().any(|s| s.is_fit() && s.home == b);
-            fit && (!flight || c.base_free_hangars(b) > 0)
+            // A rift in the base's own region flies no zeppelin, so a
+            // hangar-less house can still answer on its doorstep.
+            let local = matches!(kind, MissionKind::Rift(id) if c.travel_days_from(b, id) == Ok(0));
+            fit && (!flight || local || c.base_free_hangars(b) > 0)
         })
         .collect();
     match kind {
@@ -2860,7 +2886,9 @@ fn chapterhouse_panel(
                         for x in 0..GRID {
                             let cell = c.bases[bi].facility_at(x, y);
                             let days = c.bases[bi].build_days_left(x, y);
-                            let legal = cell.is_none() && c.bases[bi].touches(x, y);
+                            // The chosen facility's whole footprint must fit
+                            // here — a 2×2 hangar needs room its neighbours lack.
+                            let legal = cell.is_none() && c.bases[bi].fits(*build_choice, x, y);
                             let cut_off = cell.is_some() && !linked.contains(&(x, y));
                             let label = match (cell, days) {
                                 (Some(_), Some(d)) => egui::RichText::new(format!("{d}"))
@@ -2908,6 +2936,11 @@ fn chapterhouse_panel(
                                     "build {} here ({}k)",
                                     build_choice.name(),
                                     build_choice.cost()
+                                )),
+                                None if c.bases[bi].touches(x, y) => resp.on_hover_text(format!(
+                                    "the {} won't fit here — its footprint runs off the \
+                                     grounds or into another hall",
+                                    build_choice.name()
                                 )),
                                 None => resp.on_hover_text(
                                     "too far from the halls: new walls grow from old walls",

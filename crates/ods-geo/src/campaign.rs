@@ -28,7 +28,6 @@ pub const DEBT_LIMIT: i64 = -500;
 pub const CHAPTERHOUSE_COST: i64 = 800;
 /// Commissioning a second (or third) consecrated zeppelin.
 pub const ZEPPELIN_COST: i64 = 700;
-pub const MAX_ZEPPELINS: u32 = 3;
 /// Brimstone burned to force open the way to the Otherside.
 pub const FINAL_ASSAULT_BRIMSTONE: u32 = 50;
 
@@ -430,7 +429,8 @@ pub struct Soldier {
     /// A named relic, carried until death loses it in the field.
     #[serde(default)]
     pub relic: Option<Relic>,
-    /// Standing squad (0 = unassigned; see [`SQUAD_NAMES`]).
+    /// Dead field, kept only so old saves still deserialize; the standing-
+    /// squad system was replaced by base assignment and launch manifests.
     #[serde(default)]
     pub squad: u8,
     /// The name of the one they always fight beside.
@@ -726,9 +726,6 @@ const NEMESIS_NAMES: [&str; 5] = [
     "The Pale Regent",
     "Mordechar the Patient",
 ];
-
-/// The standing squads' banners (index 1..; 0 is the unassigned pool).
-pub const SQUAD_NAMES: [&str; 4] = ["(any)", "Lamplighters", "Grave Watch", "Ashen Choir"];
 
 /// What the drill yard drills into the garrison.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1033,6 +1030,11 @@ pub struct Campaign {
     /// launch sheet. Transient — never saved.
     #[serde(default, skip)]
     next_manifest: Option<Vec<usize>>,
+    /// Whether the one-time pre-hangar fleet migration has run. Defaults to
+    /// false on old saves (so they get berths granted once) and true on new
+    /// campaigns; once true, demolishing the last hangar never re-grants one.
+    #[serde(default)]
+    fleet_migrated: bool,
     /// Events minted outside advance_day (mission conclusions), flushed on
     /// the next day tick so the log still hears about them.
     #[serde(default, skip)]
@@ -1137,6 +1139,7 @@ impl Campaign {
             sorties: Vec::new(),
             interception: None,
             next_manifest: None,
+            fleet_migrated: true,
             pending_events: Vec::new(),
             month_score: 0,
             bad_months: 0,
@@ -1371,12 +1374,17 @@ impl Campaign {
         }
         // Pre-hangar saves kept the fleet as a global count and no berths.
         // Grant the old fleet's worth of hangars to the founding house so a
-        // loaded game can still fly, matching its former air power.
-        if !self.bases.is_empty() && self.total_hangars() == 0 {
-            let want = self.zeppelins.max(1) as usize;
-            for _ in 0..want {
-                self.bases[0].ensure_hangar();
+        // loaded game can still fly, matching its former air power. Run once:
+        // a veteran who later razes their last hangar must not have one
+        // conjured back on the next load.
+        if !self.fleet_migrated {
+            if !self.bases.is_empty() && self.total_hangars() == 0 {
+                let want = self.zeppelins.max(1) as usize;
+                for _ in 0..want {
+                    self.bases[0].ensure_hangar();
+                }
             }
+            self.fleet_migrated = true;
         }
     }
 
@@ -2298,42 +2306,54 @@ impl Campaign {
         // (applied to the squad below, after the battle is built).
         let trophy_bravery = (self.trophies as i32 * 2).min(10);
 
+        // Consume any hand-picked manifest up front so it never lingers to
+        // hijack the next mission — even when a different rule ends up winning.
+        let picked = self.next_manifest.take().filter(|m| {
+            m.iter().any(|&i| self.soldiers.get(i).is_some_and(|s| s.is_fit()))
+        });
         // Who deploys, in order of precedence:
-        //   1. a hand-picked manifest set by the launch sheet (nests, purges,
-        //      finals — missions that don't fly a sortie);
-        //   2. the soldiers a rift sortie flew out with (their `aboard` mark);
-        //   3. a fallback muster of the fit — for a Reckoning, only the
-        //      garrison stationed at the struck house.
-        let squad_idx: Vec<usize> = if let Some(m) = self
-            .next_manifest
-            .take()
-            .filter(|m| m.iter().any(|&i| self.soldiers.get(i).is_some_and(|s| s.is_fit())))
-        {
-            m.into_iter()
+        //   * a rift flies the soldiers it launched with (their `aboard`
+        //     mark); only if none are aboard do we fall to the picked
+        //     manifest, then a home-filtered muster;
+        //   * everything else (nests, purges, finals, Reckonings) takes the
+        //     picked manifest, else a fallback of the fit — for a Reckoning,
+        //     only the garrison stationed at the struck house.
+        let fit_picked = |picked: Option<Vec<usize>>| -> Vec<usize> {
+            picked
+                .into_iter()
+                .flatten()
                 .filter(|&i| self.soldiers.get(i).is_some_and(|s| s.is_fit()))
                 .take(SQUAD_SIZE)
                 .collect()
-        } else {
-            let aboard: Vec<usize> = match kind {
-                MissionKind::Rift(id) => self
+        };
+        let fallback = |defense: bool, base: usize| -> Vec<usize> {
+            self.soldiers
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.is_fit() && (!defense || s.home == base))
+                .map(|(i, _)| i)
+                .take(SQUAD_SIZE)
+                .collect()
+        };
+        let squad_idx: Vec<usize> = match kind {
+            MissionKind::Rift(id) => {
+                let aboard: Vec<usize> = self
                     .soldiers
                     .iter()
                     .enumerate()
                     .filter(|(_, s)| s.aboard == Some(id))
                     .map(|(i, _)| i)
-                    .collect(),
-                _ => Vec::new(),
-            };
-            if !aboard.is_empty() {
-                aboard
-            } else {
-                self.soldiers
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, s)| s.is_fit() && (!defense || s.home == base))
-                    .map(|(i, _)| i)
-                    .take(SQUAD_SIZE)
-                    .collect()
+                    .collect();
+                if !aboard.is_empty() {
+                    aboard
+                } else {
+                    let p = fit_picked(picked);
+                    if !p.is_empty() { p } else { fallback(defense, base) }
+                }
+            }
+            _ => {
+                let p = fit_picked(picked);
+                if !p.is_empty() { p } else { fallback(defense, base) }
             }
         };
         if squad_idx.is_empty() {
@@ -5260,6 +5280,32 @@ mod tests {
             vec![2, 3],
             "exactly the chosen manifest deploys: {:?}",
             token.squad_idx
+        );
+    }
+
+    #[test]
+    fn an_aboard_squad_outflies_a_stale_manifest_and_clears_it() {
+        let mut c = Campaign::new(71);
+        c.month_plan.clear();
+        c.rifts.clear();
+        let a = detected_rift(&mut c, RiftKind::Scouting, Region::Europe);
+        let b = detected_rift(&mut c, RiftKind::Scouting, Region::Europe);
+        // Soldiers 0 and 1 flew out to rift A; a stale sheet still names 4 and 5.
+        c.soldiers[0].aboard = Some(a);
+        c.soldiers[1].aboard = Some(a);
+        c.set_next_manifest(vec![4, 5]);
+        // The rift deploys who actually flew, not the leftover pick.
+        let (_, token) = c.begin_mission(MissionKind::Rift(a)).unwrap();
+        assert_eq!(token.squad_idx, vec![0, 1], "the aboard squad answers the rift");
+        // And that stale sheet is spent, not lurking to hijack the next battle:
+        // rift B has nobody aboard, so it musters the fit garrison (2,3,4,5) —
+        // if the manifest had leaked it would open with 4.
+        let (_, token2) = c.begin_mission(MissionKind::Rift(b)).unwrap();
+        assert_eq!(
+            token2.squad_idx.first(),
+            Some(&2),
+            "no leftover manifest hijacks the next muster: {:?}",
+            token2.squad_idx
         );
     }
 
