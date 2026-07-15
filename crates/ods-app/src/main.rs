@@ -274,7 +274,7 @@ pub struct Core {
     pub selected_region: Option<Region>,
     /// The strategic overlay washing the globe (terrain / dread / …).
     pub map_mode: globe::MapMode,
-    globe_built_for: Option<(Option<Region>, globe::MapMode)>,
+    pub(crate) globe_built_for: Option<(Option<Region>, globe::MapMode)>,
     /// The title screen's frozen skirmish, slowly orbited.
     menu_built: bool,
     menu_camera: OrbitCamera,
@@ -485,25 +485,10 @@ impl Core {
         }
         let mut m = std::collections::HashMap::new();
         for &r in Region::ALL.iter() {
-            let col = match self.map_mode {
-                globe::MapMode::Panic => {
-                    let p = (*c.region_panic.get(&r).unwrap_or(&0) as f32 / 100.0).clamp(0.0, 1.0);
-                    [0.18 + 0.72 * p, 0.52 * (1.0 - p) + 0.08, 0.12]
-                }
-                globe::MapMode::Corruption => {
-                    if c.corrupted_patrons.contains(&r) {
-                        [0.68, 0.16, 0.82]
-                    } else {
-                        [0.20, 0.30, 0.30]
-                    }
-                }
-                globe::MapMode::Funding => {
-                    let f = (*c.region_funding.get(&r).unwrap_or(&0) as f32 / 220.0).clamp(0.0, 1.0);
-                    [0.62 * (1.0 - f) + 0.16, 0.30 + 0.52 * f, 0.16]
-                }
-                globe::MapMode::Terrain => unreachable!(),
-            };
-            m.insert(r, col);
+            let panic = *c.region_panic.get(&r).unwrap_or(&0);
+            let funding = *c.region_funding.get(&r).unwrap_or(&0);
+            let corrupted = c.corrupted_patrons.contains(&r);
+            m.insert(r, globe::overlay_tint(self.map_mode, panic, corrupted, funding));
         }
         Some(m)
     }

@@ -264,13 +264,19 @@ fn slerp_latlon(a: (f32, f32), b: (f32, f32), t: f32) -> (f32, f32) {
     let pa = latlon_to_pos(a.0, a.1, 1.0);
     let pb = latlon_to_pos(b.0, b.1, 1.0);
     let omega = pa.dot(pb).clamp(-1.0, 1.0).acos();
-    let p = if omega < 1.0e-4 {
-        pa
+    let s = omega.sin();
+    // Near-coincident or near-antipodal, the great circle degenerates
+    // (sin(omega)→0): fall back to plain interpolation of the endpoints.
+    let p = if s.abs() < 1.0e-4 {
+        pa.lerp(pb, t)
     } else {
-        let s = omega.sin();
         pa * (((1.0 - t) * omega).sin() / s) + pb * ((t * omega).sin() / s)
     };
-    let lat = (p.z / p.length()).clamp(-1.0, 1.0).asin().to_degrees();
+    let len = p.length();
+    if len < 1.0e-5 {
+        return a; // fully antipodal midpoint: pick an endpoint, no NaN
+    }
+    let lat = (p.z / len).clamp(-1.0, 1.0).asin().to_degrees();
     let lon = p.y.atan2(p.x).to_degrees();
     (lat, lon)
 }
@@ -337,6 +343,30 @@ impl MapMode {
             MapMode::Panic => "Dread",
             MapMode::Corruption => "Corruption",
             MapMode::Funding => "Funding",
+        }
+    }
+}
+
+/// The colour a region takes under a strategic overlay: dread reddens with
+/// panic, funding greens with money, corruption flags violet where a patron
+/// has fallen. Always in [0,1] per channel. Terrain has no tint.
+pub fn overlay_tint(mode: MapMode, panic: i64, corrupted: bool, funding: i64) -> [f32; 3] {
+    match mode {
+        MapMode::Terrain => [0.0, 0.0, 0.0],
+        MapMode::Panic => {
+            let p = (panic as f32 / 100.0).clamp(0.0, 1.0);
+            [0.18 + 0.72 * p, 0.52 * (1.0 - p) + 0.08, 0.12]
+        }
+        MapMode::Corruption => {
+            if corrupted {
+                [0.68, 0.16, 0.82]
+            } else {
+                [0.20, 0.30, 0.30]
+            }
+        }
+        MapMode::Funding => {
+            let f = (funding as f32 / 220.0).clamp(0.0, 1.0);
+            [0.62 * (1.0 - f) + 0.16, 0.30 + 0.52 * f, 0.16]
         }
     }
 }
@@ -1257,6 +1287,38 @@ mod tests {
         assert!(mid.1 > -70.0 && mid.1 < -10.0, "mid lon between the ends");
         // A great circle bows poleward of the latitude midpoint at these lats.
         assert!(mid.0 >= 45.0, "the arc bows north");
+        // Degenerate ends never produce NaN: identical and antipodal points.
+        for t in [0.0, 0.5, 1.0] {
+            let same = slerp_latlon((10.0, 20.0), (10.0, 20.0), t);
+            assert!(same.0.is_finite() && same.1.is_finite());
+            let anti = slerp_latlon((0.0, 0.0), (0.0, 180.0), t);
+            assert!(anti.0.is_finite() && anti.1.is_finite());
+        }
+        // Across the antimeridian it takes the SHORT way: (0,170)→(0,-170)
+        // passes near ±180, not back through the prime meridian.
+        let dl = slerp_latlon((0.0, 170.0), (0.0, -170.0), 0.5);
+        assert!(dl.1.abs() > 170.0, "short way over the dateline, got lon {}", dl.1);
+    }
+
+    #[test]
+    fn overlay_tints_track_their_metric() {
+        // Dread reddens with panic; funding greens with money; a fallen
+        // patron flags violet.
+        let calm = overlay_tint(MapMode::Panic, 0, false, 0);
+        let terror = overlay_tint(MapMode::Panic, 100, false, 0);
+        assert!(terror[0] > calm[0] && terror[1] < calm[1], "dread reddens");
+        let poor = overlay_tint(MapMode::Funding, 0, false, 0);
+        let rich = overlay_tint(MapMode::Funding, 0, false, 300);
+        assert!(rich[1] > poor[1], "funding greens");
+        let clean = overlay_tint(MapMode::Corruption, 0, false, 0);
+        let fallen = overlay_tint(MapMode::Corruption, 0, true, 0);
+        assert!(fallen[2] > clean[2] + 0.3, "corruption flags violet");
+        // Every channel of every mode stays in range.
+        for m in [MapMode::Panic, MapMode::Corruption, MapMode::Funding] {
+            for &c in &overlay_tint(m, 250, true, 500) {
+                assert!((0.0..=1.0).contains(&c));
+            }
+        }
     }
 
     #[test]

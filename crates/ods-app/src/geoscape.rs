@@ -1248,6 +1248,10 @@ impl Core {
                 self.day_progress = 0.0;
                 // The world remembers, whether or not you asked it to.
                 crate::write_autosave(c);
+                // A live overlay must track the news from a manual advance too.
+                if self.map_mode != crate::globe::MapMode::Terrain {
+                    self.globe_built_for = None;
+                }
             }
             ui.separator();
 
@@ -3647,4 +3651,22 @@ fn desk_fill() -> egui::Frame {
         .fill(egui::Color32::from_rgb(19, 15, 12)) // old paper over stone
         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(110, 88, 55)))
         .inner_margin(egui::Margin::same(18))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moon_glyph_covers_every_day_of_the_round() {
+        // Every day 0..29 resolves to a non-empty glyph and name, and the
+        // round wraps: day 29 reads the same as day 0.
+        for d in 0..29 {
+            let (glyph, name) = moon_glyph(d);
+            assert!(!glyph.is_empty() && !name.is_empty(), "day {d}");
+        }
+        assert_eq!(moon_glyph(0), moon_glyph(29));
+        assert_eq!(moon_glyph(14).1, "full moon");
+        assert_eq!(moon_glyph(-1), moon_glyph(28), "negative days wrap");
+    }
 }
