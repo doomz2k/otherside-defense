@@ -422,7 +422,8 @@ struct FsOut {
 @fragment
 fn fs_main(in: VsOut) -> FsOut {
     let px = in.clip.xy;
-    let p = px * 0.006;
+    // The nebula is weather, not wallpaper: it drifts, slowly.
+    let p = px * 0.006 + vec2<f32>(camera.sun.w * 0.008, camera.sun.w * 0.003);
     var neb = noise2(p) * 0.55;
     neb += noise2(p * 2.3 + vec2<f32>(19.7, 7.3)) * 0.30;
     neb += noise2(p * 5.1 + vec2<f32>(3.1, 41.9)) * 0.15;
@@ -436,6 +437,23 @@ fn fs_main(in: VsOut) -> FsOut {
         let tw = 0.7 + 0.3 * sin(camera.sun.w * (1.0 + fract(h * 57.0) * 3.0) + h * 40.0);
         let bright = (h - 0.982) / 0.018;
         color += vec3<f32>(0.8, 0.85, 1.0) * bright * tw;
+    }
+    // Every so often, something falls: a brief diagonal streak crossing
+    // the sky, gone in a second.
+    let period = 9.0;
+    let mt = fract(camera.sun.w / period);
+    if (mt < 0.12) {
+        let seed = floor(camera.sun.w / period);
+        let oy = 80.0 + fract(seed * 0.731) * 300.0;
+        let ox = fract(seed * 0.417) * 2000.0;
+        let head = vec2<f32>(ox + mt * 2600.0, oy + mt * 900.0);
+        let d = px - head;
+        let along = d.x * 0.945 + d.y * 0.327;
+        let across = abs(d.x * 0.327 - d.y * 0.945);
+        if (along < 0.0 && along > -90.0 && across < 1.6) {
+            let fade = (1.0 + along / 90.0) * (1.0 - mt / 0.12);
+            color += vec3<f32>(0.9, 0.85, 0.7) * fade;
+        }
     }
     var out: FsOut;
     out.color = vec4<f32>(color, 1.0);

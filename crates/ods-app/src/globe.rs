@@ -315,10 +315,28 @@ pub fn build_markers(campaign: &Campaign, time: f32) -> (Vec<LitVertex>, Vec<u32
             push_at(lat, lon, 1.4, 1.4, [0.9, 0.8, 0.5, 1.0]);
             t += 0.08;
         }
-        // The ship itself, bobbing on the wind.
+        // The ship itself: envelope fore and aft, gondola slung below,
+        // bobbing on the wind, trailing a fading wake.
         let (lat, lon) = lerp(progress);
-        let bob = 4.0 + 0.5 * (time * 3.0).sin();
-        push_at(lat, lon, bob, bob, [1.0, 0.85, 0.35, 1.0]);
+        let (lat2, lon2) = lerp((progress + 0.04).min(1.0));
+        let bob = 8.0 + 0.5 * (time * 3.0).sin();
+        let (dlat, dlon) = (lat2 - lat, lon2 - lon);
+        let n = (dlat * dlat + dlon * dlon).sqrt().max(0.001);
+        let (ulat, ulon) = (dlat / n, dlon / n);
+        for (f, size) in [(0.0f32, 3.2f32), (1.6, 2.6), (-1.6, 2.6)] {
+            push_at(lat + ulat * f, lon + ulon * f, bob, size, [0.82, 0.78, 0.66, 1.0]);
+        }
+        push_at(lat, lon, bob - 3.0, 1.6, [0.55, 0.45, 0.3, 1.0]);
+        for w in 1..4 {
+            let f = -2.5 - w as f32 * 1.6;
+            push_at(
+                lat + ulat * f,
+                lon + ulon * f,
+                bob + 0.4,
+                1.2 - w as f32 * 0.25,
+                [0.75, 0.75, 0.7, 1.0],
+            );
+        }
     }
 
     (vertices, indices)
@@ -447,6 +465,38 @@ pub fn build_geo_omens(
                 2.6 * (1.0 - f * 0.6),
                 [0.65, 0.2, 0.9, (0.5 - f * 0.4) * (0.6 + 0.4 * urgency)],
             );
+        }
+    }
+    // Weather: a broken shell of drifting cloud banks, each a cluster of
+    // soft quads riding its own latitude at its own pace.
+    for k in 0..26u32 {
+        let h = k.wrapping_mul(2654435761) >> 8;
+        let lat = ((h % 120) as f32) - 60.0;
+        let drift = 2.0 + (h % 5) as f32 * 0.8;
+        let lon = ((h % 360) as f32 + time * drift) % 360.0 - 180.0;
+        for (j, (dlat, dlon, r)) in
+            [(0.0f32, 0.0f32, 7.0f32), (2.5, 4.0, 5.0), (-2.0, 5.5, 4.2)].iter().enumerate()
+        {
+            let center = latlon_to_pos(lat + dlat, lon + dlon, GLOBE_RADIUS + 6.5);
+            quad(
+                center,
+                *r,
+                [0.9, 0.92, 0.95, 0.10 + 0.03 * ((k + j as u32) % 3) as f32],
+            );
+        }
+    }
+    // The sky-fight: gargoyles wheel around the held zeppelin.
+    if let Some(i) = &campaign.interception {
+        let (lat, lon) = centroid(i.region);
+        for g in 0..i.gargoyles.min(5) {
+            let a = time * 2.2 + g as f32 * 2.1;
+            let r = 5.0 + i.range as f32 * 0.6;
+            let center = latlon_to_pos(
+                lat + a.sin() * r * 0.4,
+                lon + a.cos() * r * 0.6,
+                GLOBE_RADIUS + 9.0 + (time * 3.0 + g as f32).sin() * 1.5,
+            );
+            quad(center, 1.6, [0.5, 0.15, 0.6, 0.85]);
         }
     }
     for (&region, &panic) in &campaign.region_panic {

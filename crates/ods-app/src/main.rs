@@ -775,6 +775,31 @@ impl Core {
                                 self.run_to_event = false;
                                 self.day_progress = 0.0;
                                 for e in &events {
+                                    // The camera answers the world: new
+                                    // wounds swing the globe to themselves.
+                                    match e {
+                                        ods_geo::GeoEvent::RiftDetected { id, .. } => {
+                                            if let Some(r) =
+                                                c.rifts.iter().find(|r| r.id == *id)
+                                            {
+                                                self.geo_swing = Some((
+                                                    r.lon.to_radians(),
+                                                    r.lat.to_radians().clamp(0.15, 1.2),
+                                                ));
+                                            }
+                                        }
+                                        ods_geo::GeoEvent::NestFounded { id, .. } => {
+                                            if let Some(nst) =
+                                                c.nests.iter().find(|n| n.id == *id)
+                                            {
+                                                self.geo_swing = Some((
+                                                    nst.lon.to_radians(),
+                                                    nst.lat.to_radians().clamp(0.15, 1.2),
+                                                ));
+                                            }
+                                        }
+                                        _ => {}
+                                    }
                                     let toast = match e {
                                         ods_geo::GeoEvent::FacilityComplete { facility } => {
                                             Some(format!("🔨 {} complete", facility.name()))
