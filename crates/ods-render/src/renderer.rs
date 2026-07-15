@@ -17,7 +17,7 @@ const VOXEL_SHADER: &str = r#"
 struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32>, flash: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
-struct Sun { vp: mat4x4<f32> };
+struct Sun { vp: mat4x4<f32>, params: vec4<f32> };
 @group(1) @binding(0) var<uniform> sun_cam: Sun;
 @group(1) @binding(1) var shadow_tex: texture_depth_2d;
 @group(1) @binding(2) var shadow_smp: sampler_comparison;
@@ -33,11 +33,12 @@ fn sun_shadow(world: vec3<f32>) -> f32 {
     }
     let ts = 0.75 / 2048.0;
     var lit = 0.0;
-    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(-ts, -ts), ndc.z - 0.0022);
-    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(ts, -ts), ndc.z - 0.0022);
-    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(-ts, ts), ndc.z - 0.0022);
-    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(ts, ts), ndc.z - 0.0022);
-    return lit / 4.0;
+    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(-ts, -ts), ndc.z - sun_cam.params.x);
+    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(ts, -ts), ndc.z - sun_cam.params.x);
+    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(-ts, ts), ndc.z - sun_cam.params.x);
+    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(ts, ts), ndc.z - sun_cam.params.x);
+    // Strength: 0 leaves the world unshadowed, 1 bites full.
+    return mix(1.0, lit / 4.0, sun_cam.params.y);
 }
 
 // Entries 16+ are EMISSIVE: they ignore the sun and pulse on the clock.
@@ -202,7 +203,7 @@ const LIT_SHADER: &str = r#"
 struct Camera { view_proj: mat4x4<f32>, sun: vec4<f32>, flash: vec4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
-struct Sun { vp: mat4x4<f32> };
+struct Sun { vp: mat4x4<f32>, params: vec4<f32> };
 @group(1) @binding(0) var<uniform> sun_cam: Sun;
 @group(1) @binding(1) var shadow_tex: texture_depth_2d;
 @group(1) @binding(2) var shadow_smp: sampler_comparison;
@@ -218,11 +219,12 @@ fn sun_shadow(world: vec3<f32>) -> f32 {
     }
     let ts = 0.75 / 2048.0;
     var lit = 0.0;
-    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(-ts, -ts), ndc.z - 0.0022);
-    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(ts, -ts), ndc.z - 0.0022);
-    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(-ts, ts), ndc.z - 0.0022);
-    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(ts, ts), ndc.z - 0.0022);
-    return lit / 4.0;
+    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(-ts, -ts), ndc.z - sun_cam.params.x);
+    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(ts, -ts), ndc.z - sun_cam.params.x);
+    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(-ts, ts), ndc.z - sun_cam.params.x);
+    lit += textureSampleCompare(shadow_tex, shadow_smp, uv + vec2<f32>(ts, ts), ndc.z - sun_cam.params.x);
+    // Strength: 0 leaves the world unshadowed, 1 bites full.
+    return mix(1.0, lit / 4.0, sun_cam.params.y);
 }
 
 struct VsIn {
@@ -655,6 +657,8 @@ const PIXEL_SCALE: u32 = 1;
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SunUniform {
     vp: [[f32; 4]; 4],
+    /// x = depth bias, y = strength (0 none .. 1 full), zw unused.
+    params: [f32; 4],
 }
 
 #[repr(C)]
@@ -705,6 +709,9 @@ pub struct Renderer {
     shadow_sample_bind_group: wgpu::BindGroup,
     shadow_voxel_pipeline: wgpu::RenderPipeline,
     shadow_lit_pipeline: wgpu::RenderPipeline,
+    /// Player-tunable shadow depth bias and strength.
+    pub shadow_bias: f32,
+    pub shadow_strength: f32,
     sun_dir: glam::Vec3,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
@@ -947,7 +954,10 @@ impl Renderer {
         });
         let shadow_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("sun-vp"),
-            contents: bytemuck::bytes_of(&SunUniform { vp: Mat4::IDENTITY.to_cols_array_2d() }),
+            contents: bytemuck::bytes_of(&SunUniform {
+                vp: Mat4::IDENTITY.to_cols_array_2d(),
+                params: [0.0022, 1.0, 0.0, 0.0],
+            }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let shadow_cast_layout =
@@ -1328,6 +1338,8 @@ impl Renderer {
             shadow_sample_bind_group,
             shadow_voxel_pipeline,
             shadow_lit_pipeline,
+            shadow_bias: 0.0022,
+            shadow_strength: 1.0,
             sun_dir: glam::Vec3::new(0.35, 0.5, 0.8).normalize(),
             camera_bind_group,
             lit_pipeline,
@@ -1627,7 +1639,10 @@ impl Renderer {
             self.queue.write_buffer(
                 &self.shadow_buffer,
                 0,
-                bytemuck::bytes_of(&SunUniform { vp: sun_vp.to_cols_array_2d() }),
+                bytemuck::bytes_of(&SunUniform {
+                    vp: sun_vp.to_cols_array_2d(),
+                    params: [self.shadow_bias, self.shadow_strength, 0.0, 0.0],
+                }),
             );
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow-pass"),

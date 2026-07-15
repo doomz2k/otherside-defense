@@ -453,6 +453,7 @@ pub fn build_figures(
     visible: &std::collections::HashSet<IVec3>,
     visual: &std::collections::HashMap<u32, Vec3>,
     anim: &std::collections::HashMap<u32, AnimState>,
+    shells: &mut std::collections::HashMap<u32, (u64, FigureShell)>,
 ) -> (Vec<LitVertex>, Vec<u32>) {
     use ods_sim::units::{Side, Species};
 
@@ -501,9 +502,56 @@ pub fn build_figures(
         }
         let feet = visual.get(&u.id.0).copied();
         let state = anim.get(&u.id.0).copied().unwrap_or_default();
-        push_unit(&mut vertices, &mut indices, u, feet, state);
+        // The carve is cached: it rebuilds only when what the figure IS
+        // changes (kit, wounds, health bucket) — what it's DOING (walking,
+        // turning, falling) is pure per-frame transform in emit_unit.
+        let key = shell_key(u);
+        if shells.get(&u.id.0).map(|(k, _)| *k) != Some(key) {
+            shells.insert(u.id.0, (key, carve_unit(u)));
+        }
+        let shell = &shells[&u.id.0].1;
+        emit_unit(&mut vertices, &mut indices, shell, u, feet, state);
     }
     (vertices, indices)
+}
+
+/// A carved figure shell: only the exposed faces, in figure space.
+pub struct FigureShell {
+    faces: Vec<ShellFace>,
+}
+
+struct ShellFace {
+    cell: (i16, i16, i16),
+    d: u8,
+    front: bool,
+    color: [f32; 4],
+    part: BodyPart,
+}
+
+/// Everything the carve depends on, folded into one number.
+fn shell_key(unit: &Unit) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    std::mem::discriminant(&unit.species).hash(&mut h);
+    unit.weapon.key.hash(&mut h);
+    unit.conscious.hash(&mut h);
+    unit.alive.hash(&mut h);
+    unit.civilian.hash(&mut h);
+    for p in &unit.severed {
+        std::mem::discriminant(p).hash(&mut h);
+    }
+    255u8.hash(&mut h);
+    for p in &unit.injuries {
+        std::mem::discriminant(p).hash(&mut h);
+    }
+    if let Some((p, _)) = unit.infected {
+        std::mem::discriminant(&p).hash(&mut h);
+    }
+    // Health in 5% steps: wounds chew visibly without re-carving per hit
+    // point.
+    let vitality = (unit.health.max(0) as f32 / unit.health_max.max(1) as f32).clamp(0.0, 1.0);
+    (((vitality * 20.0) as u8).min(20)).hash(&mut h);
+    h.finish()
 }
 
 /// Two burning points at head height: the shape of a demon you can't see.
@@ -526,68 +574,12 @@ fn push_eyes(vertices: &mut Vec<LitVertex>, indices: &mut Vec<u32>, unit: &ods_s
     }
 }
 
-fn push_unit(
-    vertices: &mut Vec<LitVertex>,
-    indices: &mut Vec<u32>,
-    unit: &Unit,
-    feet_override: Option<Vec3>,
-    anim: AnimState,
-) {
-    let mut feet = feet_override.unwrap_or_else(|| {
-        (unit.tile * TILE_VOXELS).as_vec3()
-            + Vec3::new(
-                TILE_VOXELS as f32 / 2.0,
-                TILE_VOXELS as f32 / 2.0,
-                GROUND_TOP as f32,
-            )
-    });
-    let vs = ods_sim::VS as f32;
-    let fall = anim.fall.clamp(0.0, 1.0);
-    // The walk: the whole body bobs on the beat of the stride.
-    let moving = unit.is_active() && anim.walk != 0.0;
-    if moving {
-        feet.z += (anim.walk * 2.0).sin().abs() * 0.35 * vs;
-    } else if unit.is_active() && fall < 0.2 {
-        // Idle breathing: barely there, phase-shifted per figure.
-        feet.z += (anim.breath * 1.4 + unit.id.0 as f32 * 1.7).sin() * 0.10 * vs;
-    }
-    let swing = if moving { anim.walk.sin() } else { 0.0 };
-    // Recoil: the shot kicks the shooter back off the line for a blink.
-    let kick = if unit.is_active() { anim.recoil.max(0.0) } else { 0.0 };
-
-    // Pose: kneeling compresses, the cowed hunch — eased by the anim
-    // state where the battle screen provides one.
-    let z_scale = if anim.pose > 0.0 { anim.pose } else { pose_target(unit) };
-
-    // The transform, applied to every corner in figure space (+Y is the
-    // chest): kneel squash, then the topple about the hips, then the turn
-    // to the world heading, then out to the feet on the field.
-    let pitch = fall * 1.5; // just short of flat: a heap, not a plank
-    let (ps, pc) = pitch.sin_cos();
-    let turn = anim.yaw - std::f32::consts::FRAC_PI_2;
-    let (ys, yc) = turn.sin_cos();
-    let settle = fall * 2.6; // toppled bodies rest on the ground, not in it
-    let place = |p: Vec3| -> Vec3 {
-        let p = Vec3::new(p.x, p.y, p.z * z_scale);
-        let p = Vec3::new(p.x, p.y * pc - p.z * ps, p.y * ps + p.z * pc + settle);
-        let p = Vec3::new(p.x * yc - p.y * ys, p.x * ys + p.y * yc, p.z);
-        feet + p * vs
-    };
-    let turn_normal = |n: [f32; 3]| -> [f32; 3] {
-        let (x, y, z) = (n[0], n[1], n[2]);
-        let (y, z) = (y * pc - z * ps, y * ps + z * pc);
-        [x * yc - y * ys, x * ys + y * yc, z]
-    };
-
-    // How dead the figure LOOKS is the playback's business, not the sim's:
-    // color drains with the topple, so no one greys out before their
-    // death has played on screen.
+/// Rasterize a unit's tagged boxes and keep only the exposed faces.
+/// Pure function of the unit's STATE — no pose, no offsets, no colors
+/// that change per frame.
+fn carve_unit(unit: &Unit) -> FigureShell {
     let vitality = (unit.health.max(0) as f32 / unit.health_max.max(1) as f32).clamp(0.0, 1.0);
-    let drain = 1.0 - 0.70 * fall;
-
-    // The fine carve: every tagged box is rasterized into one cell grid,
-    // then only the exposed shell is meshed. Ten times the grain of the
-    // old slabs, still animated per frame.
+    let vitality = ((vitality * 20.0).floor() / 20.0).clamp(0.0, 1.0);
     let mut grid: std::collections::HashMap<(i16, i16, i16), ([f32; 4], BodyPart)> =
         std::collections::HashMap::new();
     let carried: &[PartBox] = if unit.species == Species::Soldier {
@@ -605,12 +597,6 @@ fn push_unit(
             continue;
         }
         let mut color = part.color;
-        if unit.alive {
-            // The hurt wear it: blood-darkened toward the end.
-            let dim = 0.55 + 0.45 * vitality;
-            color = [color[0] * dim, color[1] * dim, color[2] * dim, color[3]];
-        }
-        color = [color[0] * drain, color[1] * drain, color[2] * drain, color[3]];
         // Rot glows from inside the part it holds.
         if unit.infected.map(|(p, _)| p) == Some(part.part) {
             color = [0.35, 0.9, 0.25, 1.0];
@@ -619,7 +605,7 @@ fn push_unit(
         if unit.civilian && part.part != BodyPart::Head {
             color = CIVVY;
         }
-        // Crippled parts darken to bruised red — hit location made visible.
+        // Crippled parts darken to bruised red — hit location visible.
         if unit.injuries.contains(&part.part) {
             color = [
                 (color[0] * 0.4 + 0.35).min(1.0),
@@ -628,39 +614,11 @@ fn push_unit(
                 1.0,
             ];
         }
-        // Recoil rocks the whole body off the line; the weapon jumps —
-        // and during a reload it dips to the belt.
-        let mut offset = Vec3::new(0.0, -kick * 9.0, 0.0);
-        if part.part == BodyPart::Weapon {
-            offset.z += kick * 12.0;
-            let dip = anim.reload.clamp(0.0, 0.55);
-            offset.z -= dip * 6.0;
-            offset.y -= dip * 3.0;
-        }
-        rasterize_box(&mut grid, part.part, part.min + offset, part.max + offset, color);
+        rasterize_box(&mut grid, part.part, part.min, part.max, color);
     }
-
-    // The stride, done properly: limbs PIVOT from hip and shoulder
-    // instead of sliding, so the gait reads as walking, not skating.
-    let strides = z_scale >= 0.7 && fall < 0.2;
-    let limb = move |part: BodyPart, p: Vec3| -> Vec3 {
-        if !strides || swing == 0.0 {
-            return p;
-        }
-        let (pivot, ang) = match part {
-            BodyPart::LeftLeg => (5.0f32, swing * 0.55),
-            BodyPart::RightLeg => (5.0, -swing * 0.55),
-            BodyPart::LeftArm => (8.2, -swing * 0.35),
-            BodyPart::RightArm | BodyPart::Weapon => (8.2, swing * 0.35),
-            _ => return p,
-        };
-        let (sa, ca) = ang.sin_cos();
-        let (dy, dz) = (p.y, p.z - pivot);
-        Vec3::new(p.x, dy * ca - dz * sa, pivot + dy * sa + dz * ca)
-    };
-    // Physical damage: the hurt LOSE MATERIAL. Cells vanish from the
-    // carve as health falls, twice as readily from crippled parts —
-    // deterministic per cell, so wounds are stable pocks, not static.
+    // Physical damage: the hurt LOSE MATERIAL, twice as readily from
+    // crippled parts — deterministic per cell, so wounds are stable
+    // pocks, not static.
     if unit.alive && vitality < 0.98 {
         let bite = (1.0 - vitality) * 0.20;
         grid.retain(|&(x, y, z), &mut (_, part)| {
@@ -678,7 +636,158 @@ fn push_unit(
             roll >= chance
         });
     }
-    emit_shell(vertices, indices, &grid, unit.id.0, &limb, &place, &turn_normal);
+    // Keep only exposed faces; joints keep their skin (cull same-part
+    // neighbors only), so pivoting limbs never open holes.
+    let mut faces = Vec::new();
+    for (&cell, &(color, part)) in &grid {
+        for d in 0..3u8 {
+            for front in [true, false] {
+                let neighbor = {
+                    let mut n = [cell.0, cell.1, cell.2];
+                    n[d as usize] += if front { 1 } else { -1 };
+                    (n[0], n[1], n[2])
+                };
+                if grid.get(&neighbor).is_some_and(|(_, np)| *np == part) {
+                    continue; // buried face
+                }
+                faces.push(ShellFace { cell, d, front, color, part });
+            }
+        }
+    }
+    FigureShell { faces }
+}
+
+/// Place a cached shell on the field: pose, stride, topple, recoil,
+/// per-frame color (vitality dim, death drain, grain) — all transform,
+/// no rasterization.
+fn emit_unit(
+    vertices: &mut Vec<LitVertex>,
+    indices: &mut Vec<u32>,
+    shell: &FigureShell,
+    unit: &Unit,
+    feet_override: Option<Vec3>,
+    anim: AnimState,
+) {
+    let mut feet = feet_override.unwrap_or_else(|| {
+        (unit.tile * TILE_VOXELS).as_vec3()
+            + Vec3::new(
+                TILE_VOXELS as f32 / 2.0,
+                TILE_VOXELS as f32 / 2.0,
+                GROUND_TOP as f32,
+            )
+    });
+    let vs = ods_sim::VS as f32;
+    let fall = anim.fall.clamp(0.0, 1.0);
+    let moving = unit.is_active() && anim.walk != 0.0;
+    if moving {
+        feet.z += (anim.walk * 2.0).sin().abs() * 0.35 * vs;
+    } else if unit.is_active() && fall < 0.2 {
+        feet.z += (anim.breath * 1.4 + unit.id.0 as f32 * 1.7).sin() * 0.10 * vs;
+    }
+    let swing = if moving { anim.walk.sin() } else { 0.0 };
+    let kick = if unit.is_active() { anim.recoil.max(0.0) } else { 0.0 };
+    let z_scale = if anim.pose > 0.0 { anim.pose } else { pose_target(unit) };
+    let pitch = fall * 1.5;
+    let (ps, pc) = pitch.sin_cos();
+    let turn = anim.yaw - std::f32::consts::FRAC_PI_2;
+    let (ys, yc) = turn.sin_cos();
+    let settle = fall * 2.6;
+    let place = |p: Vec3| -> Vec3 {
+        let p = Vec3::new(p.x, p.y, p.z * z_scale);
+        let p = Vec3::new(p.x, p.y * pc - p.z * ps, p.y * ps + p.z * pc + settle);
+        let p = Vec3::new(p.x * yc - p.y * ys, p.x * ys + p.y * yc, p.z);
+        feet + p * vs
+    };
+    let turn_normal = |n: [f32; 3]| -> [f32; 3] {
+        let (x, y, z) = (n[0], n[1], n[2]);
+        let (y, z) = (y * pc - z * ps, y * ps + z * pc);
+        [x * yc - y * ys, x * ys + y * yc, z]
+    };
+    // Recoil rocks the whole body; the weapon jumps with the shot and
+    // dips to the belt through a reload.
+    let dip = anim.reload.clamp(0.0, 0.55);
+    let offset = |part: BodyPart| -> Vec3 {
+        let mut o = Vec3::new(0.0, -kick * 9.0, 0.0);
+        if part == BodyPart::Weapon {
+            o.z += kick * 12.0 - dip * 6.0;
+            o.y -= dip * 3.0;
+        }
+        o
+    };
+    // The stride: limbs pivot from hip and shoulder.
+    let strides = z_scale >= 0.7 && fall < 0.2;
+    let limb = |part: BodyPart, p: Vec3| -> Vec3 {
+        if !strides || swing == 0.0 {
+            return p;
+        }
+        let (pivot, ang) = match part {
+            BodyPart::LeftLeg => (5.0f32, swing * 0.55),
+            BodyPart::RightLeg => (5.0, -swing * 0.55),
+            BodyPart::LeftArm => (8.2, -swing * 0.35),
+            BodyPart::RightArm | BodyPart::Weapon => (8.2, swing * 0.35),
+            _ => return p,
+        };
+        let (sa, ca) = ang.sin_cos();
+        let (dy, dz) = (p.y, p.z - pivot);
+        Vec3::new(p.x, dy * ca - dz * sa, pivot + dy * sa + dz * ca)
+    };
+    // Per-frame color: the hurt wear their vitality, the dead drain with
+    // the topple (never before their death has PLAYED).
+    let vitality = (unit.health.max(0) as f32 / unit.health_max.max(1) as f32).clamp(0.0, 1.0);
+    let dim = if unit.alive { 0.55 + 0.45 * vitality } else { 1.0 };
+    let drain = (1.0 - 0.70 * fall) * dim;
+    let grain = |c: (i16, i16, i16)| -> f32 {
+        let mut h = (unit.id.0)
+            .wrapping_mul(747796405)
+            .wrapping_add(c.0 as u32)
+            .wrapping_mul(374761393)
+            .wrapping_add(c.1 as u32)
+            .wrapping_mul(668265263)
+            .wrapping_add(c.2 as u32)
+            .wrapping_mul(2654435761);
+        h ^= h >> 15;
+        0.94 + 0.12 * (((h >> 8) & 255) as f32 / 255.0)
+    };
+    for f in &shell.faces {
+        let g = grain(f.cell);
+        let height = (f.cell.2 as f32 * CELL / 14.0).clamp(0.0, 1.0);
+        let shade = g * (0.86 + 0.18 * height) * drain;
+        let color = [
+            f.color[0] * shade,
+            f.color[1] * shade,
+            f.color[2] * shade,
+            f.color[3],
+        ];
+        let lo = Vec3::new(f.cell.0 as f32, f.cell.1 as f32, f.cell.2 as f32) * CELL;
+        let hi = lo + Vec3::splat(CELL);
+        let d = f.d as usize;
+        let u = (d + 1) % 3;
+        let v = (d + 2) % 3;
+        let mut normal = [0.0f32; 3];
+        normal[d] = if f.front { 1.0 } else { -1.0 };
+        let normal = turn_normal(normal);
+        let plane = if f.front { hi[d] } else { lo[d] };
+        let off = offset(f.part);
+        let corner = |cu: f32, cv: f32| -> Vec3 {
+            let mut p = Vec3::ZERO;
+            p[d] = plane;
+            p[u] = cu;
+            p[v] = cv;
+            place(limb(f.part, p + off))
+        };
+        let (p00, p10, p11, p01) = (
+            corner(lo[u], lo[v]),
+            corner(hi[u], lo[v]),
+            corner(hi[u], hi[v]),
+            corner(lo[u], hi[v]),
+        );
+        let first = vertices.len() as u32;
+        let quad = if f.front { [p00, p10, p11, p01] } else { [p00, p01, p11, p10] };
+        for p in quad {
+            vertices.push(LitVertex { position: p.to_array(), normal, color });
+        }
+        indices.extend([0, 1, 2, 0, 2, 3].map(|k| first + k));
+    }
 }
 
 /// Figure-space voxel cell size: the fine grain figures are carved at.
@@ -725,80 +834,6 @@ fn rasterize_box(
                     }
                 }
                 grid.insert((x as i16, y as i16, z as i16), (color, part));
-            }
-        }
-    }
-}
-
-/// Emit every exposed cell face, grained and shaded so the shell reads
-/// as carved voxel work instead of flat plastic.
-fn emit_shell(
-    vertices: &mut Vec<LitVertex>,
-    indices: &mut Vec<u32>,
-    grid: &std::collections::HashMap<(i16, i16, i16), ([f32; 4], BodyPart)>,
-    seed: u32,
-    limb: &impl Fn(BodyPart, Vec3) -> Vec3,
-    place: &impl Fn(Vec3) -> Vec3,
-    turn_normal: &impl Fn([f32; 3]) -> [f32; 3],
-) {
-    let grain = |c: (i16, i16, i16)| -> f32 {
-        let mut h = seed
-            .wrapping_mul(747796405)
-            .wrapping_add(c.0 as u32)
-            .wrapping_mul(374761393)
-            .wrapping_add(c.1 as u32)
-            .wrapping_mul(668265263)
-            .wrapping_add(c.2 as u32)
-            .wrapping_mul(2654435761);
-        h ^= h >> 15;
-        // ±6% brightness: cloth weave, worn steel, scarred hide.
-        0.94 + 0.12 * (((h >> 8) & 255) as f32 / 255.0)
-    };
-    for (&cell, &(base, part)) in grid {
-        let g = grain(cell);
-        // Light falls from above: feet in shadow, crown lit.
-        let height = (cell.2 as f32 * CELL / 14.0).clamp(0.0, 1.0);
-        let shade = g * (0.86 + 0.18 * height);
-        let color = [base[0] * shade, base[1] * shade, base[2] * shade, base[3]];
-        let lo = Vec3::new(cell.0 as f32, cell.1 as f32, cell.2 as f32) * CELL;
-        let hi = lo + Vec3::splat(CELL);
-        for d in 0..3usize {
-            for front in [true, false] {
-                let neighbor = {
-                    let mut n = [cell.0, cell.1, cell.2];
-                    n[d] += if front { 1 } else { -1 };
-                    (n[0], n[1], n[2])
-                };
-                // Cull only within a part: joints keep their skin, so a
-                // swung leg never opens a hole in the hip.
-                if grid.get(&neighbor).is_some_and(|(_, np)| *np == part) {
-                    continue; // buried face
-                }
-                let u = (d + 1) % 3;
-                let v = (d + 2) % 3;
-                let mut normal = [0.0f32; 3];
-                normal[d] = if front { 1.0 } else { -1.0 };
-                let normal = turn_normal(normal);
-                let plane = if front { hi[d] } else { lo[d] };
-                let corner = |cu: f32, cv: f32| -> Vec3 {
-                    let mut p = Vec3::ZERO;
-                    p[d] = plane;
-                    p[u] = cu;
-                    p[v] = cv;
-                    place(limb(part, p))
-                };
-                let (p00, p10, p11, p01) = (
-                    corner(lo[u], lo[v]),
-                    corner(hi[u], lo[v]),
-                    corner(hi[u], hi[v]),
-                    corner(lo[u], hi[v]),
-                );
-                let first = vertices.len() as u32;
-                let quad = if front { [p00, p10, p11, p01] } else { [p00, p01, p11, p10] };
-                for p in quad {
-                    vertices.push(LitVertex { position: p.to_array(), normal, color });
-                }
-                indices.extend([0, 1, 2, 0, 2, 3].map(|k| first + k));
             }
         }
     }
@@ -947,6 +982,22 @@ mod tests {
                 assert_eq!(lowest, 0.0, "{species:?} should stand on the floor");
             }
         }
+    }
+
+    #[test]
+    fn shells_cache_by_state_not_pose() {
+        let battle = ods_sim::scenario::skirmish(7);
+        let u = battle
+            .units
+            .iter()
+            .find(|u| u.side == ods_sim::units::Side::Order)
+            .unwrap();
+        assert_eq!(shell_key(u), shell_key(u), "same state, same key");
+        let mut hurt = u.clone();
+        hurt.health = (hurt.health / 2).max(1);
+        assert_ne!(shell_key(u), shell_key(&hurt), "real damage re-carves");
+        let shell = carve_unit(u);
+        assert!(shell.faces.len() > 400, "{} faces", shell.faces.len());
     }
 
     #[test]

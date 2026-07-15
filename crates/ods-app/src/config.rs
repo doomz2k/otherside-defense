@@ -13,6 +13,10 @@ fn yes() -> bool {
     true
 }
 
+fn default_shadow_bias() -> f32 {
+    0.0022
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Config {
     /// Config schema generation, for one-time migrations of old files.
@@ -53,6 +57,14 @@ pub struct Config {
     /// Borderless fullscreen at the desktop's own resolution (F11 toggles).
     #[serde(default = "yes")]
     pub fullscreen: bool,
+    /// Frame-time readout in the corner (the tuner's dial).
+    #[serde(default)]
+    pub show_fps: bool,
+    /// Cast-shadow strength (0 none .. 1 full) and depth bias.
+    #[serde(default = "one")]
+    pub shadow_strength: f32,
+    #[serde(default = "default_shadow_bias")]
+    pub shadow_bias: f32,
     /// Only the bindings that differ from default: (action label, key name).
     #[serde(default)]
     pub binds: Vec<(String, String)>,
@@ -78,6 +90,9 @@ impl Default for Config {
             colorblind: false,
             reduce_flash: false,
             fullscreen: true,
+            show_fps: false,
+            shadow_strength: 1.0,
+            shadow_bias: 0.0022,
             binds: Vec::new(),
         }
     }

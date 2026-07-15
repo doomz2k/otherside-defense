@@ -255,6 +255,10 @@ pub struct Core {
     pub reduce_flash: bool,
     /// Borderless fullscreen (F11 toggles it live).
     pub fullscreen: bool,
+    /// Frame-time readout in the corner.
+    pub show_fps: bool,
+    /// Rolling frame time, milliseconds.
+    pub frame_ms: f32,
     /// Gold flash on the sidebar clock when the world auto-pauses.
     pub pause_flash: f32,
     pub selected_region: Option<Region>,
@@ -328,6 +332,8 @@ impl Core {
         let mut base_camera = OrbitCamera::isometric(basescape::scene_center());
         base_camera.distance = 420.0;
 
+        renderer.shadow_strength = cfg.shadow_strength.clamp(0.0, 1.0);
+        renderer.shadow_bias = cfg.shadow_bias.clamp(0.0005, 0.01);
         Ok(Self {
             window,
             renderer,
@@ -387,6 +393,8 @@ impl Core {
             colorblind: cfg.colorblind,
             reduce_flash: cfg.reduce_flash,
             fullscreen: cfg.fullscreen,
+            show_fps: cfg.show_fps,
+            frame_ms: 16.0,
             pause_flash: 0.0,
             selected_region: None,
             globe_built_for: None,
@@ -440,6 +448,9 @@ impl Core {
             colorblind: self.colorblind,
             reduce_flash: self.reduce_flash,
             fullscreen: self.fullscreen,
+            show_fps: self.show_fps,
+            shadow_strength: self.renderer.shadow_strength,
+            shadow_bias: self.renderer.shadow_bias,
             binds: self
                 .binds
                 .iter()
@@ -495,6 +506,7 @@ impl Core {
             &visible,
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
         );
         self.renderer.set_figures(&verts, &indices);
         let (min, max) = battle.tiles.bounds();
@@ -666,6 +678,8 @@ impl Core {
 
     fn redraw(&mut self) {
         let dt = self.last_frame.elapsed().as_secs_f32().min(0.1);
+        // The tuner's dial: a rolling average nothing can hide from.
+        self.frame_ms = self.frame_ms * 0.95 + dt * 1000.0 * 0.05;
         self.last_frame = Instant::now();
         self.clock = (self.clock + dt) % 3600.0;
         self.fade = (self.fade - dt * 2.2).max(0.0);
@@ -1050,6 +1064,22 @@ impl Core {
             Screen::Battle => self.battle_ui(ctx),
         }
         // The options window follows the commander onto any screen.
+        if self.show_fps {
+            egui::Area::new(egui::Id::new("fps-dial"))
+                .anchor(egui::Align2::RIGHT_TOP, [-6.0, 28.0])
+                .show(ctx, |ui| {
+                    let fps = 1000.0 / self.frame_ms.max(0.01);
+                    ui.label(
+                        egui::RichText::new(format!("{:.1} ms · {fps:.0} fps", self.frame_ms))
+                            .small()
+                            .color(if self.frame_ms > 20.0 {
+                                egui::Color32::from_rgb(230, 120, 80)
+                            } else {
+                                egui::Color32::from_gray(150)
+                            }),
+                    );
+                });
+        }
         if self.show_options && self.screen != Screen::Battle {
             self.options_window(ctx);
         }
@@ -1244,6 +1274,34 @@ impl Core {
                     .on_hover_text("damp screen flashes and pulses (applies to the next battle)")
                     .changed()
                 {
+                    self.save_config();
+                }
+                if ui
+                    .checkbox(&mut self.show_fps, "Frame-time readout")
+                    .on_hover_text("milliseconds per frame, top right — for tuning")
+                    .changed()
+                {
+                    self.save_config();
+                }
+                let mut strength = self.renderer.shadow_strength;
+                if ui
+                    .add(egui::Slider::new(&mut strength, 0.0..=1.0).text("Shadow strength"))
+                    .on_hover_text("how hard cast shadows bite; 0 turns them off")
+                    .changed()
+                {
+                    self.renderer.shadow_strength = strength;
+                    self.save_config();
+                }
+                let mut bias = self.renderer.shadow_bias * 1000.0;
+                if ui
+                    .add(egui::Slider::new(&mut bias, 0.5..=10.0).text("Shadow bias ‰"))
+                    .on_hover_text(
+                        "raise if surfaces freckle with shadow acne; lower if \
+                         shadows float off their feet",
+                    )
+                    .changed()
+                {
+                    self.renderer.shadow_bias = bias / 1000.0;
                     self.save_config();
                 }
                 let mut fs = self.fullscreen;

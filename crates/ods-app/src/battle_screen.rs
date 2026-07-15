@@ -74,6 +74,9 @@ pub struct BattleScreen {
     playback_wait: f32,
     /// Tile-by-tile walking routes the figures still owe the eye.
     waypoints: HashMap<u32, VecDeque<IVec3>>,
+    /// Cached figure carves, keyed by what each figure IS; invalidated
+    /// by the shell key, so standing figures cost transforms, not carves.
+    shells: HashMap<u32, (u64, figures::FigureShell)>,
     /// Spent brass, dropped magazines, fallen quarrels: tiny persistent
     /// marks that make a long firefight look fought.
     litter: Vec<(Vec3, [f32; 4])>,
@@ -184,6 +187,7 @@ impl BattleScreen {
             playback: VecDeque::new(),
             playback_wait: 0.0,
             waypoints: HashMap::new(),
+            shells: HashMap::new(),
             litter: Vec::new(),
             muzzle: (Vec3::ZERO, 0.0),
             last_shot: None,
@@ -884,7 +888,9 @@ impl BattleScreen {
             }
         }
 
-        if let Some(winner) = self.battle.winner {
+        if let Some(winner) = self.battle.winner
+            && self.playback.is_empty()
+        {
             egui::Window::new("Battle over")
                 .collapsible(false)
                 .resizable(false)
@@ -1820,7 +1826,7 @@ impl BattleScreen {
         }
         {
             let (fig_verts, fig_indices) =
-                figures::build_figures(&self.battle, &visible, &self.visual, &self.anim);
+                figures::build_figures(&self.battle, &visible, &self.visual, &self.anim, &mut self.shells);
             renderer.set_figures(&fig_verts, &fig_indices);
         }
 
@@ -2357,6 +2363,9 @@ impl BattleScreen {
         use winit::keyboard::KeyCode as K;
         let sel = self.selected;
         let armed = self.grenade_armed;
+        // While the field is telling you what happened, the deck sleeps —
+        // same rule the keys already follow.
+        let quiet = self.playback.is_empty() && !self.demon_turn_pending;
         let (ok, charges, dressings, flares, reloadable, has_sidearm, psi) = sel
             .map(|id| {
                 let u = self.battle.unit(id);
@@ -2371,6 +2380,7 @@ impl BattleScreen {
                 )
             })
             .unwrap_or((false, 0, 0, 0, false, false, false));
+        let ok = ok && quiet;
         let officer = sel.is_some_and(|id| {
             let u = self.battle.unit(id);
             ok && u.can_rally && !u.rally_spent
@@ -2474,7 +2484,7 @@ impl BattleScreen {
                 ui,
                 Icon::Steady,
                 size,
-                steady_target.is_some(),
+                quiet && steady_target.is_some(),
                 false,
                 "steady the most shaken ally in reach — burns the channel's keeper",
             ) && let (Some(unit), Some(target)) = (sel, steady_target)
@@ -2485,7 +2495,7 @@ impl BattleScreen {
                 ui,
                 Icon::Dread,
                 size,
-                dread_target.is_some(),
+                quiet && dread_target.is_some(),
                 false,
                 "batter the shakiest demon's mind in reach — burns the channel's keeper",
             ) && let (Some(unit), Some(target)) = (sel, dread_target)
@@ -2522,7 +2532,9 @@ impl BattleScreen {
         ui.vertical(|ui| {
             ui.set_width(250.0);
             // The watch: what shot is banked for the demons' turn.
-            if let Some(id) = self.selected {
+            if let Some(id) = self.selected
+                && self.playback.is_empty()
+            {
                 let current = self.battle.unit(id).reserve;
                 let mut set: Option<Option<FireMode>> = None;
                 ui.horizontal(|ui| {
@@ -2879,7 +2891,7 @@ impl BattleScreen {
 
         // Body-part voxel figures for every visible unit.
         let (fig_verts, fig_indices) =
-            figures::build_figures(&self.battle, &visible, &self.visual, &self.anim);
+            figures::build_figures(&self.battle, &visible, &self.visual, &self.anim, &mut self.shells);
         renderer.set_figures(&fig_verts, &fig_indices);
 
         let mut verts: Vec<OverlayVertex> = Vec::new();
