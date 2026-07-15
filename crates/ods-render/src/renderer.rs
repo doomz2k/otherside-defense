@@ -423,11 +423,18 @@ fn fs_main(in: VsOut) -> FsOut {
     }
 
     let l = dot(n, camera.sun.xyz);
-    let day = step(0.0, l + globe_bayer(in.clip.xy) * 0.08);
-    color = color * mix(0.28, 1.0, day);
+    let dither = globe_bayer(in.clip.xy);
+    // A soft terminator, not a knife: day fades to night across a band so
+    // dusk has somewhere to live.
+    let lit = clamp((l + dither * 0.04) * 5.0 + 0.5, 0.0, 1.0);
+    color = color * mix(0.15, 1.0, lit);
+    // Amber dusk in a band along the blade; a cool moonlit wash on the night.
+    let dusk = pow(1.0 - abs(l), 6.0) * (1.0 - abs(lit - 0.5) * 2.0);
+    color += vec3<f32>(0.45, 0.20, 0.06) * dusk;
+    color += vec3<f32>(0.03, 0.05, 0.13) * (1.0 - lit);
 
     let levels = 7.0;
-    let d = globe_bayer(in.clip.xy) / levels;
+    let d = dither / levels;
     color = floor((color + d) * levels + 0.5) / levels;
     var out: FsOut;
     out.color = vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);

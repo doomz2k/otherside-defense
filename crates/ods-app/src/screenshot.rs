@@ -82,24 +82,31 @@ fn globe(renderer: &mut Renderer, seed: u64) -> Result<()> {
     renderer.set_globe(&verts, &idx);
     let (mv, mi) = crate::globe::build_markers(&c, 1.0);
     renderer.set_markers(&mv, &mi);
-    let (mut fx, mut fxi) = crate::globe::build_city_lights(&c, 40.0, 1.0);
+    let mut cam = OrbitCamera::new(Vec3::ZERO);
+    // Seed conventions for inspecting the globe headless:
+    //   < 1000 : full orbit, sun near-center (seed = centered lon)
+    //  >= 1000 : close-in zoom view (seed - 1000 = centered lon)
+    //  >= 2000 : terminator grazing the disc (seed - 2000 = centered lon)
+    let (center_lon, dist, sun_off) = if seed >= 2000 {
+        ((seed - 2000) as f32 % 360.0, 640.0, 110.0)
+    } else if seed >= 1000 {
+        ((seed - 1000) as f32 % 360.0, 380.0, 25.0)
+    } else {
+        ((seed % 360) as f32, 640.0, 25.0)
+    };
+    cam.distance = dist;
+    cam.pitch = 0.35;
+    cam.yaw = center_lon.to_radians();
+    let sun_lon = center_lon + sun_off;
+    // City lights must use the same sun as the shader, so they only kindle
+    // on the true night side.
+    let (mut fx, mut fxi) = crate::globe::build_city_lights(&c, sun_lon, 1.0);
     let (ov, oi) = crate::globe::build_geo_omens(&c, 1.0);
     let base = fx.len() as u32;
     fx.extend(ov);
     fxi.extend(oi.iter().map(|i| i + base));
     renderer.set_fx(&fx, &fxi);
-    let mut cam = OrbitCamera::new(Vec3::ZERO);
-    // Seeds >= 1000 request a close-in view (seed - 1000 = centered lon) so
-    // the zoom LOD and city detail can be checked; otherwise full orbit.
-    let (center_lon, dist) = if seed >= 1000 {
-        ((seed - 1000) as f32 % 360.0, 380.0)
-    } else {
-        ((seed % 360) as f32, 640.0)
-    };
-    cam.distance = dist;
-    cam.pitch = 0.35;
-    cam.yaw = center_lon.to_radians();
-    let sun = crate::globe::latlon_to_pos(12.0, center_lon + 25.0, 1.0);
+    let sun = crate::globe::latlon_to_pos(12.0, sun_lon, 1.0);
     let eye = cam.eye();
     let lod = ((640.0 - dist) / 320.0).clamp(0.0, 1.0);
     renderer.set_camera_flash(

@@ -210,6 +210,9 @@ pub struct Core {
     /// The big spinning world.
     geo_camera: OrbitCamera,
     geo_drag: bool,
+    /// Cartographer mode: hide every panel and frame the bare world as an
+    /// atlas plate.
+    pub cartographer: bool,
     /// The chapterhouse diorama's slow orbit.
     base_camera: OrbitCamera,
     /// The diorama needs rebuilding (construction started, base switched).
@@ -373,6 +376,7 @@ impl Core {
             audio,
             geo_camera,
             geo_drag: false,
+            cartographer: false,
             base_camera,
             base_dirty: false,
             equip_for: None,

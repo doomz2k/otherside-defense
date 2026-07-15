@@ -738,18 +738,22 @@ pub fn build_geo_omens(
 ) -> (Vec<ods_render::OverlayVertex>, Vec<u32>) {
     let mut verts = Vec::new();
     let mut indices = Vec::new();
-    let mut quad = |center: Vec3, r: f32, color: [f32; 4]| {
-        let normal = center.normalize_or(Vec3::Z);
-        let east = Vec3::Z.cross(normal).normalize_or(Vec3::X);
-        let north = normal.cross(east);
-        let first = verts.len() as u32;
-        for (du, dv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-            verts.push(ods_render::OverlayVertex {
-                position: (center + east * (r * du) + north * (r * dv)).to_array(),
-                color,
-            });
-        }
-        indices.extend([0u32, 1, 2, 0, 2, 3].map(|k| first + k));
+    // Sharp billboard for crisp sparks; soft radial blob (bright center,
+    // transparent rim) for gas — cloud, plume, aurora — so nothing reads as
+    // a flat square.
+    let quad = |verts: &mut Vec<ods_render::OverlayVertex>,
+                indices: &mut Vec<u32>,
+                center: Vec3,
+                r: f32,
+                color: [f32; 4]| {
+        overlay_quad(verts, indices, center, r, color);
+    };
+    let disc = |verts: &mut Vec<ods_render::OverlayVertex>,
+                indices: &mut Vec<u32>,
+                center: Vec3,
+                r: f32,
+                color: [f32; 4]| {
+        overlay_disc(verts, indices, center, r, color);
     };
     for rift in campaign.rifts.iter().filter(|r| r.detected) {
         // The plume: urgency is height and heat.
@@ -763,30 +767,107 @@ pub fn build_geo_omens(
                 rift.lon + wobble * 0.3,
                 GLOBE_RADIUS + 4.0 + f * (10.0 + 14.0 * urgency),
             );
-            quad(
+            disc(
+                &mut verts,
+                &mut indices,
                 center,
-                2.6 * (1.0 - f * 0.6),
+                3.4 * (1.0 - f * 0.6),
                 [0.65, 0.2, 0.9, (0.5 - f * 0.4) * (0.6 + 0.4 * urgency)],
             );
         }
     }
-    // Weather: a broken shell of drifting cloud banks, each a cluster of
-    // soft quads riding its own latitude at its own pace.
-    for k in 0..26u32 {
+    // Rift storms: each detected wound drags a dark weather system over
+    // itself, shot through with red lightning that flickers the closer the
+    // eruption comes.
+    for rift in campaign.rifts.iter().filter(|r| r.detected) {
+        let urgency = (1.0 - rift.days_left as f32 / 10.0).clamp(0.2, 1.0);
+        for k in 0..7u32 {
+            let a = time * 0.3 + k as f32 * 0.9;
+            let rr = 3.0 + (k % 3) as f32 * 3.5;
+            let center = latlon_to_pos(
+                rift.lat + a.sin() * rr,
+                rift.lon + a.cos() * rr * 1.4,
+                GLOBE_RADIUS + 15.0,
+            );
+            disc(&mut verts, &mut indices, center, 7.0, [0.18, 0.10, 0.16, 0.34 + 0.16 * urgency]);
+        }
+        // A lightning spark, on for a blink.
+        let strike = ((time * 3.0 + rift.lon).sin() * 0.5 + 0.5).powi(6);
+        if strike > 0.3 {
+            let center = latlon_to_pos(rift.lat + 1.0, rift.lon - 1.0, GLOBE_RADIUS + 16.0);
+            quad(&mut verts, &mut indices, center, 1.4, [1.0, 0.55, 0.45, strike * urgency]);
+        }
+    }
+    // Aurora: a shimmering ring of light around each cap, green shading to
+    // violet, waving on its own slow time — and reddening as the war's dread
+    // deepens (patrons fallen to the enemy).
+    let dread = (campaign.corrupted_patrons.len() as f32 * 0.18).clamp(0.0, 0.7);
+    for &pole in &[1.0f32, -1.0] {
+        for s in 0..72u32 {
+            let lon = -180.0 + s as f32 * 5.0;
+            let wave = (lon * 0.06 + time * 0.5 * pole).sin() * 3.0
+                + (lon * 0.15 - time * 0.3).sin() * 1.5;
+            let lat = pole * (66.0 + wave);
+            let shimmer = 0.5 + 0.5 * (time * 1.4 + s as f32 * 0.8).sin();
+            let alpha = 0.06 + 0.12 * shimmer;
+            let col = [0.30 + dread, 0.85 * (1.0 - dread * 0.6), 0.55];
+            let center = latlon_to_pos(lat, lon, GLOBE_RADIUS + 8.0 + shimmer * 6.0);
+            disc(&mut verts, &mut indices, center, 5.5, [col[0], col[1], col[2], alpha]);
+        }
+    }
+    // Weather: a broken shell of drifting cloud banks, each a cluster of soft
+    // blobs riding its own latitude at its own pace.
+    for k in 0..40u32 {
         let h = k.wrapping_mul(2654435761) >> 8;
-        let lat = ((h % 120) as f32) - 60.0;
-        let drift = 2.0 + (h % 5) as f32 * 0.8;
+        let lat = ((h % 130) as f32) - 65.0;
+        let drift = 1.6 + (h % 5) as f32 * 0.7;
         let lon = ((h % 360) as f32 + time * drift) % 360.0 - 180.0;
         for (j, (dlat, dlon, r)) in
-            [(0.0f32, 0.0f32, 7.0f32), (2.5, 4.0, 5.0), (-2.0, 5.5, 4.2)].iter().enumerate()
+            [(0.0f32, 0.0f32, 7.5f32), (2.4, 4.0, 5.5), (-2.0, 5.6, 4.6), (3.4, -2.6, 4.0)]
+                .iter()
+                .enumerate()
         {
-            let center = latlon_to_pos(lat + dlat, lon + dlon, GLOBE_RADIUS + 14.0);
-            quad(
+            let center = latlon_to_pos(lat + dlat, lon + dlon, GLOBE_RADIUS + 13.0);
+            disc(
+                &mut verts,
+                &mut indices,
                 center,
                 *r,
-                [0.9, 0.92, 0.95, 0.07 + 0.02 * ((k + j as u32) % 3) as f32],
+                [0.90, 0.92, 0.96, 0.12 + 0.03 * ((k + j as u32) % 3) as f32],
             );
         }
+    }
+    // Three cyclones spinning slowly across the warm belt.
+    for c in 0..3u32 {
+        let clat = if c % 2 == 0 { 14.0 } else { -16.0 };
+        let clon = ((c * 133) as f32 + time * 2.2) % 360.0 - 180.0;
+        for arm in 0..2u32 {
+            for k in 0..10u32 {
+                let t = k as f32 / 10.0;
+                let ang = time * 1.2 + arm as f32 * std::f32::consts::PI + t * 5.0;
+                let rad = 1.0 + t * 8.0;
+                let center = latlon_to_pos(
+                    clat + ang.sin() * rad,
+                    clon + ang.cos() * rad * 1.5,
+                    GLOBE_RADIUS + 13.5,
+                );
+                disc(
+                    &mut verts,
+                    &mut indices,
+                    center,
+                    3.6 * (1.0 - t * 0.5),
+                    [0.92, 0.93, 0.97, 0.16 * (1.0 - t)],
+                );
+            }
+        }
+        // The clear eye.
+        disc(
+            &mut verts,
+            &mut indices,
+            latlon_to_pos(clat, clon, GLOBE_RADIUS + 13.0),
+            2.0,
+            [0.10, 0.14, 0.28, 0.22],
+        );
     }
     // The sky-fight: gargoyles wheel around the held zeppelin.
     if let Some(i) = &campaign.interception {
@@ -799,7 +880,7 @@ pub fn build_geo_omens(
                 lon + a.cos() * r * 0.6,
                 GLOBE_RADIUS + 9.0 + (time * 3.0 + g as f32).sin() * 1.5,
             );
-            quad(center, 1.6, [0.5, 0.15, 0.6, 0.85]);
+            quad(&mut verts, &mut indices, center, 1.6, [0.5, 0.15, 0.6, 0.85]);
         }
     }
     for (&region, &panic) in &campaign.region_panic {
@@ -815,10 +896,59 @@ pub fn build_geo_omens(
                 lon + ((k * 29) % 11) as f32 - 5.0,
                 GLOBE_RADIUS + 2.0 + ph * 9.0,
             );
-            quad(center, 1.1, [1.0, 0.45, 0.1, 0.5 * (1.0 - ph)]);
+            disc(&mut verts, &mut indices, center, 1.5, [1.0, 0.45, 0.1, 0.5 * (1.0 - ph)]);
         }
     }
     (verts, indices)
+}
+
+/// A flat camera-agnostic billboard quad tangent to the sphere at `center` —
+/// crisp edges, for sparks and hard marks.
+fn overlay_quad(
+    verts: &mut Vec<ods_render::OverlayVertex>,
+    indices: &mut Vec<u32>,
+    center: Vec3,
+    r: f32,
+    color: [f32; 4],
+) {
+    let normal = center.normalize_or(Vec3::Z);
+    let east = Vec3::Z.cross(normal).normalize_or(Vec3::X);
+    let north = normal.cross(east);
+    let first = verts.len() as u32;
+    for (du, dv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        verts.push(ods_render::OverlayVertex {
+            position: (center + east * (r * du) + north * (r * dv)).to_array(),
+            color,
+        });
+    }
+    indices.extend([0u32, 1, 2, 0, 2, 3].map(|k| first + k));
+}
+
+/// A soft radial blob: a triangle fan with the given color at full strength
+/// in the middle fading to transparent at the rim, so gas (cloud, plume,
+/// aurora, storm) reads as soft light instead of a hard square.
+fn overlay_disc(
+    verts: &mut Vec<ods_render::OverlayVertex>,
+    indices: &mut Vec<u32>,
+    center: Vec3,
+    r: f32,
+    color: [f32; 4],
+) {
+    let normal = center.normalize_or(Vec3::Z);
+    let east = Vec3::Z.cross(normal).normalize_or(Vec3::X);
+    let north = normal.cross(east);
+    let c0 = verts.len() as u32;
+    verts.push(ods_render::OverlayVertex { position: center.to_array(), color });
+    let rim = [color[0], color[1], color[2], 0.0];
+    const N: u32 = 10;
+    for i in 0..N {
+        let a = i as f32 / N as f32 * std::f32::consts::TAU;
+        let p = center + (east * a.cos() + north * a.sin()) * r;
+        verts.push(ods_render::OverlayVertex { position: p.to_array(), color: rim });
+    }
+    for i in 0..N {
+        indices.extend([c0, c0 + 1 + i, c0 + 1 + (i + 1) % N]);
+    }
 }
 
 fn push_cube(

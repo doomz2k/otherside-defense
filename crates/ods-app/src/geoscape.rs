@@ -937,12 +937,139 @@ impl Core {
                         paper_doll(ui, c, si, &mut self.log);
     }
 
+    /// Region names in the Order's display face, and — once the camera is in
+    /// close — city names in a smaller hand, projected onto the globe and
+    /// fading as they roll over the horizon. Shared by the war room and the
+    /// bare atlas plate.
+    fn paint_map_labels(camera: &ods_render::OrbitCamera, ctx: &egui::Context) {
+        let rect = ctx.content_rect();
+        let aspect = (rect.width() / rect.height()).max(0.1);
+        let vp = camera.view_proj(aspect);
+        let eye = camera.eye();
+        let project = |pos: glam::Vec3| -> Option<egui::Pos2> {
+            let clip = vp * pos.extend(1.0);
+            if clip.w <= 0.0 {
+                return None;
+            }
+            let ndc = clip.truncate() / clip.w;
+            Some(egui::pos2(
+                rect.center().x + ndc.x * rect.width() / 2.0,
+                rect.center().y - ndc.y * rect.height() / 2.0,
+            ))
+        };
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Background,
+            egui::Id::new("region-names"),
+        ));
+        for &region in ods_geo::Region::ALL.iter() {
+            let (pos, normal) = crate::globe::region_label_pos(region);
+            let facing = normal.dot((eye - pos).normalize_or(normal));
+            if facing < 0.3 {
+                continue;
+            }
+            let Some(screen) = project(pos) else { continue };
+            let a = (((facing - 0.3) / 0.7).clamp(0.0, 1.0) * 235.0) as u8;
+            let size = (15.0 * 640.0 / camera.distance.max(60.0)).clamp(11.0, 30.0);
+            let font = crate::theme::display(size);
+            painter.text(
+                screen + egui::vec2(1.2, 1.2),
+                egui::Align2::CENTER_CENTER,
+                region.name(),
+                font.clone(),
+                egui::Color32::from_rgba_unmultiplied(10, 7, 4, a),
+            );
+            painter.text(
+                screen,
+                egui::Align2::CENTER_CENTER,
+                region.name(),
+                font,
+                egui::Color32::from_rgba_unmultiplied(216, 192, 140, a),
+            );
+        }
+        if camera.distance < 500.0 {
+            let zoom = ((500.0 - camera.distance) / 180.0).clamp(0.0, 1.0);
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Background,
+                egui::Id::new("city-names"),
+            ));
+            for (name, pos, normal) in crate::globe::city_anchors() {
+                let facing = normal.dot((eye - pos).normalize_or(normal));
+                if facing < 0.35 {
+                    continue;
+                }
+                let Some(screen) = project(pos) else { continue };
+                let a = (((facing - 0.35) / 0.65).clamp(0.0, 1.0) * zoom * 220.0) as u8;
+                let font = crate::theme::reading(11.5);
+                painter.text(
+                    screen + egui::vec2(0.8, 0.8),
+                    egui::Align2::CENTER_CENTER,
+                    name,
+                    font.clone(),
+                    egui::Color32::from_rgba_unmultiplied(6, 4, 3, a),
+                );
+                painter.text(
+                    screen,
+                    egui::Align2::CENTER_CENTER,
+                    name,
+                    font,
+                    egui::Color32::from_rgba_unmultiplied(208, 196, 152, a),
+                );
+            }
+        }
+    }
+
+    /// The atlas plate: no panels, just the world under a titled cartouche —
+    /// the same view the headless `--screenshot globe` tool prints to PNG.
+    fn cartographer_view(&mut self, ctx: &egui::Context) -> GeoAction {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::C)) {
+            self.cartographer = false;
+        }
+        Self::paint_map_labels(&self.geo_camera, ctx);
+        let rect = ctx.content_rect();
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("atlas-cartouche"),
+        ));
+        let (month, day) = self.campaign.as_ref().map_or((1, 1), |c| (c.month, c.day));
+        let ink = egui::Color32::from_rgb(224, 206, 150);
+        let faint = egui::Color32::from_rgba_unmultiplied(202, 188, 150, 190);
+        painter.text(
+            egui::pos2(rect.center().x, rect.top() + 34.0),
+            egui::Align2::CENTER_CENTER,
+            "The War Atlas",
+            crate::theme::display(30.0),
+            ink,
+        );
+        painter.text(
+            egui::pos2(rect.center().x, rect.top() + 62.0),
+            egui::Align2::CENTER_CENTER,
+            format!("in the {month}th month, on the {day}th day"),
+            crate::theme::reading(15.0),
+            faint,
+        );
+        painter.text(
+            egui::pos2(rect.center().x, rect.bottom() - 20.0),
+            egui::Align2::CENTER_CENTER,
+            "Esc — close the atlas   ·   drag to turn the world   ·   scroll to draw near",
+            crate::theme::reading(12.5),
+            faint,
+        );
+        GeoAction::None
+    }
+
     pub fn geoscape_ui(&mut self, ctx: &egui::Context) -> GeoAction {
+        // Cartographer mode: strip every panel and frame the bare world.
+        if self.cartographer {
+            return self.cartographer_view(ctx);
+        }
         let mut action = GeoAction::None;
         let Some(c) = &mut self.campaign else {
             self.screen = Screen::Menu;
             return action;
         };
+        // A disjoint handle so the top-bar button can arm cartographer mode
+        // while `c` still holds the campaign borrow.
+        let enter_atlas = &mut self.cartographer;
 
         // ------------------------------------------------------ top bar
         egui::TopBottomPanel::top("geo-top").show(ctx, |ui| {
@@ -994,6 +1121,15 @@ impl Core {
                     )
                     .on_hover_text("the packs come stronger; the salvage comes double");
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button("⛶ Atlas")
+                        .on_hover_text("frame the bare world as an atlas plate (Esc to close)")
+                        .clicked()
+                    {
+                        *enter_atlas = true;
+                    }
+                });
             });
         });
 
@@ -1295,97 +1431,8 @@ impl Core {
                 });
         }
 
-        // The mapmaker's hand: region names inked onto the world itself,
-        // in the Order's own face, fading as they roll over the horizon.
-        {
-            let rect = ctx.content_rect();
-            let aspect = (rect.width() / rect.height()).max(0.1);
-            let vp = self.geo_camera.view_proj(aspect);
-            let eye = self.geo_camera.eye();
-            let painter = ctx.layer_painter(egui::LayerId::new(
-                egui::Order::Background,
-                egui::Id::new("region-names"),
-            ));
-            for &region in ods_geo::Region::ALL.iter() {
-                let (pos, normal) = crate::globe::region_label_pos(region);
-                let facing = normal.dot((eye - pos).normalize_or(normal));
-                if facing < 0.3 {
-                    continue;
-                }
-                let clip = vp * pos.extend(1.0);
-                if clip.w <= 0.0 {
-                    continue;
-                }
-                let ndc = clip.truncate() / clip.w;
-                let screen = egui::pos2(
-                    rect.center().x + ndc.x * rect.width() / 2.0,
-                    rect.center().y - ndc.y * rect.height() / 2.0,
-                );
-                let a = (((facing - 0.3) / 0.7).clamp(0.0, 1.0) * 235.0) as u8;
-                let size =
-                    (15.0 * 640.0 / self.geo_camera.distance.max(60.0)).clamp(11.0, 30.0);
-                let font = crate::theme::display(size);
-                painter.text(
-                    screen + egui::vec2(1.2, 1.2),
-                    egui::Align2::CENTER_CENTER,
-                    region.name(),
-                    font.clone(),
-                    egui::Color32::from_rgba_unmultiplied(10, 7, 4, a),
-                );
-                painter.text(
-                    screen,
-                    egui::Align2::CENTER_CENTER,
-                    region.name(),
-                    font,
-                    egui::Color32::from_rgba_unmultiplied(216, 192, 140, a),
-                );
-            }
-        }
-
-        // The cities named in a smaller hand — only once the map is drawn
-        // in close enough to read them, fading up as the camera descends.
-        if self.geo_camera.distance < 500.0 {
-            let rect = ctx.content_rect();
-            let aspect = (rect.width() / rect.height()).max(0.1);
-            let vp = self.geo_camera.view_proj(aspect);
-            let eye = self.geo_camera.eye();
-            let zoom = ((500.0 - self.geo_camera.distance) / 180.0).clamp(0.0, 1.0);
-            let painter = ctx.layer_painter(egui::LayerId::new(
-                egui::Order::Background,
-                egui::Id::new("city-names"),
-            ));
-            for (name, pos, normal) in crate::globe::city_anchors() {
-                let facing = normal.dot((eye - pos).normalize_or(normal));
-                if facing < 0.35 {
-                    continue;
-                }
-                let clip = vp * pos.extend(1.0);
-                if clip.w <= 0.0 {
-                    continue;
-                }
-                let ndc = clip.truncate() / clip.w;
-                let screen = egui::pos2(
-                    rect.center().x + ndc.x * rect.width() / 2.0,
-                    rect.center().y - ndc.y * rect.height() / 2.0,
-                );
-                let a = (((facing - 0.35) / 0.65).clamp(0.0, 1.0) * zoom * 220.0) as u8;
-                let font = crate::theme::reading(11.5);
-                painter.text(
-                    screen + egui::vec2(0.8, 0.8),
-                    egui::Align2::CENTER_CENTER,
-                    name,
-                    font.clone(),
-                    egui::Color32::from_rgba_unmultiplied(6, 4, 3, a),
-                );
-                painter.text(
-                    screen,
-                    egui::Align2::CENTER_CENTER,
-                    name,
-                    font,
-                    egui::Color32::from_rgba_unmultiplied(208, 196, 152, a),
-                );
-            }
-        }
+        // The mapmaker's hand: region and city names inked onto the world.
+        Self::paint_map_labels(&self.geo_camera, ctx);
 
         // ------------------------------------------------- operations
         // Cap the width: the ops desk must never bury the world behind it.
