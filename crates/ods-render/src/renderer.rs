@@ -679,7 +679,10 @@ pub struct UiFrame {
 }
 
 pub struct Renderer {
-    surface: wgpu::Surface<'static>,
+    /// None when rendering headless (screenshots, CI).
+    surface: Option<wgpu::Surface<'static>>,
+    /// The offscreen "swapchain" when there is no window.
+    headless_target: Option<wgpu::Texture>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -751,6 +754,42 @@ impl Renderer {
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .context("surface is not supported by the adapter")?;
         surface.configure(&device, &config);
+        Self::assemble(Some(surface), device, queue, config)
+    }
+
+    /// A renderer with no window at all: renders into an offscreen
+    /// texture readable by `read_rgba` — screenshots, CI, any machine
+    /// with a lavapipe/llvmpipe to its name.
+    pub fn headless(width: u32, height: u32) -> Result<Self> {
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("ods-device"),
+            ..Default::default()
+        }))?;
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            width: width.max(1),
+            height: height.max(1),
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+        };
+        Self::assemble(None, device, queue, config)
+    }
+
+    fn assemble(
+        surface: Option<wgpu::Surface<'static>>,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        config: wgpu::SurfaceConfiguration,
+    ) -> Result<Self> {
         let (scene_view, depth_view, glow_view, glow_blur_view) =
             create_scene_targets(&device, &config, PIXEL_SCALE);
 
@@ -1311,6 +1350,7 @@ impl Renderer {
         );
 
         Ok(Self {
+            headless_target: None,
             surface,
             device,
             queue,
@@ -1429,7 +1469,9 @@ impl Renderer {
     pub fn resize(&mut self, width: u32, height: u32) {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
-        self.surface.configure(&self.device, &self.config);
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.device, &self.config);
+        }
         self.rebuild_scene_targets();
     }
 
@@ -1505,6 +1547,58 @@ impl Renderer {
 
     /// Upload the camera. `clock` (seconds, wrapping is fine) drives the
     /// pulse of emissive materials and rides in the sun vector's w lane.
+    /// Read back the last headless frame as tightly-packed RGBA8.
+    pub fn read_rgba(&mut self) -> Result<(Vec<u8>, u32, u32)> {
+        let tex = self
+            .headless_target
+            .as_ref()
+            .context("read_rgba is only available on a headless renderer after render()")?;
+        let (w, h) = (self.config.width, self.config.height);
+        let padded = (w * 4).div_ceil(256) * 256;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: (padded * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([encoder.finish()]);
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })?;
+        rx.recv()??;
+        let data = slice.get_mapped_range();
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        for row in 0..h {
+            let start = (row * padded) as usize;
+            out.extend_from_slice(&data[start..start + (w * 4) as usize]);
+        }
+        Ok((out, w, h))
+    }
+
     pub fn set_camera(&mut self, view_proj: Mat4, sun: glam::Vec3, clock: f32) {
         self.set_camera_flash(view_proj, sun, clock, glam::Vec4::ZERO);
     }
@@ -1573,15 +1667,41 @@ impl Renderer {
     }
 
     pub fn render(&mut self, ui: Option<UiFrame>) -> Result<()> {
-        let frame = match self.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                self.surface.configure(&self.device, &self.config);
-                self.surface.get_current_texture()?
-            }
-            Err(e) => return Err(e.into()),
+        let frame = match &self.surface {
+            Some(surface) => Some(match surface.get_current_texture() {
+                Ok(f) => f,
+                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                    surface.configure(&self.device, &self.config);
+                    surface.get_current_texture()?
+                }
+                Err(e) => return Err(e.into()),
+            }),
+            None => None,
         };
-        let view = frame.texture.create_view(&Default::default());
+        if frame.is_none() && self.headless_target.is_none() {
+            self.headless_target = Some(self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("headless-target"),
+                size: wgpu::Extent3d {
+                    width: self.config.width,
+                    height: self.config.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            }));
+        }
+        let view = match &frame {
+            Some(f) => f.texture.create_view(&Default::default()),
+            None => self
+                .headless_target
+                .as_ref()
+                .expect("headless target just ensured")
+                .create_view(&Default::default()),
+        };
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
@@ -1846,7 +1966,9 @@ impl Renderer {
         }
 
         self.queue.submit([encoder.finish()]);
-        frame.present();
+        if let Some(frame) = frame {
+            frame.present();
+        }
 
         if let Some(ui) = ui {
             for id in &ui.textures_delta.free {

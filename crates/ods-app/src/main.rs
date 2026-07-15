@@ -20,6 +20,7 @@ mod globe;
 mod icons;
 mod pixfont;
 mod portraits;
+mod screenshot;
 mod theme;
 
 use std::sync::Arc;
@@ -59,6 +60,12 @@ pub fn write_autosave(c: &ods_geo::Campaign) {
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|a| a == "--screenshot") {
+        let scene = args.get(pos + 1).cloned().unwrap_or_else(|| "battle".into());
+        let out = args.get(pos + 2).cloned().unwrap_or_else(|| "shot.png".into());
+        let seed = args.get(pos + 3).and_then(|a| a.parse().ok()).unwrap_or(3);
+        return screenshot::capture(&scene, &out, seed);
+    }
     if args.iter().any(|a| a == "--headless") {
         return chronicle::headless_smoke_test();
     }
