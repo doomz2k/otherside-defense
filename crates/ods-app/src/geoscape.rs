@@ -1291,6 +1291,53 @@ impl Core {
                 });
         }
 
+        // The mapmaker's hand: region names inked onto the world itself,
+        // in the Order's own face, fading as they roll over the horizon.
+        {
+            let rect = ctx.content_rect();
+            let aspect = (rect.width() / rect.height()).max(0.1);
+            let vp = self.geo_camera.view_proj(aspect);
+            let eye = self.geo_camera.eye();
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Background,
+                egui::Id::new("region-names"),
+            ));
+            for &region in ods_geo::Region::ALL.iter() {
+                let (pos, normal) = crate::globe::region_label_pos(region);
+                let facing = normal.dot((eye - pos).normalize_or(normal));
+                if facing < 0.3 {
+                    continue;
+                }
+                let clip = vp * pos.extend(1.0);
+                if clip.w <= 0.0 {
+                    continue;
+                }
+                let ndc = clip.truncate() / clip.w;
+                let screen = egui::pos2(
+                    rect.center().x + ndc.x * rect.width() / 2.0,
+                    rect.center().y - ndc.y * rect.height() / 2.0,
+                );
+                let a = (((facing - 0.3) / 0.7).clamp(0.0, 1.0) * 235.0) as u8;
+                let size =
+                    (15.0 * 640.0 / self.geo_camera.distance.max(60.0)).clamp(11.0, 30.0);
+                let font = crate::theme::display(size);
+                painter.text(
+                    screen + egui::vec2(1.2, 1.2),
+                    egui::Align2::CENTER_CENTER,
+                    region.name(),
+                    font.clone(),
+                    egui::Color32::from_rgba_unmultiplied(10, 7, 4, a),
+                );
+                painter.text(
+                    screen,
+                    egui::Align2::CENTER_CENTER,
+                    region.name(),
+                    font,
+                    egui::Color32::from_rgba_unmultiplied(216, 192, 140, a),
+                );
+            }
+        }
+
         // ------------------------------------------------- operations
         // Cap the width: the ops desk must never bury the world behind it.
         egui::SidePanel::left("geo-ops")

@@ -1,7 +1,44 @@
 //! The Order's look: candle-lit parchment on near-black stone, gold leaf
 //! for what matters. Applied once at startup; every screen inherits it.
 
+/// The Order's own hands: a 17th-century English print face for what
+/// speaks (headings, banners, the map), and its small-caps cut for
+/// inscriptions. Body text stays plain for the sake of dense tables.
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "fell".into(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/IMFellEnglish-Regular.ttf"
+        ))),
+    );
+    fonts.font_data.insert(
+        "fell-sc".into(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/IMFellEnglishSC-Regular.ttf"
+        ))),
+    );
+    fonts
+        .families
+        .insert(egui::FontFamily::Name("fell".into()), vec!["fell".into()]);
+    fonts
+        .families
+        .insert(egui::FontFamily::Name("fell-sc".into()), vec!["fell-sc".into()]);
+    ctx.set_fonts(fonts);
+}
+
+/// The display face at a size: banners, headings, region names.
+pub fn display(size: f32) -> egui::FontId {
+    egui::FontId::new(size, egui::FontFamily::Name("fell-sc".into()))
+}
+
+/// The reading face at a size: lore, briefings, the chronicle.
+pub fn reading(size: f32) -> egui::FontId {
+    egui::FontId::new(size, egui::FontFamily::Name("fell".into()))
+}
+
 pub fn apply(ctx: &egui::Context) {
+    install_fonts(ctx);
     let mut style = (*ctx.style()).clone();
     let v = &mut style.visuals;
 
@@ -52,7 +89,10 @@ pub fn apply(ctx: &egui::Context) {
     // One typographic scale for the whole war office.
     use egui::{FontFamily, FontId, TextStyle};
     style.text_styles = [
-        (TextStyle::Heading, FontId::new(18.0, FontFamily::Proportional)),
+        (
+            TextStyle::Heading,
+            FontId::new(20.0, FontFamily::Name("fell-sc".into())),
+        ),
         (TextStyle::Body, FontId::new(13.5, FontFamily::Proportional)),
         (TextStyle::Monospace, FontId::new(12.5, FontFamily::Monospace)),
         (TextStyle::Button, FontId::new(13.5, FontFamily::Proportional)),

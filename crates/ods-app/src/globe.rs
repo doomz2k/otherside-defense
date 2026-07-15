@@ -105,6 +105,15 @@ pub fn region_at(lat: f32, lon: f32) -> Region {
 }
 
 /// Marker anchor per region (lat, lon).
+/// Where a region's name hangs on the map, and the surface normal there
+/// (for fading names over the horizon).
+pub fn region_label_pos(region: Region) -> (Vec3, Vec3) {
+    let (lat, lon) = centroid(region);
+    let p = latlon_to_pos(lat, lon, GLOBE_RADIUS + 12.0);
+    let n = p.normalize();
+    (p, n)
+}
+
 fn centroid(region: Region) -> (f32, f32) {
     match region {
         Region::NorthAmerica => (45.0, -100.0),
@@ -127,6 +136,28 @@ pub fn latlon_to_pos(lat: f32, lon: f32, radius: f32) -> Vec3 {
     )
 }
 
+/// Terrain relief above the sphere: land rises on the same noise that
+/// mottles it, and the ice caps sit proud of the sea.
+fn surface_rise(lat: f32, lon: f32) -> f32 {
+    let relief_h = {
+        let mut x = (lat * 53.7) as i32 as u32;
+        x = x
+            .wrapping_mul(2654435761)
+            .wrapping_add((lon * 39.1) as i32 as u32)
+            .wrapping_mul(1274126177);
+        x ^= x >> 15;
+        ((x.wrapping_mul(2246822519) >> 9) & 255) as f32 / 255.0
+    };
+    let mut rise = 0.0;
+    if is_land_detailed(lat, lon) {
+        rise += relief_h * relief_h * 4.5;
+    }
+    if lat.abs() > 66.0 {
+        rise += ((lat.abs() - 66.0) / 24.0).min(1.0) * 2.0;
+    }
+    rise
+}
+
 /// Build the globe sphere, optionally tinting one region's land.
 pub fn build_globe(selected: Option<Region>) -> (Vec<LitVertex>, Vec<u32>) {
     let mut vertices = Vec::with_capacity((STACKS + 1) * (SLICES + 1));
@@ -136,27 +167,7 @@ pub fn build_globe(selected: Option<Region>) -> (Vec<LitVertex>, Vec<u32>) {
         let lat = 90.0 - 180.0 * i as f32 / STACKS as f32;
         for j in 0..=SLICES {
             let lon = -180.0 + 360.0 * j as f32 / SLICES as f32;
-            // Relief: the world is carved, not painted. Land rises on the
-            // same noise that mottles it; ranges peak snow-grey; the ice
-            // caps sit proud of the sea.
-            let relief_h = {
-                let mut x = (lat * 53.7) as i32 as u32;
-                x = x
-                    .wrapping_mul(2654435761)
-                    .wrapping_add((lon * 39.1) as i32 as u32)
-                    .wrapping_mul(1274126177);
-                x ^= x >> 15;
-                ((x.wrapping_mul(2246822519) >> 9) & 255) as f32 / 255.0
-            };
-            let land_here = is_land_detailed(lat, lon);
-            let mut rise = 0.0;
-            if land_here {
-                rise += relief_h * relief_h * 4.5;
-            }
-            if lat.abs() > 66.0 {
-                rise += ((lat.abs() - 66.0) / 24.0).min(1.0) * 2.0;
-            }
-            let pos = latlon_to_pos(lat, lon, GLOBE_RADIUS + rise);
+            let pos = latlon_to_pos(lat, lon, GLOBE_RADIUS + surface_rise(lat, lon));
             let normal = pos.normalize();
 
             let land = is_land_detailed(lat, lon);
@@ -221,6 +232,46 @@ pub fn build_globe(selected: Option<Region>) -> (Vec<LitVertex>, Vec<u32>) {
                 normal: normal.to_array(),
                 color: [color[0], color[1], color[2], 1.0],
             });
+        }
+    }
+
+    // The mapmaker's ink: territory borders sampled where the answer to
+    // "whose land is this" changes, laid as small ink marks hugging the
+    // terrain — the 1994 political map, hand-ruled.
+    {
+        let ink = [0.72, 0.60, 0.34, 1.0f32];
+        let step = 1.0f32;
+        let mut lat = -78.0f32;
+        while lat < 78.0 {
+            let mut lon = -180.0f32;
+            while lon < 180.0 {
+                let here = region_at(lat, lon);
+                for (dlat, dlon) in [(0.0f32, step), (step, 0.0f32)] {
+                    if region_at(lat + dlat, lon + dlon) != here {
+                        let (mlat, mlon) = (lat + dlat / 2.0, lon + dlon / 2.0);
+                        let center = latlon_to_pos(
+                            mlat,
+                            mlon,
+                            GLOBE_RADIUS + surface_rise(mlat, mlon) + 0.9,
+                        );
+                        let normal = center.normalize();
+                        let east = Vec3::Z.cross(normal).normalize_or(Vec3::X);
+                        let north = normal.cross(east);
+                        let first = vertices.len() as u32;
+                        for (du, dv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                            let p = center + (east * du + north * dv) * 0.85;
+                            vertices.push(LitVertex {
+                                position: p.to_array(),
+                                normal: normal.to_array(),
+                                color: ink,
+                            });
+                        }
+                        indices.extend([0u32, 1, 2, 0, 2, 3].map(|k| first + k));
+                    }
+                }
+                lon += step;
+            }
+            lat += step;
         }
     }
 
