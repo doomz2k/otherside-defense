@@ -302,6 +302,13 @@ impl Core {
                                 continue;
                             }
                             let slain = c.codex_slain.contains(&species);
+                            if slain {
+                                // The plate: the specimen as the carvers
+                                // recorded it, slowly turned.
+                                let yaw = ui.input(|i| i.time) as f32 * 0.4;
+                                crate::portraits::draw_figure_iso(ui, species, None, 110.0, yaw);
+                                ui.ctx().request_repaint();
+                            }
                             ui.horizontal(|ui| {
                                 ui.strong(species.name());
                                 if slain {
@@ -788,10 +795,37 @@ impl Core {
             self.screen = Screen::Roster;
             return;
         }
+        let (species, weapon_key) = self
+            .campaign
+            .as_ref()
+            .map(|c| {
+                (
+                    ods_sim::units::Species::Soldier,
+                    c.soldiers[si].weapon_key.clone(),
+                )
+            })
+            .unwrap_or((ods_sim::units::Species::Soldier, String::new()));
         egui::CentralPanel::default().frame(desk_fill()).show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.set_max_width(420.0);
-                self.mirror_body(ui, si);
+            ui.horizontal_top(|ui| {
+                // The soldier in the glass: their carved figure, slowly
+                // turning, carrying the weapon on their sheet.
+                ui.vertical(|ui| {
+                    ui.set_width(240.0);
+                    let yaw = ui.input(|i| i.time) as f32 * 0.6;
+                    crate::portraits::draw_figure_iso(
+                        ui,
+                        species,
+                        Some(&weapon_key),
+                        220.0,
+                        yaw,
+                    );
+                    ui.ctx().request_repaint();
+                });
+                ui.separator();
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.set_max_width(420.0);
+                    self.mirror_body(ui, si);
+                });
             });
         });
     }
@@ -3268,6 +3302,7 @@ fn item_lore(name: &str) -> &'static str {
 /// The opaque desk background every full screen sits on.
 fn desk_fill() -> egui::Frame {
     egui::Frame::new()
-        .fill(egui::Color32::from_rgb(15, 12, 11))
-        .inner_margin(egui::Margin::same(16))
+        .fill(egui::Color32::from_rgb(19, 15, 12)) // old paper over stone
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(110, 88, 55)))
+        .inner_margin(egui::Margin::same(18))
 }

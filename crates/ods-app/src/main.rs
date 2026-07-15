@@ -979,6 +979,42 @@ impl Core {
                     self.build_menu_diorama();
                 }
                 self.menu_camera.yaw += dt * 0.07;
+                // Rain over the vigil: thin streaks falling through the
+                // scene, each on its own loop, and a rift-light breathing
+                // on the horizon.
+                {
+                    let mut verts = Vec::new();
+                    let mut idx = Vec::new();
+                    let center = self.menu_camera.target;
+                    for k in 0..110u32 {
+                        let h = k.wrapping_mul(2654435761) >> 8;
+                        let x = center.x + ((h % 400) as f32) - 200.0;
+                        let y = center.y + (((h >> 4) % 400) as f32) - 200.0;
+                        let speed = 140.0 + (h % 60) as f32;
+                        let ph = ((self.clock * speed / 160.0) + (h % 97) as f32 / 97.0).fract();
+                        let top = 120.0 - ph * 150.0;
+                        let a = 0.10 + ((h >> 6) % 10) as f32 * 0.012;
+                        let first = verts.len() as u32;
+                        for (dx, dz) in [(-0.25f32, 0.0f32), (0.25, 0.0), (0.25, -7.0), (-0.25, -7.0)] {
+                            verts.push(ods_render::OverlayVertex {
+                                position: [x + dx, y + dx * 0.5, top + dz],
+                                color: [0.6, 0.7, 0.85, a],
+                            });
+                        }
+                        idx.extend([0, 1, 2, 0, 2, 3].map(|j| first + j));
+                    }
+                    // The rift on the horizon breathes violet.
+                    let breathe = 0.25 + 0.12 * (self.clock * 0.8).sin();
+                    let first = verts.len() as u32;
+                    for (dx, dz) in [(-160.0f32, 0.0f32), (160.0, 0.0), (160.0, 60.0), (-160.0, 60.0)] {
+                        verts.push(ods_render::OverlayVertex {
+                            position: [center.x + dx, center.y + 230.0, 10.0 + dz],
+                            color: [0.55, 0.15, 0.8, breathe * (1.0 - dz / 90.0)],
+                        });
+                    }
+                    idx.extend([0, 1, 2, 0, 2, 3].map(|j| first + j));
+                    self.renderer.set_fx(&verts, &idx);
+                }
                 let vp = self.menu_camera.view_proj(self.renderer.aspect());
                 self.renderer.set_camera(vp, Vec3::new(-0.3, -0.4, 0.45), self.clock);
             }

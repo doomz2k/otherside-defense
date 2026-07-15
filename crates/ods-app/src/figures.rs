@@ -340,7 +340,7 @@ pub fn blueprint(species: Species) -> &'static [PartBox] {
 
 /// What the hand holds, by weapon key: every arm reads at a glance.
 /// Boxes live in soldier figure space (right hand at x ~3.5, +Y forward).
-fn weapon_model(key: &str) -> &'static [PartBox] {
+pub fn weapon_model(key: &str) -> &'static [PartBox] {
     use BodyPart::Weapon;
     if key.contains("arbalest") || key.contains("crossbow") {
         const P: &[PartBox] = &[
