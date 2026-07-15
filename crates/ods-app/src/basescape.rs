@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn a_founding_base_builds_a_well_formed_diorama() {
         let base = Chapterhouse::founding(Region::Europe);
-        let (verts, indices) = build_base_scene(&base);
+        let (verts, indices) = build_base_scene(&base, 6, true, 1.0);
         assert!(!verts.is_empty());
         assert_eq!(indices.len() % 3, 0);
         let max = *indices.iter().max().unwrap() as usize;
