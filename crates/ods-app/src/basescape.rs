@@ -16,8 +16,16 @@ pub fn scene_center() -> Vec3 {
     Vec3::new(extent / 2.0, extent / 2.0, 6.0)
 }
 
-/// Build the whole diorama for one chapterhouse.
-pub fn build_base_scene(base: &Chapterhouse) -> (Vec<LitVertex>, Vec<u32>) {
+/// Build the whole diorama for one chapterhouse — its people included:
+/// soldiers drill in rows before the gate, occultists pace the library
+/// walks, artificers stand at the workshop, and lanterns burn at every
+/// finished door. `time` moves them.
+pub fn build_base_scene(
+    base: &Chapterhouse,
+    soldiers_here: usize,
+    prisoners: bool,
+    time: f32,
+) -> (Vec<LitVertex>, Vec<u32>) {
     let mut v = Vec::new();
     let mut i = Vec::new();
     let extent = GRID as f32 * PITCH;
@@ -57,7 +65,54 @@ pub fn build_base_scene(base: &Chapterhouse) -> (Vec<LitVertex>, Vec<u32>) {
                         [0.17, 0.16, 0.15, 1.0],
                     );
                 }
-                Some((f, true)) => push_facility(&mut v, &mut i, c, f),
+                Some((f, true)) => {
+                    push_facility(&mut v, &mut i, c, f);
+                    // A lantern at every finished door: the Order keeps
+                    // its lights against the dark.
+                    box_at(
+                        &mut v,
+                        &mut i,
+                        c + Vec3::new(CELL - 2.0, -CELL + 2.0, 10.0),
+                        Vec3::new(1.0, 1.0, 1.4),
+                        [1.0, 0.8, 0.35, 1.0],
+                    );
+                    // The living house: staff at their stations.
+                    match f {
+                        Facility::Library => {
+                            for k in 0..base.occultists.min(3) {
+                                let a = time * 0.35 + k as f32 * 2.1;
+                                let at = c + Vec3::new(a.cos() * 12.0, a.sin() * 12.0, 0.0);
+                                mini_figure(&mut v, &mut i, at, a + 1.57, Kind::Occultist, time + k as f32);
+                            }
+                        }
+                        Facility::Workshop => {
+                            for k in 0..base.artificers.min(3) {
+                                let at = c + Vec3::new(-10.0 + k as f32 * 10.0, -CELL + 6.0, 0.0);
+                                mini_figure(&mut v, &mut i, at, 1.57, Kind::Artificer, time + k as f32);
+                            }
+                        }
+                        Facility::Vault if prisoners => {
+                            // Something paces behind the wards.
+                            let a = time * 0.8;
+                            mini_figure(
+                                &mut v,
+                                &mut i,
+                                c + Vec3::new(a.cos() * 5.0, a.sin() * 5.0, 0.0),
+                                a + 1.57,
+                                Kind::Captive,
+                                time,
+                            );
+                        }
+                        Facility::Kennel => {
+                            // A hound circles its pen.
+                            let a = time * 1.3;
+                            let at = c + Vec3::new(a.cos() * 9.0, a.sin() * 9.0, 0.0);
+                            box_at(&mut v, &mut i, at + Vec3::new(0.0, 0.0, 2.5), Vec3::new(2.6, 1.4, 1.6), [0.35, 0.10, 0.08, 1.0]);
+                            box_at(&mut v, &mut i, at + Vec3::new(a.cos() * 2.4, a.sin() * 2.4, 3.4), Vec3::new(1.1, 1.1, 1.1), [0.22, 0.07, 0.06, 1.0]);
+                        }
+                        _ => {}
+                    }
+                }
                 Some((_, false)) => {
                     // Scaffolding: four corner posts and a half-raised frame.
                     let wood = [0.42, 0.32, 0.18, 1.0];
@@ -88,7 +143,56 @@ pub fn build_base_scene(base: &Chapterhouse) -> (Vec<LitVertex>, Vec<u32>) {
             }
         }
     }
+    // The muster: soldiers drill in ranks on the open ground south of
+    // the founding slab, marking time.
+    for k in 0..soldiers_here.min(12) {
+        let (col, row) = (k % 4, k / 4);
+        let at = Vec3::new(
+            mid - 33.0 + col as f32 * 22.0,
+            -30.0 - row as f32 * 20.0,
+            0.0,
+        );
+        mini_figure(&mut v, &mut i, at, 1.57, Kind::Soldier, time * 1.4 + k as f32 * 0.7);
+    }
     (v, i)
+}
+
+/// Who a miniature is, which decides its colors.
+#[derive(Clone, Copy)]
+enum Kind {
+    Soldier,
+    Occultist,
+    Artificer,
+    Captive,
+}
+
+/// A tiny figure on the diorama: boots, coat, head, marking time with a
+/// slight bob. Facing turns the shoulders; phase staggers the bob.
+fn mini_figure(
+    v: &mut Vec<LitVertex>,
+    i: &mut Vec<u32>,
+    at: Vec3,
+    facing: f32,
+    kind: Kind,
+    phase: f32,
+) {
+    let (coat, trim) = match kind {
+        Kind::Soldier => ([0.25, 0.42, 0.68, 1.0], [0.15, 0.15, 0.18, 1.0]),
+        Kind::Occultist => ([0.30, 0.12, 0.40, 1.0], [0.20, 0.08, 0.28, 1.0]),
+        Kind::Artificer => ([0.45, 0.32, 0.18, 1.0], [0.25, 0.18, 0.10, 1.0]),
+        Kind::Captive => ([0.55, 0.14, 0.10, 1.0], [0.90, 0.85, 0.70, 1.0]),
+    };
+    let bob = (phase * 2.0).sin() * 0.5;
+    let base = at + Vec3::new(0.0, 0.0, bob);
+    let (fs, fc) = facing.sin_cos();
+    let side = Vec3::new(fc, fs, 0.0) * 1.4;
+    // Legs, coat, head, and a shoulder line to carry the facing.
+    box_at(v, i, base + Vec3::new(0.0, 0.0, 2.0) - side * 0.8, Vec3::new(1.0, 1.0, 2.0), trim);
+    box_at(v, i, base + Vec3::new(0.0, 0.0, 2.0) + side * 0.8, Vec3::new(1.0, 1.0, 2.0), trim);
+    box_at(v, i, base + Vec3::new(0.0, 0.0, 6.5), Vec3::new(2.4, 2.0, 2.6), coat);
+    box_at(v, i, base + Vec3::new(0.0, 0.0, 8.6) + side, Vec3::new(1.4, 1.4, 0.8), coat);
+    box_at(v, i, base + Vec3::new(0.0, 0.0, 8.6) - side, Vec3::new(1.4, 1.4, 0.8), coat);
+    box_at(v, i, base + Vec3::new(0.0, 0.0, 10.6), Vec3::new(1.3, 1.3, 1.3), [0.85, 0.72, 0.6, 1.0]);
 }
 
 /// One finished building, styled by what it is.

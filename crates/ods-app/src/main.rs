@@ -468,7 +468,10 @@ impl Core {
         self.menu_built = false;
         self.globe_built_for = None;
         let bi = self.selected_base.min(c.bases.len() - 1);
-        let (verts, indices) = basescape::build_base_scene(&c.bases[bi]);
+        let here = c.soldiers.iter().filter(|s| s.home == bi && s.is_fit()).count();
+        let captives = c.prisoners.grunts + c.prisoners.overseers > 0;
+        let (verts, indices) =
+            basescape::build_base_scene(&c.bases[bi], here, captives, self.clock);
         self.renderer.set_figures(&verts, &indices);
         self.base_dirty = false;
         self.screen = Screen::Base;
@@ -941,17 +944,29 @@ impl Core {
                     a.ambient(Some(audio::Ambient::Halls));
                     a.set_ambient_level(1.0);
                 }
-                if self.base_dirty
-                    && let Some(c) = &self.campaign
-                {
+                // The diorama lives: rebuilt every frame so the staff
+                // pace, the hounds circle, and the drill ranks mark time.
+                if let Some(c) = &self.campaign {
                     let bi = self.selected_base.min(c.bases.len() - 1);
-                    let (verts, indices) = basescape::build_base_scene(&c.bases[bi]);
+                    let here =
+                        c.soldiers.iter().filter(|s| s.home == bi && s.is_fit()).count();
+                    let captives = c.prisoners.grunts + c.prisoners.overseers > 0;
+                    let (verts, indices) =
+                        basescape::build_base_scene(&c.bases[bi], here, captives, self.clock);
                     self.renderer.set_figures(&verts, &indices);
                     self.base_dirty = false;
                 }
                 self.base_camera.yaw += dt * 0.04;
                 let vp = self.base_camera.view_proj(self.renderer.aspect());
-                self.renderer.set_camera(vp, Vec3::new(0.4, 0.5, 0.75), self.clock);
+                // The sun tracks the campaign clock over the halls too.
+                let sun = self
+                    .campaign
+                    .as_ref()
+                    .map_or(Vec3::new(0.4, 0.5, 0.75), |c| {
+                        let a = c.sun_lon().to_radians() + self.day_progress * 2.4;
+                        Vec3::new(a.cos() * 0.7, a.sin() * 0.7, 0.35 + 0.4 * a.sin().abs())
+                    });
+                self.renderer.set_camera(vp, sun, self.clock);
             }
             Screen::Menu => {
                 if let Some(a) = self.audio.as_mut() {
